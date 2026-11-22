@@ -684,7 +684,7 @@ struct ServerSettingsModal: View {
             .navigationTitle("Cài Đặt Máy Chủ")
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
-                ToolbarItem(placement: .topBarTrailing) {
+                ToolbarItem(placement: .navigationBarTrailing) {
                     Button("Đóng") {
                         dismiss()
                     }
@@ -715,5 +715,4 @@ struct ServerSettingsModal: View {
             testStatus = msg
         }
     }
-}
 }
