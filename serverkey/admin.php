@@ -185,8 +185,8 @@ if ($isLoggedIn && $_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['action
         $msg = "Đã xóa Key: {$keyCode}";
     }
 
-    // 7b. Reset toàn bộ thiết bị cho Key (cho phép đổi máy mới)
-    elseif ($act === 'reset_key_hwid') {
+    // 7b. Reset toàn bộ Key (xóa thiết bị, làm mới thời hạn, cho phép đổi máy)
+    elseif ($act === 'reset_key' || $act === 'reset_key_hwid') {
         $keyCode = strtoupper(trim($_POST['key'] ?? ''));
         $keys = getKeys();
         foreach ($keys as &$k) {
@@ -194,13 +194,37 @@ if ($isLoggedIn && $_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['action
                 $k['devices'] = [];
                 $k['used_by'] = null;
                 $k['is_used'] = false;
-                addLog('admin', 'admin', "Đặt lại toàn bộ thiết bị cho Key {$keyCode}");
-                $msg = "Đã đặt lại toàn bộ thiết bị cho Key: {$keyCode}! Khách hàng có thể kích hoạt trên máy mới.";
+                $k['used_at'] = null;
+                $k['activated_at'] = null;
+                if (!empty($k['duration']) && $k['duration'] !== 'permanent') {
+                    $k['expires_at'] = null;
+                }
+                $k['is_banned'] = false;
+                addLog('admin', 'admin', "Reset toàn bộ Key {$keyCode} về trạng thái ban đầu");
+                $msg = "Đã Reset thành công Key: {$keyCode}! Key đã trở về trạng thái mới (chưa sử dụng, xóa toàn bộ thiết bị).";
                 break;
             }
         }
         unset($k);
         saveKeys($keys);
+    }
+
+    // 7b2. Reset toàn bộ thiết bị của TẤT CẢ các Key
+    elseif ($act === 'reset_all_keys') {
+        $keys = getKeys();
+        $count = 0;
+        foreach ($keys as &$k) {
+            if (!empty($k['devices']) || !empty($k['is_used'])) {
+                $k['devices'] = [];
+                $k['used_by'] = null;
+                $k['is_used'] = false;
+                $count++;
+            }
+        }
+        unset($k);
+        saveKeys($keys);
+        addLog('admin', 'admin', "Reset toàn bộ thiết bị của {$count} key");
+        $msg = "Đã Reset thiết bị cho toàn bộ {$count} Key thành công! Khách hàng có thể đổi máy tự do.";
     }
 
     // 7c. Xóa 1 thiết bị cụ thể khỏi Key (Kick thiết bị để nhường chỗ)
@@ -514,6 +538,12 @@ foreach ($allKeys as $k) {
             <div class="content-card">
                 <div class="card-header">
                     <span class="card-title"><i class="fa-solid fa-list-check"></i> Kho Mã Key Đã Tạo & Quản Lý Thiết Bị (<?= count($allKeys) ?>)</span>
+                    <form method="POST" style="display:inline;" onsubmit="return confirm('CẢNH BÁO: Reset toàn bộ thiết bị của TẤT CẢ các key trong hệ thống? Khách hàng sẽ được phép kích hoạt lại trên máy mới.');">
+                        <input type="hidden" name="action" value="reset_all_keys">
+                        <button type="submit" class="btn btn-warning btn-sm" title="Reset tất cả thiết bị của mọi key">
+                            <i class="fa-solid fa-arrows-rotate"></i> Reset Tất Cả Thiết Bị
+                        </button>
+                    </form>
                 </div>
                 <div class="table-responsive">
                     <table>
@@ -611,15 +641,13 @@ foreach ($allKeys as $k) {
                                         <?php endif; ?>
                                     </td>
                                     <td style="font-size: 11.5px; color: var(--text-muted);"><?= htmlspecialchars($k['created_at'] ?? 'N/A') ?></td>
-                                    <td>
-                                        <?php if (!empty($k['devices'])): ?>
-                                        <form method="POST" style="display:inline; margin-right: 4px;" onsubmit="return confirm('Reset toàn bộ thiết bị của key này? Mọi thiết bị cũ sẽ bị ngắt kết nối để nhường cho máy mới.');">
-                                            <input type="hidden" name="action" value="reset_key_hwid">
+                                    <td style="white-space: nowrap;">
+                                        <form method="POST" style="display:inline-block; margin-right: 4px;" onsubmit="return confirm('Reset mã key <?= htmlspecialchars($k['key']) ?>? Toàn bộ thiết bị đã liên kết sẽ bị xóa và thời hạn sẽ được làm mới.');">
+                                            <input type="hidden" name="action" value="reset_key">
                                             <input type="hidden" name="key" value="<?= htmlspecialchars($k['key']) ?>">
-                                            <button type="submit" class="btn btn-warning btn-sm" title="Reset toàn bộ thiết bị"><i class="fa-solid fa-arrows-rotate"></i> Đổi máy</button>
+                                            <button type="submit" class="btn btn-warning btn-sm" title="Reset Key (xóa máy & làm mới)"><i class="fa-solid fa-arrows-rotate"></i> Reset</button>
                                         </form>
-                                        <?php endif; ?>
-                                        <form method="POST" style="display:inline;" onsubmit="return confirm('Xóa vĩnh viễn key này?');">
+                                        <form method="POST" style="display:inline-block;" onsubmit="return confirm('Xóa vĩnh viễn key này?');">
                                             <input type="hidden" name="action" value="delete_key">
                                             <input type="hidden" name="key" value="<?= htmlspecialchars($k['key']) ?>">
                                             <button type="submit" class="btn btn-danger btn-sm" title="Xóa key"><i class="fa-solid fa-trash"></i></button>
