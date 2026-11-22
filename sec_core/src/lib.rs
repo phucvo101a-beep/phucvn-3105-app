@@ -46,7 +46,6 @@ pub static BACKUP_SPKI_PIN: [u8; 32] = [0u8; 32];
 /// Mach-O Constructor: Executes immediately upon `dlopen` / `LC_LOAD_DYLIB` before `main()`
 #[used]
 #[no_mangle]
-#[link_section = "__DATA,__mod_init_func"]
 pub static INITIALIZER: extern "C" fn() = sec_core_constructor;
 
 extern "C" fn sec_core_constructor() {

@@ -129,8 +129,19 @@ impl LocalDevManager {
             }
         };
 
-        // 2. Check if loopback tunnel is reachable
-        if !LockdownClient::test_tunnel_reachability(&self.host, self.port) {
+        // 2. Check candidate IPs for loopback tunnel reachability
+        let candidate_ips = [self.host.as_str(), "10.7.1.1", "10.7.0.1", "127.0.0.1"];
+        let mut active_ip = None;
+        for &ip in &candidate_ips {
+            if LockdownClient::test_tunnel_reachability(ip, self.port) {
+                active_ip = Some(ip.to_string());
+                break;
+            }
+        }
+
+        if let Some(ref ip) = active_ip {
+            self.host = ip.clone();
+        } else if !LockdownClient::test_tunnel_reachability(&self.host, self.port) {
             return Ok(LocalDevStatusReport {
                 code: LocalDevStatusCode::VpnDisconnected as i32,
                 status: "CHƯA BẬT LOCALDEV VPN".to_string(),

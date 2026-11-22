@@ -359,7 +359,7 @@ public final class LocalDevBridge: ObservableObject {
                   let cStr = fnScan() else {
                 DispatchQueue.main.async {
                     self.isScanning = false
-                    self.lastError = "Lỗi kết nối installation_proxy hoặc lõi LocalDev"
+                    self.lastError = nil
                     completion([])
                 }
                 return
@@ -370,9 +370,15 @@ public final class LocalDevBridge: ObservableObject {
             var resultApps: [LocalDevApp] = []
 
             if let data = jsonStr.data(using: .utf8),
-               let resp = try? JSONDecoder().decode(ScanAppsResponse.self, from: data),
-               let apps = resp.apps {
-                resultApps = apps
+               let resp = try? JSONDecoder().decode(ScanAppsResponse.self, from: data) {
+                if let apps = resp.apps {
+                    resultApps = apps
+                }
+                if !resp.success, let err = resp.error, !self.currentStatus.isLive {
+                    DispatchQueue.main.async {
+                        self.lastError = err
+                    }
+                }
             }
 
             DispatchQueue.main.async {

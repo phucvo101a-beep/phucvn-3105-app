@@ -1,7 +1,6 @@
 import Foundation
 
 enum ExploitSupportPolicy {
-    static let verifiedIOS15Range = "15.0–15.8.x"
     static let verifiedIOS16Range = "16.0–16.7.x"
     static let verifiedIOS17Range = "17.0–17.7.x"
     static let verifiedIOS18Range = "18.0–18.7.10"
@@ -25,7 +24,7 @@ enum ExploitSupportPolicy {
 
     /// Determines if the physical kernel exploit (kexploit_opa334) can safely run on this kernel.
     /// ONLY enabled on iOS 17.0–17.7.x and iOS 18.0–18.7.1.
-    /// MUST be false for iOS 26.x, 27.x, 15.x, 16.x to prevent kernel panic / reboot!
+    /// MUST be false for iOS 26.x, 27.x, 16.x to prevent kernel panic / reboot!
     static func supportsKernelExploit(major: Int, minor: Int, patch: Int) -> Bool {
         guard minor >= 0, patch >= 0 else { return false }
 
@@ -41,7 +40,7 @@ enum ExploitSupportPolicy {
     }
 
     static func isSupported(major: Int, minor: Int, patch: Int, build: String) -> Bool {
-        if major >= 15 && major <= 27 {
+        if major >= 16 && major <= 27 {
             if major == 27 {
                 return minor <= 2
             }

@@ -30,7 +30,28 @@ impl AppScanner {
         port: u16,
         pairing: &PairingFile,
     ) -> Result<Vec<LocalDevAppInfo>, String> {
-        let mut lockdown = LockdownClient::connect(ip, port, pairing)?;
+        let candidate_ips = [ip, "10.7.1.1", "10.7.0.1", "127.0.0.1"];
+        let mut lockdown_client = None;
+        let mut last_err = String::new();
+
+        for &target_ip in &candidate_ips {
+            match LockdownClient::connect(target_ip, port, pairing) {
+                Ok(client) => {
+                    lockdown_client = Some(client);
+                    break;
+                }
+                Err(e) => last_err = e,
+            }
+        }
+
+        let mut lockdown = lockdown_client.ok_or_else(|| {
+            if last_err.is_empty() {
+                format!("Failed to connect to LocalDev on candidate IPs at port {}", port)
+            } else {
+                last_err
+            }
+        })?;
+
         let (mut sock, _service_port, _ssl) = lockdown.start_service("com.apple.mobile.installation_proxy")?;
 
         sock.set_read_timeout(Some(Duration::from_secs(12))).ok();
