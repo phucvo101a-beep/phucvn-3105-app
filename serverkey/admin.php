@@ -6,8 +6,9 @@
 require_once __DIR__ . '/config.php';
 
 $settings = getSettings();
-$msg = '';
-$error = '';
+$msg = $_SESSION['flash_msg'] ?? '';
+$error = $_SESSION['flash_error'] ?? '';
+unset($_SESSION['flash_msg'], $_SESSION['flash_error']);
 
 // Đăng xuất
 if (isset($_GET['action']) && $_GET['action'] === 'logout') {
@@ -291,6 +292,24 @@ if ($isLoggedIn && $_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['action
         addLog('admin', 'admin', "Cập nhật cấu hình hệ thống");
         $msg = "Đã lưu cài đặt hệ thống thành công!";
     }
+
+    // PRG Pattern (Post/Redirect/Get): Chuyển hướng trình duyệt sang GET để F5 không bao giờ bị tạo key lặp lại
+    if (!empty($msg)) {
+        $_SESSION['flash_msg'] = $msg;
+    }
+    if (!empty($error)) {
+        $_SESSION['flash_error'] = $error;
+    }
+
+    $tabParam = 'keysTab';
+    if (in_array($act, ['add_user', 'delete_user', 'toggle_status', 'reset_hwid', 'extend_user'])) {
+        $tabParam = 'usersTab';
+    } elseif ($act === 'update_settings') {
+        $tabParam = 'settingsTab';
+    }
+
+    header('Location: admin.php?tab=' . $tabParam);
+    exit;
 }
 
 $allUsers = getUsers();
@@ -916,9 +935,28 @@ foreach ($allKeys as $k) {
         function switchTab(tabId, btn) {
             document.querySelectorAll('.tab-pane').forEach(el => el.style.display = 'none');
             document.querySelectorAll('.tab-btn').forEach(el => el.classList.remove('active'));
-            document.getElementById(tabId).style.display = 'block';
-            btn.classList.add('active');
+            var target = document.getElementById(tabId);
+            if (target) target.style.display = 'block';
+            if (btn) btn.classList.add('active');
+            try {
+                localStorage.setItem('admin_active_tab', tabId);
+            } catch (e) {}
         }
+
+        document.addEventListener('DOMContentLoaded', function() {
+            // Chống F5 nạp lại dữ liệu form POST của trình duyệt
+            if (window.history.replaceState) {
+                window.history.replaceState(null, null, window.location.href);
+            }
+
+            var params = new URLSearchParams(window.location.search);
+            var urlTab = params.get('tab');
+            var savedTab = urlTab || localStorage.getItem('admin_active_tab') || 'keysTab';
+            var tabBtn = document.querySelector('.tab-btn[onclick*="' + savedTab + '"]');
+            if (tabBtn) {
+                switchTab(savedTab, tabBtn);
+            }
+        });
     </script>
 <?php endif; ?>
 
