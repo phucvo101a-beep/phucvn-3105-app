@@ -4,6 +4,7 @@ enum ExploitSupportPolicy {
     static let verifiedIOS17Range = "17.0–17.7.x"
     static let verifiedIOS18Range = "18.0–18.7.1"
     static let verifiedIOS26Range = "26.0–26.6.1"
+    static let verifiedIOS27Range = "27.0–27.2.x"
 
     static let verifiedIOS27Builds: [(beta: Int, publicBeta: Int?, build: String)] = [
         (1, nil, "24A5355q"),
@@ -31,6 +32,14 @@ enum ExploitSupportPolicy {
             return minor < 7 || (minor == 7 && patch <= 1)
         }
 
+        if major == 26 {
+            return minor < 6 || (minor == 6 && patch <= 1)
+        }
+
+        if major == 27 {
+            return minor <= 2
+        }
+
         return false
     }
 
@@ -44,7 +53,10 @@ enum ExploitSupportPolicy {
             return minor < 6 || (minor == 6 && patch <= 1)
         }
 
-        guard major == 27, minor == 0, patch == 0 else { return false }
-        return iOS27BetaNumber(for: build) != nil
+        if major == 27 {
+            return minor <= 2
+        }
+
+        return false
     }
 }
