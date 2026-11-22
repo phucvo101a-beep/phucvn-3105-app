@@ -1800,6 +1800,14 @@ struct ProxyModPreset: Identifiable {
             iconName: "eye.fill",
             subtitle: "Định vị Chams xuyên vật thể • Free Fire",
             detailDescription: "Làm nổi bật màu sắc mô hình nhân vật đối thủ xuyên qua các chướng ngại vật trong Free Fire."
+        ),
+        ProxyModPreset(
+            id: UUID(uuidString: "855F300E-A213-45B6-8A14-D1EFA8D0F7AE") ?? UUID(),
+            name: "DINHVI SUNG KEO",
+            fileName: "DinhVi_Sung_PhucVN_FFVN.3105",
+            iconName: "cross.circle.fill",
+            subtitle: "Định vị súng và bom keo • Free Fire",
+            detailDescription: "Hiển thị vị trí trang bị vũ khí, súng và bom keo trên bản đồ Free Fire."
         )
     ]
 
