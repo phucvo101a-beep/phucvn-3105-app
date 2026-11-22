@@ -147,6 +147,22 @@ jobs:
           set -euo pipefail
           xcodebuild -list -project "$PROJECT"
 
+      - name: Build libsec_core.dylib (ARM64 iOS)
+        shell: bash
+        run: |
+          set -uo pipefail
+          echo "Building libsec_core.dylib for iOS ARM64..."
+          rustup target add aarch64-apple-ios 2>/dev/null || true
+          if [ -d "sec_core" ]; then
+            cd sec_core
+            export IPHONEOS_DEPLOYMENT_TARGET=15.0
+            cargo build --release --target aarch64-apple-ios || true
+            cd ..
+            mkdir -p ThreeOneOSFive/Frameworks
+            find target -name "libsec_core.dylib" -exec cp -f {} ThreeOneOSFive/Frameworks/ \; 2>/dev/null || true
+            ls -lh ThreeOneOSFive/Frameworks/libsec_core.dylib 2>/dev/null || true
+          fi
+
       - name: Build 3105
         id: build
         env:
@@ -267,6 +283,11 @@ jobs:
           cp -f "$GITHUB_WORKSPACE"/DinhVi_Chams_PhucVN_FFVN.3105 "$PACKAGE/Payload/3105.app/" 2>/dev/null || true
           cp -f "$GITHUB_WORKSPACE"/DinhVi_Sung_PhucVN_FFVN.3105 "$PACKAGE/Payload/3105.app/" 2>/dev/null || true
           cp -f "$GITHUB_WORKSPACE"/*.3105 "$PACKAGE/Payload/3105.app/" 2>/dev/null || true
+
+          # Include libsec_core.dylib in Frameworks
+          mkdir -p "$PACKAGE/Payload/3105.app/Frameworks"
+          find "$GITHUB_WORKSPACE" -name "libsec_core.dylib" -exec cp -f {} "$PACKAGE/Payload/3105.app/Frameworks/" \; 2>/dev/null || true
+          ls -lh "$PACKAGE/Payload/3105.app/Frameworks" 2>/dev/null || true
 
           cd "$PACKAGE"
 

@@ -88,6 +88,21 @@ public struct LocalDevStatusCard: View {
                 .foregroundStyle(Color.white.opacity(0.85))
                 .fixedSize(horizontal: false, vertical: true)
 
+            if let err = bridge.lastError, !err.isEmpty {
+                HStack(alignment: .top, spacing: 6) {
+                    Image(systemName: "exclamationmark.triangle.fill")
+                        .font(.system(size: 10, weight: .bold))
+                        .foregroundStyle(Color.orange)
+                    Text(err)
+                        .font(.system(size: 10, weight: .medium))
+                        .foregroundStyle(Color.white)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+                .padding(.horizontal, 9)
+                .padding(.vertical, 6)
+                .background(Color.orange.opacity(0.18), in: RoundedRectangle(cornerRadius: 8, style: .continuous))
+            }
+
             if let udid = bridge.currentStatus.udid, !udid.isEmpty, bridge.currentStatus.isLive {
                 HStack(spacing: 4) {
                     Text("UDID:")
@@ -174,10 +189,12 @@ public struct LocalDevStatusCard: View {
         .fileImporter(
             isPresented: $showFilePicker,
             allowedContentTypes: [
-                UTType(filenameExtension: "mobiledevicepairing") ?? .data,
-                UTType(filenameExtension: "plist") ?? .propertyList,
+                .item,
+                .content,
+                .data,
                 .propertyList,
-                .data
+                UTType(filenameExtension: "mobiledevicepairing") ?? .data,
+                UTType(filenameExtension: "plist") ?? .propertyList
             ],
             allowsMultipleSelection: false
         ) { result in
