@@ -101,28 +101,49 @@ public struct LocalDevStatusCard: View {
                 }
             }
 
-            // Action buttons depending on state
-            HStack(spacing: 9) {
-                Button {
-                    showFilePicker = true
-                } label: {
-                    HStack(spacing: 6) {
-                        Image(systemName: bridge.currentStatus.code == 1 ? "arrow.triangle.2.circlepath.doc.on.clipboard" : "doc.badge.plus")
-                            .font(.system(size: 11, weight: .bold))
-                        Text(bridge.currentStatus.code == 1 ? "Nạp Pairing mới" : "Chọn file Pairing (.mobiledevicepairing)")
-                            .font(.system(size: 11, weight: .bold))
+            // Action buttons
+            VStack(spacing: 8) {
+                HStack(spacing: 8) {
+                    // Button: Jump directly into LocalDev App / VPN
+                    Button {
+                        bridge.openLocalDevVPNApp()
+                    } label: {
+                        HStack(spacing: 6) {
+                            Image(systemName: "bolt.horizontal.fill")
+                                .font(.system(size: 11, weight: .bold))
+                            Text("Mở app LocalDev")
+                                .font(.system(size: 11, weight: .bold))
+                        }
+                        .foregroundStyle(.black)
+                        .padding(.horizontal, 10)
+                        .padding(.vertical, 9)
+                        .frame(maxWidth: .infinity)
+                        .background(AppTheme.accent, in: RoundedRectangle(cornerRadius: 11, style: .continuous))
                     }
-                    .foregroundStyle(.white)
-                    .padding(.horizontal, 12)
-                    .padding(.vertical, 8)
-                    .frame(maxWidth: .infinity)
-                    .background(AppTheme.elevatedBackground, in: RoundedRectangle(cornerRadius: 10, style: .continuous))
-                    .overlay {
-                        RoundedRectangle(cornerRadius: 10, style: .continuous)
-                            .strokeBorder(Color.white.opacity(0.18), lineWidth: 1)
+                    .buttonStyle(AppPressableStyle())
+
+                    // Button: Import Pairing File
+                    Button {
+                        showFilePicker = true
+                    } label: {
+                        HStack(spacing: 6) {
+                            Image(systemName: bridge.currentStatus.code == 1 ? "checkmark.circle.fill" : "doc.badge.plus")
+                                .font(.system(size: 11, weight: .bold))
+                            Text(bridge.currentStatus.code == 1 ? "Đổi Pairing" : "Chọn Pairing")
+                                .font(.system(size: 11, weight: .bold))
+                        }
+                        .foregroundStyle(.white)
+                        .padding(.horizontal, 10)
+                        .padding(.vertical, 9)
+                        .frame(maxWidth: .infinity)
+                        .background(AppTheme.elevatedBackground, in: RoundedRectangle(cornerRadius: 11, style: .continuous))
+                        .overlay {
+                            RoundedRectangle(cornerRadius: 11, style: .continuous)
+                                .strokeBorder(Color.white.opacity(0.18), lineWidth: 1)
+                        }
                     }
+                    .buttonStyle(AppPressableStyle())
                 }
-                .buttonStyle(AppPressableStyle())
 
                 if bridge.currentStatus.code == 4 {
                     Button {
@@ -130,12 +151,12 @@ public struct LocalDevStatusCard: View {
                             UIApplication.shared.open(url)
                         }
                     } label: {
-                        Text("Mở Cài Đặt")
+                        Text("Cấp quyền Mạng cục bộ trong Cài Đặt")
                             .font(.system(size: 11, weight: .bold))
-                            .foregroundStyle(.black)
-                            .padding(.horizontal, 12)
-                            .padding(.vertical, 8)
-                            .background(Color.white, in: RoundedRectangle(cornerRadius: 10, style: .continuous))
+                            .foregroundStyle(.white)
+                            .frame(maxWidth: .infinity)
+                            .padding(.vertical, 7)
+                            .background(Color.red.opacity(0.3), in: RoundedRectangle(cornerRadius: 9, style: .continuous))
                     }
                     .buttonStyle(AppPressableStyle())
                 }

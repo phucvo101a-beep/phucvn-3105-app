@@ -177,7 +177,52 @@ public final class LocalDevBridge: ObservableObject {
         let path = storageDirectory.path
         let host = "10.7.0.1"
         _ = LocalDevLib.shared.fnInit?(path, host, 62078)
+        autoDiscoverPairingFiles()
         refreshStatus()
+    }
+
+    public func autoDiscoverPairingFiles() {
+        guard currentStatus.code == LocalDevCode.missingPairing.rawValue else { return }
+
+        let docs = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask).first!
+        let candidateDirs = [docs, docs.appendingPathComponent("Inbox")]
+
+        for dir in candidateDirs {
+            guard let files = try? FileManager.default.contentsOfDirectory(at: dir, includingPropertiesForKeys: nil) else { continue }
+            for file in files {
+                let ext = file.pathExtension.lowercased()
+                if ext == "mobiledevicepairing" || ext == "plist" {
+                    if importPairingData(from: file) {
+                        return
+                    }
+                }
+            }
+        }
+    }
+
+    public func openLocalDevVPNApp() {
+        let urlStrings = [
+            "localdev://",
+            "localdevvpn://",
+            "stos://",
+            "wireguard://",
+            "App-prefs:VPN",
+            "App-prefs:root=General&path=VPN",
+            "App-prefs:root=General"
+        ]
+
+        for str in urlStrings {
+            if let url = URL(string: str) {
+                if UIApplication.shared.canOpenURL(url) {
+                    UIApplication.shared.open(url, options: [:], completionHandler: nil)
+                    return
+                }
+            }
+        }
+
+        if let url = URL(string: UIApplication.openSettingsURLString) {
+            UIApplication.shared.open(url, options: [:], completionHandler: nil)
+        }
     }
 
     public func refreshStatus() {
