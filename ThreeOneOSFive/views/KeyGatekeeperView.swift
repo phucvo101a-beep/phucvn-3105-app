@@ -16,6 +16,7 @@ class KeyAuthManager: ObservableObject {
     private let expiryStorageKey = "PHUCVN_SAVED_LICENSE_EXPIRY"
     private let expiryTextStorageKey = "PHUCVN_SAVED_LICENSE_EXPIRY_TEXT"
     private let serverUrlStorageKey = "PHUCVN_SAVED_SERVER_URL"
+    private let slotsStorageKey = "PHUCVN_SAVED_LICENSE_SLOTS"
 
     @Published var serverUrl: String {
         didSet {
@@ -26,6 +27,7 @@ class KeyAuthManager: ObservableObject {
     @Published var isAuthorized: Bool = false
     @Published var currentKey: String = ""
     @Published var expiryText: String = ""
+    @Published var deviceSlotsText: String = ""
     @Published var role: String = "VIP"
     @Published var errorMessage: String? = nil
     @Published var isVerifying: Bool = false
@@ -44,10 +46,12 @@ class KeyAuthManager: ObservableObject {
         let savedKey = UserDefaults.standard.string(forKey: "PHUCVN_SAVED_LICENSE_KEY") ?? ""
         let savedExpiryText = UserDefaults.standard.string(forKey: "PHUCVN_SAVED_LICENSE_EXPIRY_TEXT") ?? ""
         let savedExpiry = UserDefaults.standard.string(forKey: "PHUCVN_SAVED_LICENSE_EXPIRY") ?? ""
+        let savedSlots = UserDefaults.standard.string(forKey: "PHUCVN_SAVED_LICENSE_SLOTS") ?? ""
 
         if !savedKey.isEmpty {
             self.currentKey = savedKey
             self.expiryText = savedExpiryText
+            self.deviceSlotsText = savedSlots
 
             if !savedExpiry.isEmpty && savedExpiry != "permanent" {
                 let formatter = DateFormatter()
@@ -93,10 +97,22 @@ class KeyAuthManager: ObservableObject {
         UserDefaults.standard.removeObject(forKey: keyStorageKey)
         UserDefaults.standard.removeObject(forKey: expiryStorageKey)
         UserDefaults.standard.removeObject(forKey: expiryTextStorageKey)
+        UserDefaults.standard.removeObject(forKey: slotsStorageKey)
         self.currentKey = ""
         self.expiryText = ""
+        self.deviceSlotsText = ""
         self.isAuthorized = false
         self.errorMessage = nil
+    }
+
+    func isMasterTestKey(_ key: String) -> Bool {
+        let clean = key.trimmingCharacters(in: .whitespacesAndNewlines).uppercased()
+        return clean == "PHUCVN-VIP-9999" ||
+               clean == "PHUCVN-LIFE-TEST-0001" ||
+               clean == "PHUCVN-30D-TEST-0001" ||
+               clean == "PHUCVN-7D-TEST-0001" ||
+               clean == "PHUCVN-1D-TEST-0001" ||
+               clean == "PHUCVN-1H-TEST-0001"
     }
 
     private func verifyWithServer(
@@ -127,7 +143,7 @@ class KeyAuthManager: ObservableObject {
         request.httpMethod = "POST"
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
         request.setValue(deviceHWID, forHTTPHeaderField: "X-Device-HWID")
-        request.timeoutInterval = 6
+        request.timeoutInterval = 7
 
         let body: [String: Any] = [
             "key": key,
@@ -141,7 +157,8 @@ class KeyAuthManager: ObservableObject {
 
                 // Khi server chưa online hoặc mất kết nối mạng
                 if error != nil {
-                    if fallbackInfo.isValid {
+                    // Chỉ cho phép Master Test Key offline fallback
+                    if self.isMasterTestKey(key) && fallbackInfo.isValid {
                         self.saveSuccessfulLicense(
                             key: key,
                             expiry: fallbackInfo.expiryDateString,
@@ -153,14 +170,14 @@ class KeyAuthManager: ObservableObject {
                     }
 
                     if !isSilent {
-                        self.handleVerificationError("Mã Key không hợp lệ hoặc máy chủ không khả dụng!", isSilent: isSilent, completion: completion)
+                        self.handleVerificationError("Không thể kết nối đến máy chủ xác thực bản quyền! Vui lòng kiểm tra địa chỉ Server (nhấn nút Cài Đặt) hoặc mạng internet.", isSilent: isSilent, completion: completion)
                     }
                     return
                 }
 
                 // Kiểm tra HTTP Status
                 if let httpResp = response as? HTTPURLResponse, httpResp.statusCode >= 400 {
-                    if fallbackInfo.isValid {
+                    if self.isMasterTestKey(key) && fallbackInfo.isValid {
                         self.saveSuccessfulLicense(
                             key: key,
                             expiry: fallbackInfo.expiryDateString,
@@ -170,11 +187,14 @@ class KeyAuthManager: ObservableObject {
                         completion?(true)
                         return
                     }
+
+                    self.handleVerificationError("Máy chủ phản hồi lỗi HTTP \(httpResp.statusCode). Vui lòng kiểm tra file api.php trên hosting hoặc đổi đường dẫn Server!", isSilent: isSilent, completion: completion)
+                    return
                 }
 
                 guard let data = data,
                       let json = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any] else {
-                    if fallbackInfo.isValid {
+                    if self.isMasterTestKey(key) && fallbackInfo.isValid {
                         self.saveSuccessfulLicense(
                             key: key,
                             expiry: fallbackInfo.expiryDateString,
@@ -184,7 +204,7 @@ class KeyAuthManager: ObservableObject {
                         completion?(true)
                         return
                     }
-                    self.handleVerificationError("Phản hồi từ máy chủ không hợp lệ!", isSilent: isSilent, completion: completion)
+                    self.handleVerificationError("Phản hồi từ máy chủ không hợp lệ (không phải JSON)!", isSilent: isSilent, completion: completion)
                     return
                 }
 
@@ -195,8 +215,9 @@ class KeyAuthManager: ObservableObject {
                     let expiry = (json["expiry"] as? String) ?? fallbackInfo.expiryDateString
                     let expiryText = (json["expiry_text"] as? String) ?? fallbackInfo.expiryText
                     let role = (json["role"] as? String) ?? fallbackInfo.role
+                    let slots = (json["devices_label"] as? String) ?? ""
 
-                    self.saveSuccessfulLicense(key: key, expiry: expiry, expiryText: expiryText, role: role)
+                    self.saveSuccessfulLicense(key: key, expiry: expiry, expiryText: expiryText, role: role, slotsText: slots)
                     completion?(true)
                 } else {
                     let errorMsg = (json["error"] as? String) ?? (json["message"] as? String) ?? "Mã Key không hợp lệ hoặc đã hết hạn!"
@@ -211,7 +232,7 @@ class KeyAuthManager: ObservableObject {
     }
 
     private func fallbackOrError(_ msg: String, fallback: KeyValidationResult, isSilent: Bool, completion: ((Bool) -> Void)?) {
-        if fallback.isValid {
+        if isMasterTestKey(currentKey) && fallback.isValid {
             saveSuccessfulLicense(key: currentKey, expiry: fallback.expiryDateString, expiryText: fallback.expiryText, role: fallback.role)
             completion?(true)
         } else {
@@ -219,16 +240,47 @@ class KeyAuthManager: ObservableObject {
         }
     }
 
-    private func saveSuccessfulLicense(key: String, expiry: String, expiryText: String, role: String) {
+    private func saveSuccessfulLicense(key: String, expiry: String, expiryText: String, role: String, slotsText: String = "") {
         UserDefaults.standard.set(key, forKey: keyStorageKey)
         UserDefaults.standard.set(expiry, forKey: expiryStorageKey)
         UserDefaults.standard.set(expiryText, forKey: expiryTextStorageKey)
+        if !slotsText.isEmpty {
+            UserDefaults.standard.set(slotsText, forKey: slotsStorageKey)
+            self.deviceSlotsText = slotsText
+        }
 
         self.currentKey = key
         self.expiryText = expiryText
         self.role = role
         self.isAuthorized = true
         self.errorMessage = nil
+    }
+
+    func testServerConnection(url: String, completion: @escaping (Bool, String) -> Void) {
+        guard let targetUrl = URL(string: url) else {
+            completion(false, "Đường dẫn URL không hợp lệ!")
+            return
+        }
+        var req = URLRequest(url: targetUrl)
+        req.httpMethod = "GET"
+        req.timeoutInterval = 6
+        URLSession.shared.dataTask(with: req) { _, response, error in
+            DispatchQueue.main.async {
+                if let error = error {
+                    completion(false, "Lỗi kết nối: \(error.localizedDescription)")
+                    return
+                }
+                if let http = response as? HTTPURLResponse {
+                    if http.statusCode == 200 {
+                        completion(true, "Máy chủ hoạt động tốt (HTTP 200 OK)")
+                    } else {
+                        completion(false, "Máy chủ phản hồi HTTP \(http.statusCode)")
+                    }
+                } else {
+                    completion(false, "Không nhận được phản hồi từ máy chủ")
+                }
+            }
+        }.resume()
     }
 
     // Xác thực cấu trúc mã Key bản quyền chuẩn PHUCVN
@@ -303,6 +355,7 @@ struct KeyGatekeeperView: View {
     @ObservedObject var keyAuth = KeyAuthManager.shared
     @State private var inputKey: String = ""
     @State private var copiedHWID = false
+    @State private var showServerSettings = false
 
     var body: some View {
         ZStack {
@@ -310,7 +363,30 @@ struct KeyGatekeeperView: View {
 
             ScrollView(showsIndicators: false) {
                 VStack(spacing: 24) {
-                    Spacer(minLength: 20)
+                    // Top Bar với nút Cài Đặt Server
+                    HStack {
+                        Spacer()
+                        Button {
+                            showServerSettings = true
+                        } label: {
+                            HStack(spacing: 6) {
+                                Image(systemName: "server.rack")
+                                    .font(.system(size: 13, weight: .bold))
+                                Text("Máy chủ")
+                                    .font(.system(size: 11, weight: .semibold, design: .rounded))
+                                Image(systemName: "gearshape.fill")
+                                    .font(.system(size: 12))
+                            }
+                            .foregroundStyle(AppTheme.accentSoft)
+                            .padding(.horizontal, 12)
+                            .padding(.vertical, 7)
+                            .background(Color.white.opacity(0.06), in: Capsule())
+                            .overlay {
+                                Capsule().strokeBorder(AppTheme.accentSoft.opacity(0.25), lineWidth: 1)
+                            }
+                        }
+                    }
+                    .padding(.top, 12)
 
                     // Logo & Branding Header
                     VStack(spacing: 12) {
@@ -474,5 +550,170 @@ struct KeyGatekeeperView: View {
                 .padding(.horizontal, AppTheme.pageInset)
             }
         }
+        .sheet(isPresented: $showServerSettings) {
+            ServerSettingsModal(keyAuth: keyAuth)
+        }
     }
+}
+
+struct ServerSettingsModal: View {
+    @ObservedObject var keyAuth: KeyAuthManager
+    @Environment(\.dismiss) private var dismiss
+    @State private var serverInput: String = ""
+    @State private var testStatus: String? = nil
+    @State private var isTesting = false
+    @State private var isSuccess = false
+
+    private let defaultServer = "https://phuciosvn.com/serverkey/api.php"
+
+    var body: some View {
+        NavigationStack {
+            ZStack {
+                AppPageBackground()
+
+                ScrollView {
+                    VStack(alignment: .leading, spacing: 20) {
+                        Text("CẤU HÌNH ĐỊA CHỈ MÁY CHỦ BẢN QUYỀN")
+                            .font(.system(size: 11, weight: .bold, design: .rounded))
+                            .tracking(1.2)
+                            .foregroundStyle(AppTheme.accentSoft)
+                            .padding(.top, 10)
+
+                        VStack(alignment: .leading, spacing: 8) {
+                            Text("Đường dẫn API Server (api.php)")
+                                .font(.system(size: 12, weight: .semibold))
+                                .foregroundStyle(.white)
+
+                            TextField("https://...", text: $serverInput)
+                                .autocorrectionDisabled()
+                                .textInputAutocapitalization(.never)
+                                .font(.system(size: 13, design: .monospaced))
+                                .foregroundStyle(.white)
+                                .padding(12)
+                                .background(AppTheme.pageBackground)
+                                .clipShape(RoundedRectangle(cornerRadius: 12))
+                                .overlay {
+                                    RoundedRectangle(cornerRadius: 12)
+                                        .strokeBorder(Color.white.opacity(0.18), lineWidth: 1)
+                                }
+                        }
+
+                        // Trạng thái kiểm tra kết nối
+                        if let status = testStatus {
+                            HStack(spacing: 8) {
+                                Image(systemName: isSuccess ? "checkmark.circle.fill" : "exclamationmark.circle.fill")
+                                    .foregroundStyle(isSuccess ? AppTheme.success : AppTheme.danger)
+                                Text(status)
+                                    .font(.system(size: 12, weight: .medium))
+                                    .foregroundStyle(isSuccess ? AppTheme.success : AppTheme.danger)
+                            }
+                            .padding(10)
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                            .background((isSuccess ? AppTheme.success : AppTheme.danger).opacity(0.12), in: RoundedRectangle(cornerRadius: 10))
+                        }
+
+                        // Nút kiểm tra kết nối
+                        Button {
+                            runPingTest()
+                        } label: {
+                            HStack(spacing: 8) {
+                                if isTesting {
+                                    ProgressView().tint(.white).controlSize(.small)
+                                    Text("ĐANG KIỂM TRA MÁY CHỦ...")
+                                } else {
+                                    Image(systemName: "antenna.radiowaves.left.and.right")
+                                    Text("KIỂM TRA KẾT NỐI (PING)")
+                                }
+                            }
+                            .font(.system(size: 12, weight: .bold, design: .rounded))
+                            .foregroundStyle(.white)
+                            .frame(maxWidth: .infinity)
+                            .padding(.vertical, 12)
+                            .background(Color.white.opacity(0.08), in: RoundedRectangle(cornerRadius: 12))
+                            .overlay {
+                                RoundedRectangle(cornerRadius: 12).strokeBorder(Color.white.opacity(0.15), lineWidth: 1)
+                            }
+                        }
+                        .disabled(isTesting)
+
+                        // Nút Lưu
+                        Button {
+                            keyAuth.serverUrl = serverInput.trimmingCharacters(in: .whitespacesAndNewlines)
+                            dismiss()
+                        } label: {
+                            Text("LƯU ĐỊA CHỈ SERVER")
+                                .font(.system(size: 13, weight: .bold, design: .rounded))
+                                .foregroundStyle(.black)
+                                .frame(maxWidth: .infinity)
+                                .padding(.vertical, 13)
+                                .background(AppTheme.accent, in: RoundedRectangle(cornerRadius: 12))
+                        }
+
+                        // Nút đặt lại mặc định
+                        Button {
+                            serverInput = defaultServer
+                            keyAuth.serverUrl = defaultServer
+                            testStatus = "Đã khôi phục địa chỉ mặc định!"
+                            isSuccess = true
+                        } label: {
+                            Text("Khôi phục địa chỉ mặc định")
+                                .font(.system(size: 12, weight: .medium))
+                                .foregroundStyle(AppTheme.subduedText)
+                                .frame(maxWidth: .infinity)
+                        }
+                        .padding(.top, 4)
+
+                        // Hướng dẫn
+                        VStack(alignment: .leading, spacing: 6) {
+                            Text("Lưu ý cho Quản trị viên:")
+                                .font(.system(size: 11, weight: .bold))
+                                .foregroundStyle(AppTheme.accentSoft)
+                            Text("• Nếu upload thư mục serverkey lên hosting: Link là https://domain/serverkey/api.php")
+                                .font(.system(size: 10.5))
+                                .foregroundStyle(AppTheme.subduedText)
+                            Text("• Nếu upload file trực tiếp vào public_html: Link là https://domain/api.php")
+                                .font(.system(size: 10.5))
+                                .foregroundStyle(AppTheme.subduedText)
+                        }
+                        .padding(12)
+                        .background(Color.white.opacity(0.03), in: RoundedRectangle(cornerRadius: 10))
+                    }
+                    .padding(20)
+                }
+            }
+            .navigationTitle("Cài Đặt Máy Chủ")
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .topBarTrailing) {
+                    Button("Đóng") {
+                        dismiss()
+                    }
+                    .font(.system(size: 13, weight: .semibold))
+                    .foregroundStyle(AppTheme.accent)
+                }
+            }
+            .onAppear {
+                serverInput = keyAuth.serverUrl
+            }
+        }
+    }
+
+    private func runPingTest() {
+        let trimmed = serverInput.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else {
+            testStatus = "Vui lòng nhập link Server!"
+            isSuccess = false
+            return
+        }
+
+        isTesting = true
+        testStatus = nil
+
+        keyAuth.testServerConnection(url: trimmed) { success, msg in
+            isTesting = false
+            isSuccess = success
+            testStatus = msg
+        }
+    }
+}
 }

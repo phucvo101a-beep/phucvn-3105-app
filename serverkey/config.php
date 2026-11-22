@@ -239,9 +239,51 @@ function generateApiKey($length = 32) {
     return bin2hex(random_bytes($length / 2));
 }
 
+// Chuẩn hóa cấu trúc Key tương thích đa thiết bị (Multi-Device Management)
+function normalizeKey(&$k) {
+    if (!isset($k['max_devices'])) {
+        $k['max_devices'] = 1;
+    } else {
+        $k['max_devices'] = intval($k['max_devices']);
+    }
+
+    if (!isset($k['devices']) || !is_array($k['devices'])) {
+        $k['devices'] = [];
+        if (!empty($k['used_by'])) {
+            $existingHwids = array_map('trim', explode(',', $k['used_by']));
+            foreach ($existingHwids as $h) {
+                if (!empty($h)) {
+                    $k['devices'][] = [
+                        'hwid' => $h,
+                        'activated_at' => $k['used_at'] ?? ($k['created_at'] ?? date('Y-m-d H:i:s')),
+                        'last_seen' => $k['used_at'] ?? date('Y-m-d H:i:s'),
+                        'ip' => 'Unknown'
+                    ];
+                }
+            }
+        }
+    }
+    return $k;
+}
+
+// Định dạng nhãn số thiết bị (VD: "1/1 máy", "2/5 máy", "3/Vô hạn")
+function formatKeyDevicesLabel($k) {
+    $devCount = isset($k['devices']) && is_array($k['devices']) ? count($k['devices']) : 0;
+    $max = isset($k['max_devices']) ? intval($k['max_devices']) : 1;
+    if ($max === 0) {
+        return "{$devCount} / Vô hạn";
+    }
+    return "{$devCount} / {$max} máy";
+}
+
 // Lấy danh sách Key bản quyền
 function getKeys() {
-    return readJsonFile(KEYS_FILE, []);
+    $keys = readJsonFile(KEYS_FILE, []);
+    foreach ($keys as &$k) {
+        normalizeKey($k);
+    }
+    unset($k);
+    return $keys;
 }
 
 // Lưu danh sách Key bản quyền

@@ -63,6 +63,12 @@ struct SettingsView: View {
                             value: KeyAuthManager.shared.role
                         )
                         SettingsRowDivider()
+                        SettingsValueRow(
+                            symbol: "iphone.gen3",
+                            title: "Thiết bị liên kết",
+                            value: KeyAuthManager.shared.deviceSlotsText.isEmpty ? "1 máy" : KeyAuthManager.shared.deviceSlotsText
+                        )
+                        SettingsRowDivider()
                         Button {
                             KeyAuthManager.shared.unlinkKey()
                         } label: {

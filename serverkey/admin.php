@@ -139,6 +139,7 @@ if ($isLoggedIn && $_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['action
         $duration = trim($_POST['key_duration'] ?? '30d');
         $role = trim($_POST['key_role'] ?? 'vip');
         $qty = max(1, min(50, intval($_POST['quantity'] ?? 1)));
+        $maxDevices = isset($_POST['max_devices']) ? intval($_POST['max_devices']) : 1;
 
         // Định dạng prefix theo thời hạn
         $prefix = 'VIP-';
@@ -155,6 +156,8 @@ if ($isLoggedIn && $_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['action
                 'key' => $keyCode,
                 'duration' => $duration, // 1h, 1d, 7d, 30d, permanent
                 'role' => $role,
+                'max_devices' => $maxDevices,
+                'devices' => [],
                 'is_used' => false,
                 'used_by' => null,
                 'used_at' => null,
@@ -163,8 +166,9 @@ if ($isLoggedIn && $_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['action
         }
         saveKeys($keys);
         $durName = formatDurationLabel($duration);
-        addLog('admin', 'admin', "Tạo {$qty} Key bản quyền mới loại {$durName}");
-        $msg = "Đã tạo thành công {$qty} Key bản quyền loại: {$durName}!";
+        $devName = ($maxDevices === 0) ? 'Không giới hạn thiết bị' : "{$maxDevices} thiết bị";
+        addLog('admin', 'admin', "Tạo {$qty} Key bản quyền mới loại {$durName} (Giới hạn: {$devName})");
+        $msg = "Đã tạo thành công {$qty} Key bản quyền loại {$durName} (Giới hạn: {$devName})!";
     }
 
     // 7. Xóa Key bản quyền
@@ -181,16 +185,63 @@ if ($isLoggedIn && $_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['action
         $msg = "Đã xóa Key: {$keyCode}";
     }
 
-    // 7b. Reset HWID cho Key (cho phép đổi máy)
+    // 7b. Reset toàn bộ thiết bị cho Key (cho phép đổi máy mới)
     elseif ($act === 'reset_key_hwid') {
         $keyCode = strtoupper(trim($_POST['key'] ?? ''));
         $keys = getKeys();
         foreach ($keys as &$k) {
             if (strtoupper($k['key']) === $keyCode) {
-                $oldHwid = $k['used_by'] ?? '';
+                $k['devices'] = [];
                 $k['used_by'] = null;
-                addLog('admin', 'admin', "Đặt lại HWID cho Key {$keyCode} (cũ: {$oldHwid})");
-                $msg = "Đã đặt lại HWID cho Key: {$keyCode}! Thiết bị mới có thể kích hoạt.";
+                $k['is_used'] = false;
+                addLog('admin', 'admin', "Đặt lại toàn bộ thiết bị cho Key {$keyCode}");
+                $msg = "Đã đặt lại toàn bộ thiết bị cho Key: {$keyCode}! Khách hàng có thể kích hoạt trên máy mới.";
+                break;
+            }
+        }
+        unset($k);
+        saveKeys($keys);
+    }
+
+    // 7c. Xóa 1 thiết bị cụ thể khỏi Key (Kick thiết bị để nhường chỗ)
+    elseif ($act === 'remove_key_device') {
+        $keyCode = strtoupper(trim($_POST['key'] ?? ''));
+        $hwidToRemove = trim($_POST['hwid'] ?? '');
+        $keys = getKeys();
+        foreach ($keys as &$k) {
+            if (strtoupper($k['key']) === $keyCode) {
+                $newDevs = [];
+                $devList = $k['devices'] ?? [];
+                foreach ($devList as $dev) {
+                    if (strcasecmp(trim($dev['hwid']), $hwidToRemove) !== 0) {
+                        $newDevs[] = $dev;
+                    }
+                }
+                $k['devices'] = $newDevs;
+                $k['used_by'] = !empty($newDevs) ? implode(', ', array_column($newDevs, 'hwid')) : null;
+                if (empty($newDevs)) {
+                    $k['is_used'] = false;
+                }
+                addLog('admin', 'admin', "Đã gỡ thiết bị {$hwidToRemove} khỏi Key {$keyCode}");
+                $msg = "Đã gỡ thiết bị ({$hwidToRemove}) khỏi Key: {$keyCode} thành công!";
+                break;
+            }
+        }
+        unset($k);
+        saveKeys($keys);
+    }
+
+    // 7d. Cập nhật số thiết bị tối đa cho Key đã có
+    elseif ($act === 'update_key_max_devices') {
+        $keyCode = strtoupper(trim($_POST['key'] ?? ''));
+        $newMax = max(0, intval($_POST['max_devices'] ?? 1));
+        $keys = getKeys();
+        foreach ($keys as &$k) {
+            if (strtoupper($k['key']) === $keyCode) {
+                $k['max_devices'] = $newMax;
+                $devName = ($newMax === 0) ? 'Không giới hạn thiết bị' : "{$newMax} thiết bị";
+                addLog('admin', 'admin', "Cập nhật giới hạn thiết bị Key {$keyCode} -> {$devName}");
+                $msg = "Đã cập nhật giới hạn thiết bị cho Key {$keyCode} thành: {$devName}!";
                 break;
             }
         }
@@ -238,6 +289,12 @@ $totalUsers = count($allUsers);
 $activeUsers = count(array_filter($allUsers, function($u) { return !empty($u['is_active']); }));
 $totalKeys = count($allKeys);
 $unusedKeys = count(array_filter($allKeys, function($k) { return empty($k['is_used']); }));
+$totalConnectedDevices = 0;
+foreach ($allKeys as $k) {
+    if (!empty($k['devices']) && is_array($k['devices'])) {
+        $totalConnectedDevices += count($k['devices']);
+    }
+}
 ?>
 <!DOCTYPE html>
 <html lang="vi">
@@ -386,17 +443,17 @@ $unusedKeys = count(array_filter($allKeys, function($k) { return empty($k['is_us
             </div>
             <div class="stat-card">
                 <div>
-                    <div class="stat-lbl">Đang Hoạt Động</div>
-                    <div class="stat-val"><?= $activeUsers ?></div>
-                </div>
-                <div class="stat-icon icon-green"><i class="fa-solid fa-user-check"></i></div>
-            </div>
-            <div class="stat-card">
-                <div>
                     <div class="stat-lbl">Kho Key Khả Dụng</div>
                     <div class="stat-val"><?= $unusedKeys ?> <span style="font-size: 13px; color: var(--text-muted); font-weight: normal;">/ <?= $totalKeys ?></span></div>
                 </div>
                 <div class="stat-icon icon-cyan"><i class="fa-solid fa-key"></i></div>
+            </div>
+            <div class="stat-card">
+                <div>
+                    <div class="stat-lbl">Thiết Bị Đang Kết Nối</div>
+                    <div class="stat-val"><?= $totalConnectedDevices ?></div>
+                </div>
+                <div class="stat-icon icon-green"><i class="fa-solid fa-mobile-screen"></i></div>
             </div>
         </div>
 
@@ -412,13 +469,13 @@ $unusedKeys = count(array_filter($allKeys, function($k) { return empty($k['is_us
         <div id="keysTab" class="tab-pane">
             <div class="content-card">
                 <div class="card-header">
-                    <span class="card-title"><i class="fa-solid fa-plus-circle"></i> Tạo Mã Key Bản Quyền (5 Loại Thời Hạn)</span>
+                    <span class="card-title"><i class="fa-solid fa-plus-circle"></i> Tạo Mã Key Bản Quyền (Tùy Chỉnh Giới Hạn Thiết Bị)</span>
                 </div>
                 <form method="POST">
                     <input type="hidden" name="action" value="create_key">
                     <div class="form-row">
                         <div>
-                            <label class="form-label">Chọn Loại Key</label>
+                            <label class="form-label">Chọn Loại Thời Hạn</label>
                             <select name="key_duration" class="form-select" style="font-weight: 700; color: #22d3ee;">
                                 <option value="1h">⚡ 1 Giờ (Dùng thử ngắn hạn)</option>
                                 <option value="1d">⭐ 1 Ngày (24 Giờ)</option>
@@ -428,14 +485,25 @@ $unusedKeys = count(array_filter($allKeys, function($k) { return empty($k['is_us
                             </select>
                         </div>
                         <div>
-                            <label class="form-label">Gói bản quyền</label>
+                            <label class="form-label">Số Thiết Bị Tối Đa (Max Devices)</label>
+                            <select name="max_devices" class="form-select" style="font-weight: 700; color: #34d399;">
+                                <option value="1" selected>📱 1 Thiết bị (Mặc định)</option>
+                                <option value="2">📱📱 2 Thiết bị (Gói 2 máy)</option>
+                                <option value="3">📱 3 Thiết bị</option>
+                                <option value="5">📱 5 Thiết bị</option>
+                                <option value="10">📱 10 Thiết bị</option>
+                                <option value="0">🌐 Không giới hạn thiết bị</option>
+                            </select>
+                        </div>
+                        <div>
+                            <label class="form-label">Gói Bản Quyền</label>
                             <select name="key_role" class="form-select">
                                 <option value="vip">VIP Member (Toàn bộ tính năng)</option>
                                 <option value="member">Thành Viên Thường</option>
                             </select>
                         </div>
                         <div>
-                            <label class="form-label">Số lượng Key cần tạo</label>
+                            <label class="form-label">Số Lượng Key Cần Tạo</label>
                             <input type="number" name="quantity" class="form-input" value="1" min="1" max="50">
                         </div>
                     </div>
@@ -445,7 +513,7 @@ $unusedKeys = count(array_filter($allKeys, function($k) { return empty($k['is_us
 
             <div class="content-card">
                 <div class="card-header">
-                    <span class="card-title"><i class="fa-solid fa-list-check"></i> Kho Mã Key Đã Tạo (<?= count($allKeys) ?>)</span>
+                    <span class="card-title"><i class="fa-solid fa-list-check"></i> Kho Mã Key Đã Tạo & Quản Lý Thiết Bị (<?= count($allKeys) ?>)</span>
                 </div>
                 <div class="table-responsive">
                     <table>
@@ -454,8 +522,8 @@ $unusedKeys = count(array_filter($allKeys, function($k) { return empty($k['is_us
                                 <th>MÃ KEY</th>
                                 <th>LOẠI THỜI HẠN</th>
                                 <th>GÓI</th>
-                                <th>TRẠNG THÁI</th>
-                                <th>NGƯỜI KÍCH HOẠT</th>
+                                <th>TRẠNG THÁI & GIỚI HẠN</th>
+                                <th>THIẾT BỊ ĐÃ KÍCH HOẠT (HWID)</th>
                                 <th>NGÀY TẠO</th>
                                 <th>THAO TÁC</th>
                             </tr>
@@ -463,7 +531,10 @@ $unusedKeys = count(array_filter($allKeys, function($k) { return empty($k['is_us
                         <tbody>
                             <?php if (empty($allKeys)): ?>
                                 <tr><td colspan="7" style="text-align: center; color: var(--text-muted); padding: 30px;">Chưa có mã key nào. Hãy chọn loại key ở trên để tạo.</td></tr>
-                            <?php else: foreach (array_reverse($allKeys) as $k): ?>
+                            <?php else: foreach (array_reverse($allKeys) as $k): 
+                                $devCount = isset($k['devices']) && is_array($k['devices']) ? count($k['devices']) : 0;
+                                $maxDev = isset($k['max_devices']) ? intval($k['max_devices']) : 1;
+                            ?>
                                 <tr>
                                     <td><strong class="code-box"><?= htmlspecialchars($k['key']) ?></strong></td>
                                     <td>
@@ -473,23 +544,75 @@ $unusedKeys = count(array_filter($allKeys, function($k) { return empty($k['is_us
                                     </td>
                                     <td><span class="badge badge-vip"><?= strtoupper($k['role'] ?? 'VIP') ?></span></td>
                                     <td>
-                                        <?php if (!empty($k['is_used'])): ?>
-                                            <span class="badge" style="background: rgba(148,163,184,0.15); color: #94a3b8;">Đã dùng</span>
+                                        <?php if ($maxDev === 0): ?>
+                                            <span class="badge" style="background: rgba(168,85,247,0.2); color:#c084fc;">
+                                                <i class="fa-solid fa-infinity"></i> Vô hạn (<?= $devCount ?> máy)
+                                            </span>
+                                        <?php elseif ($devCount === 0): ?>
+                                            <span class="badge badge-active"><i class="fa-solid fa-sparkles"></i> Chưa dùng (0/<?= $maxDev ?>)</span>
+                                        <?php elseif ($devCount < $maxDev): ?>
+                                            <span class="badge" style="background: rgba(6,182,212,0.15); color:#22d3ee;">
+                                                <i class="fa-solid fa-mobile-screen"></i> Đang dùng (<?= $devCount ?>/<?= $maxDev ?>)
+                                            </span>
                                         <?php else: ?>
-                                            <span class="badge badge-active"><i class="fa-solid fa-sparkles"></i> Chưa dùng</span>
+                                            <span class="badge" style="background: rgba(239,68,68,0.2); color:#f87171;">
+                                                <i class="fa-solid fa-lock"></i> Đã đủ (<?= $devCount ?>/<?= $maxDev ?>)
+                                            </span>
+                                        <?php endif; ?>
+
+                                        <!-- Điều chỉnh số thiết bị tối đa trực tiếp -->
+                                        <div style="margin-top: 8px;">
+                                            <form method="POST" style="display:inline-flex; align-items:center; gap: 4px;" title="Đổi giới hạn thiết bị cho key này">
+                                                <input type="hidden" name="action" value="update_key_max_devices">
+                                                <input type="hidden" name="key" value="<?= htmlspecialchars($k['key']) ?>">
+                                                <select name="max_devices" class="form-select" style="padding: 3px 6px; font-size: 11px; width: auto; height: 26px;">
+                                                    <option value="1" <?= $maxDev === 1 ? 'selected' : '' ?>>1 máy</option>
+                                                    <option value="2" <?= $maxDev === 2 ? 'selected' : '' ?>>2 máy</option>
+                                                    <option value="3" <?= $maxDev === 3 ? 'selected' : '' ?>>3 máy</option>
+                                                    <option value="5" <?= $maxDev === 5 ? 'selected' : '' ?>>5 máy</option>
+                                                    <option value="10" <?= $maxDev === 10 ? 'selected' : '' ?>>10 máy</option>
+                                                    <option value="0" <?= $maxDev === 0 ? 'selected' : '' ?>>Vô hạn</option>
+                                                </select>
+                                                <button type="submit" class="btn btn-primary btn-sm" style="padding: 3px 7px; font-size: 10px;" title="Lưu số máy"><i class="fa-solid fa-floppy-disk"></i></button>
+                                            </form>
+                                        </div>
+                                    </td>
+                                    <td>
+                                        <?php if (empty($k['devices'])): ?>
+                                            <span style="color:#64748b; font-size: 12px;"><i class="fa-solid fa-circle-minus"></i> Chưa có máy nào</span>
+                                        <?php else: ?>
+                                            <div style="display: flex; flex-direction: column; gap: 6px; max-width: 340px;">
+                                                <?php foreach ($k['devices'] as $d): ?>
+                                                    <div style="background: rgba(255,255,255,0.03); border: 1px solid rgba(255,255,255,0.08); border-radius: 6px; padding: 6px 8px; display: flex; justify-content: space-between; align-items: center; gap: 8px;">
+                                                        <div style="overflow: hidden;">
+                                                            <div style="font-family: monospace; font-size: 11px; color: #38bdf8; text-overflow: ellipsis; overflow: hidden; white-space: nowrap;" title="<?= htmlspecialchars($d['hwid']) ?>">
+                                                                <i class="fa-solid fa-mobile-screen-button"></i> <?= htmlspecialchars($d['hwid']) ?>
+                                                            </div>
+                                                            <div style="font-size: 10px; color: var(--text-muted); margin-top: 2px;">
+                                                                Kích hoạt: <?= htmlspecialchars($d['activated_at'] ?? 'N/A') ?>
+                                                            </div>
+                                                        </div>
+                                                        <form method="POST" style="margin: 0; flex-shrink: 0;" onsubmit="return confirm('Ngắt kết nối thiết bị này? Máy này sẽ không còn quyền dùng key.');">
+                                                            <input type="hidden" name="action" value="remove_key_device">
+                                                            <input type="hidden" name="key" value="<?= htmlspecialchars($k['key']) ?>">
+                                                            <input type="hidden" name="hwid" value="<?= htmlspecialchars($d['hwid']) ?>">
+                                                            <button type="submit" class="btn btn-danger btn-sm" style="padding: 3px 6px; font-size: 10px;" title="Xóa thiết bị này (Kick máy)"><i class="fa-solid fa-xmark"></i> Xóa</button>
+                                                        </form>
+                                                    </div>
+                                                <?php endforeach; ?>
+                                            </div>
                                         <?php endif; ?>
                                     </td>
-                                    <td><?= !empty($k['used_by']) ? ('<strong style="color:#fff;">' . htmlspecialchars($k['used_by']) . '</strong>') : '<span style="color:#64748b;">-</span>' ?></td>
                                     <td style="font-size: 11.5px; color: var(--text-muted);"><?= htmlspecialchars($k['created_at'] ?? 'N/A') ?></td>
                                     <td>
-                                        <?php if (!empty($k['used_by'])): ?>
-                                        <form method="POST" style="display:inline; margin-right: 4px;" onsubmit="return confirm('Đặt lại thiết bị HWID cho key này? Thiết bị mới sẽ có thể kích hoạt.');">
+                                        <?php if (!empty($k['devices'])): ?>
+                                        <form method="POST" style="display:inline; margin-right: 4px;" onsubmit="return confirm('Reset toàn bộ thiết bị của key này? Mọi thiết bị cũ sẽ bị ngắt kết nối để nhường cho máy mới.');">
                                             <input type="hidden" name="action" value="reset_key_hwid">
                                             <input type="hidden" name="key" value="<?= htmlspecialchars($k['key']) ?>">
-                                            <button type="submit" class="btn btn-warning btn-sm" title="Đặt lại HWID thiết bị"><i class="fa-solid fa-arrows-rotate"></i> Đổi máy</button>
+                                            <button type="submit" class="btn btn-warning btn-sm" title="Reset toàn bộ thiết bị"><i class="fa-solid fa-arrows-rotate"></i> Đổi máy</button>
                                         </form>
                                         <?php endif; ?>
-                                        <form method="POST" style="display:inline;" onsubmit="return confirm('Xóa key này?');">
+                                        <form method="POST" style="display:inline;" onsubmit="return confirm('Xóa vĩnh viễn key này?');">
                                             <input type="hidden" name="action" value="delete_key">
                                             <input type="hidden" name="key" value="<?= htmlspecialchars($k['key']) ?>">
                                             <button type="submit" class="btn btn-danger btn-sm" title="Xóa key"><i class="fa-solid fa-trash"></i></button>

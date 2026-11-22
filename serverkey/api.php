@@ -332,21 +332,25 @@ switch ($action) {
         }
 
         $keyData = $allKeys[$targetKeyIndex];
+        $maxDevices = isset($keyData['max_devices']) ? intval($keyData['max_devices']) : 1;
+        $devices = isset($keyData['devices']) && is_array($keyData['devices']) ? $keyData['devices'] : [];
 
-        // Nếu Key đã được kích hoạt trước đó
-        if (!empty($keyData['is_used'])) {
-            // Kiểm tra ràng buộc thiết bị HWID
-            if (!empty($hwid) && !empty($keyData['used_by']) && strtolower($keyData['used_by']) !== strtolower($hwid)) {
-                addLog('key_fail', $keyInput, "Xác thực thất bại: Key đã liên kết với thiết bị khác (" . $keyData['used_by'] . ")", null, $hwid);
-                echo json_encode([
-                    'success' => false,
-                    'valid'   => false,
-                    'error'   => 'Key này đã được kích hoạt trên thiết bị khác! Liên hệ Admin để đặt lại HWID.'
-                ]);
-                exit;
+        // Kiểm tra xem thiết bị này (HWID) đã từng kích hoạt Key này chưa
+        $existingDeviceIndex = -1;
+        if (!empty($hwid)) {
+            foreach ($devices as $dIdx => $dev) {
+                if (!empty($dev['hwid']) && strcasecmp(trim($dev['hwid']), $hwid) === 0) {
+                    $existingDeviceIndex = $dIdx;
+                    break;
+                }
             }
+        }
 
-            // Kiểm tra hạn sử dụng
+        // ==============================================================
+        // TRƯỜNG HỢP 1: THIẾT BỊ ĐÃ KÍCH HOẠT KEY TRƯỚC ĐÓ (Re-authentication)
+        // ==============================================================
+        if ($existingDeviceIndex !== -1) {
+            // Kiểm tra hạn sử dụng của Key
             if (!empty($keyData['expiry_date']) && $keyData['expiry_date'] !== 'permanent') {
                 $now = new DateTime();
                 $exp = new DateTime($keyData['expiry_date']);
@@ -360,33 +364,106 @@ switch ($action) {
                     exit;
                 }
             }
-        } else {
-            // Kích hoạt lần đầu tiên cho thiết bị này
-            $duration = $keyData['duration'] ?? '30d';
-            $expiry = calculateExpiryDate($duration);
-            $keyData['is_used'] = true;
-            $keyData['used_by'] = !empty($hwid) ? $hwid : ('Device-' . substr(md5(time() . rand()), 0, 8));
-            $keyData['used_at'] = date('Y-m-d H:i:s');
-            $keyData['expiry_date'] = $expiry;
 
+            // Cập nhật thông tin truy cập gần nhất của thiết bị
+            $devices[$existingDeviceIndex]['last_seen'] = date('Y-m-d H:i:s');
+            $devices[$existingDeviceIndex]['last_ip'] = $_SERVER['REMOTE_ADDR'] ?? 'Unknown';
+            $keyData['devices'] = $devices;
             $allKeys[$targetKeyIndex] = $keyData;
             saveKeys($allKeys);
 
-            addLog('key_success', $keyInput, "Kích hoạt Key thành công (" . formatDurationLabel($duration) . ")", null, $hwid);
+            $remaining = formatRemainingTime($keyData['expiry_date'] ?? 'permanent');
+            $slotLabel = ($maxDevices === 0) ? (count($devices) . '/Vô hạn') : (count($devices) . "/{$maxDevices}");
+
+            echo json_encode([
+                'success'       => true,
+                'valid'         => true,
+                'key'           => $keyInput,
+                'role'          => $keyData['role'] ?? 'vip',
+                'duration'      => $keyData['duration'] ?? 'permanent',
+                'expiry'        => $keyData['expiry_date'] ?? 'permanent',
+                'expiry_text'   => $remaining,
+                'hwid'          => $hwid,
+                'devices_count' => count($devices),
+                'max_devices'   => $maxDevices,
+                'devices_label' => $slotLabel,
+                'message'       => 'Xác thực Key bản quyền thành công!'
+            ]);
+            exit;
         }
+
+        // ==============================================================
+        // TRƯỜNG HỢP 2: THIẾT BỊ MỚI MUỐN KÍCH HOẠT KEY (New Device Activation)
+        // ==============================================================
+        // Kiểm tra giới hạn số thiết bị tối đa cho phép của Key (0 = Không giới hạn)
+        if ($maxDevices > 0 && count($devices) >= $maxDevices) {
+            $currentCount = count($devices);
+            addLog('key_fail', $keyInput, "Xác thực thất bại: Đạt giới hạn thiết bị ({$currentCount}/{$maxDevices})", null, $hwid);
+            echo json_encode([
+                'success' => false,
+                'valid'   => false,
+                'error'   => "Mã Key này đã đạt giới hạn tối đa {$maxDevices} thiết bị ({$currentCount}/{$maxDevices} máy đang dùng)! Vui lòng liên hệ Admin để đổi thiết bị hoặc mua thêm slot."
+            ]);
+            exit;
+        }
+
+        // Nếu Key đã được kích hoạt trên máy khác trước đó -> Kiểm tra xem Key còn hạn không
+        if (!empty($keyData['is_used']) && !empty($keyData['expiry_date']) && $keyData['expiry_date'] !== 'permanent') {
+            $now = new DateTime();
+            $exp = new DateTime($keyData['expiry_date']);
+            if ($now > $exp) {
+                addLog('key_fail', $keyInput, 'Xác thực thất bại: Key đã hết hạn', null, $hwid);
+                echo json_encode([
+                    'success' => false,
+                    'valid'   => false,
+                    'error'   => 'Key bản quyền đã hết hạn (' . $exp->format('d/m/Y H:i') . ')! Vui lòng gia hạn thêm.'
+                ]);
+                exit;
+            }
+        }
+
+        // Nếu đây là lần đầu tiên kích hoạt Key -> Tính thời hạn sử dụng
+        if (empty($keyData['is_used']) || empty($keyData['expiry_date'])) {
+            $duration = $keyData['duration'] ?? '30d';
+            $expiry = calculateExpiryDate($duration);
+            $keyData['is_used'] = true;
+            $keyData['used_at'] = date('Y-m-d H:i:s');
+            $keyData['expiry_date'] = $expiry;
+        }
+
+        // Đăng ký thiết bị mới vào danh sách thiết bị của Key
+        $newHwid = !empty($hwid) ? $hwid : ('Device-' . substr(md5(time() . rand()), 0, 8));
+        $devices[] = [
+            'hwid'         => $newHwid,
+            'activated_at' => date('Y-m-d H:i:s'),
+            'last_seen'    => date('Y-m-d H:i:s'),
+            'last_ip'      => $_SERVER['REMOTE_ADDR'] ?? 'Unknown'
+        ];
+
+        $keyData['devices'] = $devices;
+        $keyData['used_by'] = implode(', ', array_column($devices, 'hwid'));
+
+        $allKeys[$targetKeyIndex] = $keyData;
+        saveKeys($allKeys);
+
+        $slotLabel = ($maxDevices === 0) ? (count($devices) . '/Vô hạn') : (count($devices) . "/{$maxDevices}");
+        addLog('key_success', $keyInput, "Kích hoạt thiết bị mới thành công ({$slotLabel})", null, $newHwid);
 
         $remaining = formatRemainingTime($keyData['expiry_date'] ?? 'permanent');
 
         echo json_encode([
-            'success'     => true,
-            'valid'       => true,
-            'key'         => $keyInput,
-            'role'        => $keyData['role'] ?? 'vip',
-            'duration'    => $keyData['duration'] ?? 'permanent',
-            'expiry'      => $keyData['expiry_date'] ?? 'permanent',
-            'expiry_text' => $remaining,
-            'hwid'        => $keyData['used_by'] ?? $hwid,
-            'message'     => 'Xác thực Key bản quyền thành công!'
+            'success'       => true,
+            'valid'         => true,
+            'key'           => $keyInput,
+            'role'          => $keyData['role'] ?? 'vip',
+            'duration'      => $keyData['duration'] ?? 'permanent',
+            'expiry'        => $keyData['expiry_date'] ?? 'permanent',
+            'expiry_text'   => $remaining,
+            'hwid'          => $newHwid,
+            'devices_count' => count($devices),
+            'max_devices'   => $maxDevices,
+            'devices_label' => $slotLabel,
+            'message'       => "Kích hoạt thiết bị thành công ({$slotLabel})!"
         ]);
         exit;
 
