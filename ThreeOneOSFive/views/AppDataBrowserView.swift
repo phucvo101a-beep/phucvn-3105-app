@@ -139,6 +139,9 @@ struct AppDataBrowserView: View {
                     .padding(.top, 9)
                     .padding(.bottom, 2)
 
+                LocalDevStatusCard()
+                    .padding(.bottom, 2)
+
                 if !apps.isEmpty {
                     appSearchField
                         .padding(.bottom, 2)
@@ -188,10 +191,10 @@ struct AppDataBrowserView: View {
 
                 // Generous bottom clearance so the floating StudioTabBar never covers the button or content
                 Color.clear
-                    .frame(height: 110)
+                    .frame(height: 140)
             }
             .padding(.horizontal, AppTheme.pageInset)
-            .padding(.bottom, 20)
+            .padding(.bottom, 30)
             .frame(maxWidth: 760)
             .frame(maxWidth: .infinity)
         }
@@ -581,11 +584,29 @@ struct AppDataBrowserView: View {
                     .truncationMode(.middle)
 
                 if !app.version.isEmpty {
-                    Text("VERSION  \(app.version)")
-                        .font(.system(size: 8, weight: .bold, design: .monospaced))
-                        .tracking(0.45)
-                        .foregroundStyle(AppTheme.accentSoft.opacity(0.86))
-                        .lineLimit(1)
+                    HStack(spacing: 6) {
+                        Text("VERSION  \(app.version)")
+                            .font(.system(size: 8, weight: .bold, design: .monospaced))
+                            .tracking(0.45)
+                            .foregroundStyle(AppTheme.accentSoft.opacity(0.86))
+                            .lineLimit(1)
+
+                        if let devApp = LocalDevBridge.shared.installedApps.first(where: { $0.bundle_id == app.bundleID }) {
+                            Text(devApp.accessBadgeTitle)
+                                .font(.system(size: 7, weight: .bold))
+                                .foregroundStyle(devApp.accessBadgeColor)
+                                .padding(.horizontal, 5)
+                                .padding(.vertical, 1.5)
+                                .background(devApp.accessBadgeColor.opacity(0.12), in: Capsule())
+                        }
+                    }
+                } else if let devApp = LocalDevBridge.shared.installedApps.first(where: { $0.bundle_id == app.bundleID }) {
+                    Text(devApp.accessBadgeTitle)
+                        .font(.system(size: 7, weight: .bold))
+                        .foregroundStyle(devApp.accessBadgeColor)
+                        .padding(.horizontal, 5)
+                        .padding(.vertical, 1.5)
+                        .background(devApp.accessBadgeColor.opacity(0.12), in: Capsule())
                 }
             }
 
@@ -699,8 +720,34 @@ struct AppDataBrowserView: View {
         isLoading = true
         isResolving = true
         errorMessage = nil
-        let emptyMessage = language.text("browser.empty")
 
+        // 1. First Priority: Scan all user apps via LocalDev (installation_proxy)
+        LocalDevBridge.shared.scanApplications { localDevApps in
+            if !localDevApps.isEmpty {
+                let mappedApps = localDevApps.map { lApp in
+                    InstalledApp(
+                        bundleID: lApp.bundle_id,
+                        name: lApp.display_name,
+                        containerPath: lApp.container_path ?? "/var/mobile/Containers/Data/Application/\(lApp.bundle_id)",
+                        version: lApp.version,
+                        icon: nil
+                    )
+                }
+                DispatchQueue.main.async {
+                    guard requestID == self.reloadGeneration else { return }
+                    self.apps = mappedApps
+                    self.isLoading = false
+                    self.isResolving = false
+                }
+            } else {
+                // 2. Fallback to local sandbox scan
+                self.runLocalFallbackScan(requestID: requestID)
+            }
+        }
+    }
+
+    private func runLocalFallbackScan(requestID: Int) {
+        let emptyMessage = language.text("browser.empty")
         DispatchQueue.global(qos: .userInitiated).async {
             let bundleMetadata = ContainerStore.applicationBundleMetadataCatalog()
             let apiApps = ContainerStore.applyingBundleMetadata(

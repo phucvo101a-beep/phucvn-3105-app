@@ -8,6 +8,7 @@ pub mod crypto;
 pub mod device;
 pub mod integrity;
 pub mod ios_ui;
+pub mod localdev;
 pub mod network;
 pub mod sabotage;
 pub mod syscall_arm64;

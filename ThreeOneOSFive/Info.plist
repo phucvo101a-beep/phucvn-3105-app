@@ -34,6 +34,19 @@
                 <string>com.yangjiii.3105.patch-package</string>
             </array>
         </dict>
+        <dict>
+            <key>CFBundleTypeName</key>
+            <string>Apple Mobile Device Pairing File</string>
+            <key>CFBundleTypeRole</key>
+            <string>Viewer</string>
+            <key>LSHandlerRank</key>
+            <string>Alternate</string>
+            <key>LSItemContentTypes</key>
+            <array>
+                <string>com.apple.mobiledevicepairing</string>
+                <string>com.apple.property-list</string>
+            </array>
+        </dict>
     </array>
     <key>CFBundleURLTypes</key>
     <array>
@@ -67,6 +80,35 @@
                 <string>application/x-3105-patch</string>
             </dict>
         </dict>
+    </array>
+    <key>UTImportedTypeDeclarations</key>
+    <array>
+        <dict>
+            <key>UTTypeConformsTo</key>
+            <array>
+                <string>public.data</string>
+                <string>public.xml</string>
+            </array>
+            <key>UTTypeDescription</key>
+            <string>Apple Mobile Device Pairing File</string>
+            <key>UTTypeIdentifier</key>
+            <string>com.apple.mobiledevicepairing</string>
+            <key>UTTypeTagSpecification</key>
+            <dict>
+                <key>public.filename-extension</key>
+                <array>
+                    <string>mobiledevicepairing</string>
+                    <string>plist</string>
+                </array>
+            </dict>
+        </dict>
+    </array>
+    <key>NSLocalNetworkUsageDescription</key>
+    <string>3105 x PHUCVN cần quyền Mạng cục bộ để kết nối dịch vụ LocalDev/Lockdown trên thiết bị phục vụ việc đọc tệp và quản lý bản vá.</string>
+    <key>NSBonjourServices</key>
+    <array>
+        <string>_apple-mobdev2._tcp</string>
+        <string>_remotepairing._tcp</string>
     </array>
     <key>LSSupportsOpeningDocumentsInPlace</key>
     <true/>
