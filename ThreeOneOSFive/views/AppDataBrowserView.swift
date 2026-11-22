@@ -133,26 +133,69 @@ struct AppDataBrowserView: View {
     }
 
     private var appList: some View {
-        VStack(spacing: 0) {
-            browserHero
-                .padding(.horizontal, AppTheme.pageInset)
-                .padding(.top, 9)
-                .padding(.bottom, 13)
+        ScrollView(showsIndicators: false) {
+            LazyVStack(alignment: .leading, spacing: 13) {
+                browserHero
+                    .padding(.top, 9)
+                    .padding(.bottom, 2)
 
-            if !apps.isEmpty {
-                appSearchField
-                    .padding(.horizontal, AppTheme.pageInset)
-                    .padding(.bottom, 12)
+                if !apps.isEmpty {
+                    appSearchField
+                        .padding(.bottom, 2)
+                }
+
+                if horizontalSizeClass == .regular {
+                    FilesTabStrip(session: $tabSession)
+                        .padding(.bottom, 2)
+                }
+
+                if let workspaceURL {
+                    workspaceCard(workspaceURL)
+                }
+
+                patchesShortcutCard
+
+                systemMobileShortcutCard
+
+                appDataScannerSection
+
+                if !apps.isEmpty {
+                    HStack(alignment: .lastTextBaseline) {
+                        VStack(alignment: .leading, spacing: 3) {
+                            Text(hasAppSearchQuery ? "KẾT QUẢ TÌM KIẾM" : "ỨNG DỤNG ĐÃ PHÁT HIỆN")
+                                .font(.system(size: 10, weight: .heavy, design: .rounded))
+                                .tracking(1.25)
+                                .foregroundStyle(AppTheme.accentSoft)
+                            Text(hasAppSearchQuery
+                                 ? language.text("browser.search_count", Int64(filteredApps.count), Int64(apps.count))
+                                 : language.text("browser.apps_count", Int64(apps.count)))
+                                .font(.system(size: 11, weight: .medium))
+                                .foregroundStyle(AppTheme.subduedText)
+                        }
+                        Spacer()
+                    }
+                    .padding(.horizontal, 3)
+                    .padding(.top, 6)
+
+                    if filteredApps.isEmpty {
+                        appSearchEmptyState
+                    } else {
+                        ForEach(filteredApps) { app in
+                            appNavigationRow(app)
+                        }
+                    }
+                }
+
+                // Generous bottom clearance so the floating StudioTabBar never covers the button or content
+                Color.clear
+                    .frame(height: 110)
             }
-
-            if horizontalSizeClass == .regular {
-                FilesTabStrip(session: $tabSession)
-                    .padding(.bottom, 8)
-            }
-
-            appCollection
-                .frame(maxWidth: .infinity, maxHeight: .infinity)
+            .padding(.horizontal, AppTheme.pageInset)
+            .padding(.bottom, 20)
+            .frame(maxWidth: 760)
+            .frame(maxWidth: .infinity)
         }
+        .scrollDismissesKeyboard(.interactively)
         .background { AppPageBackground() }
         .compositingGroup()
     }
@@ -292,57 +335,6 @@ struct AppDataBrowserView: View {
         .animation(interfaceAnimation, value: isAppSearchFocused)
     }
 
-    /// ScrollView + LazyVStack replaces the nested List. Each navigation row is now
-    /// a single full-width hit target with a predictable frame on compact iPhones.
-    private var appCollection: some View {
-        ScrollView(showsIndicators: false) {
-            LazyVStack(alignment: .leading, spacing: 13) {
-                if let workspaceURL {
-                    workspaceCard(workspaceURL)
-                }
-
-                patchesShortcutCard
-
-                systemMobileShortcutCard
-
-                appDataScannerSection
-
-                if !apps.isEmpty {
-                    HStack(alignment: .lastTextBaseline) {
-                        VStack(alignment: .leading, spacing: 3) {
-                            Text(hasAppSearchQuery ? "KẾT QUẢ TÌM KIẾM" : "ỨNG DỤNG ĐÃ PHÁT HIỆN")
-                                .font(.system(size: 10, weight: .heavy, design: .rounded))
-                                .tracking(1.25)
-                                .foregroundStyle(AppTheme.accentSoft)
-                            Text(hasAppSearchQuery
-                                 ? language.text("browser.search_count", Int64(filteredApps.count), Int64(apps.count))
-                                 : language.text("browser.apps_count", Int64(apps.count)))
-                                .font(.system(size: 11, weight: .medium))
-                                .foregroundStyle(AppTheme.subduedText)
-                        }
-                        Spacer()
-                    }
-                    .padding(.horizontal, 3)
-                    .padding(.top, 6)
-
-                    if filteredApps.isEmpty {
-                        appSearchEmptyState
-                    } else {
-                        ForEach(filteredApps) { app in
-                            appNavigationRow(app)
-                        }
-                    }
-                }
-            }
-            .padding(.horizontal, AppTheme.pageInset)
-            .padding(.top, 9)
-            .padding(.bottom, 30)
-            .frame(maxWidth: 760)
-            .frame(maxWidth: .infinity)
-        }
-        .scrollDismissesKeyboard(.interactively)
-    }
-
     private var patchesShortcutCard: some View {
         let destination = FileBrowserDestination(
             containerPath: patchesURL?.path ?? "",
@@ -437,6 +429,22 @@ struct AppDataBrowserView: View {
                         .foregroundStyle(AppTheme.subduedText)
                 }
                 Spacer()
+                Button {
+                    reload()
+                } label: {
+                    if isLoading || isResolving {
+                        ProgressView().controlSize(.mini).tint(AppTheme.accent)
+                    } else {
+                        Image(systemName: "arrow.clockwise")
+                            .font(.system(size: 13, weight: .bold))
+                            .foregroundStyle(AppTheme.accent)
+                            .frame(width: 32, height: 32)
+                            .background(AppTheme.accent.opacity(0.14), in: Circle())
+                    }
+                }
+                .buttonStyle(AppPressableStyle())
+                .disabled(isLoading || isResolving)
+                .accessibilityLabel("Quét lại dữ liệu")
             }
 
             Button {

@@ -30,7 +30,7 @@ struct HomeDashboardView: View {
                 .frame(maxWidth: .infinity)
                 .padding(.horizontal, AppTheme.pageInset)
                 .padding(.top, 13)
-                .padding(.bottom, 28)
+                .padding(.bottom, 110)
             }
             .scrollDismissesKeyboard(.immediately)
             .background { AppPageBackground() }
