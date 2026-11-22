@@ -15,14 +15,9 @@ class KeyAuthManager: ObservableObject {
     private let keyStorageKey = "PHUCVN_SAVED_LICENSE_KEY"
     private let expiryStorageKey = "PHUCVN_SAVED_LICENSE_EXPIRY"
     private let expiryTextStorageKey = "PHUCVN_SAVED_LICENSE_EXPIRY_TEXT"
-    private let serverUrlStorageKey = "PHUCVN_SAVED_SERVER_URL"
     private let slotsStorageKey = "PHUCVN_SAVED_LICENSE_SLOTS"
 
-    @Published var serverUrl: String {
-        didSet {
-            UserDefaults.standard.set(serverUrl, forKey: serverUrlStorageKey)
-        }
-    }
+    private let serverUrl = "https://20-10.store/api.php"
 
     @Published var isAuthorized: Bool = false
     @Published var currentKey: String = ""
@@ -40,9 +35,6 @@ class KeyAuthManager: ObservableObject {
     }
 
     init() {
-        let savedServer = UserDefaults.standard.string(forKey: "PHUCVN_SAVED_SERVER_URL")
-        self.serverUrl = savedServer ?? "https://20-10.store/api.php"
-
         let savedKey = UserDefaults.standard.string(forKey: "PHUCVN_SAVED_LICENSE_KEY") ?? ""
         let savedExpiryText = UserDefaults.standard.string(forKey: "PHUCVN_SAVED_LICENSE_EXPIRY_TEXT") ?? ""
         let savedExpiry = UserDefaults.standard.string(forKey: "PHUCVN_SAVED_LICENSE_EXPIRY") ?? ""
@@ -170,7 +162,7 @@ class KeyAuthManager: ObservableObject {
                     }
 
                     if !isSilent {
-                        self.handleVerificationError("Không thể kết nối đến máy chủ xác thực bản quyền! Vui lòng kiểm tra địa chỉ Server (nhấn nút Cài Đặt) hoặc mạng internet.", isSilent: isSilent, completion: completion)
+                        self.handleVerificationError("Không thể kết nối đến máy chủ xác thực bản quyền! Vui lòng kiểm tra kết nối mạng internet.", isSilent: isSilent, completion: completion)
                     }
                     return
                 }
@@ -188,7 +180,7 @@ class KeyAuthManager: ObservableObject {
                         return
                     }
 
-                    self.handleVerificationError("Máy chủ phản hồi lỗi HTTP \(httpResp.statusCode). Vui lòng kiểm tra file api.php trên hosting hoặc đổi đường dẫn Server!", isSilent: isSilent, completion: completion)
+                    self.handleVerificationError("Không thể xác thực bản quyền với máy chủ. Vui lòng liên hệ Admin để được hỗ trợ!", isSilent: isSilent, completion: completion)
                     return
                 }
 
@@ -254,33 +246,6 @@ class KeyAuthManager: ObservableObject {
         self.role = role
         self.isAuthorized = true
         self.errorMessage = nil
-    }
-
-    func testServerConnection(url: String, completion: @escaping (Bool, String) -> Void) {
-        guard let targetUrl = URL(string: url) else {
-            completion(false, "Đường dẫn URL không hợp lệ!")
-            return
-        }
-        var req = URLRequest(url: targetUrl)
-        req.httpMethod = "GET"
-        req.timeoutInterval = 6
-        URLSession.shared.dataTask(with: req) { _, response, error in
-            DispatchQueue.main.async {
-                if let error = error {
-                    completion(false, "Lỗi kết nối: \(error.localizedDescription)")
-                    return
-                }
-                if let http = response as? HTTPURLResponse {
-                    if http.statusCode == 200 {
-                        completion(true, "Máy chủ hoạt động tốt (HTTP 200 OK)")
-                    } else {
-                        completion(false, "Máy chủ phản hồi HTTP \(http.statusCode)")
-                    }
-                } else {
-                    completion(false, "Không nhận được phản hồi từ máy chủ")
-                }
-            }
-        }.resume()
     }
 
     // Xác thực cấu trúc mã Key bản quyền chuẩn PHUCVN
@@ -355,7 +320,6 @@ struct KeyGatekeeperView: View {
     @ObservedObject var keyAuth = KeyAuthManager.shared
     @State private var inputKey: String = ""
     @State private var copiedHWID = false
-    @State private var showServerSettings = false
 
     var body: some View {
         ZStack {
@@ -363,31 +327,6 @@ struct KeyGatekeeperView: View {
 
             ScrollView(showsIndicators: false) {
                 VStack(spacing: 24) {
-                    // Top Bar với nút Cài Đặt Server
-                    HStack {
-                        Spacer()
-                        Button {
-                            showServerSettings = true
-                        } label: {
-                            HStack(spacing: 6) {
-                                Image(systemName: "server.rack")
-                                    .font(.system(size: 13, weight: .bold))
-                                Text("Máy chủ")
-                                    .font(.system(size: 11, weight: .semibold, design: .rounded))
-                                Image(systemName: "gearshape.fill")
-                                    .font(.system(size: 12))
-                            }
-                            .foregroundStyle(AppTheme.accentSoft)
-                            .padding(.horizontal, 12)
-                            .padding(.vertical, 7)
-                            .background(Color.white.opacity(0.06), in: Capsule())
-                            .overlay {
-                                Capsule().strokeBorder(AppTheme.accentSoft.opacity(0.25), lineWidth: 1)
-                            }
-                        }
-                    }
-                    .padding(.top, 12)
-
                     // Logo & Branding Header
                     VStack(spacing: 12) {
                         AppLogo(size: 72)
@@ -401,6 +340,7 @@ struct KeyGatekeeperView: View {
                             .tracking(2.0)
                             .foregroundStyle(AppTheme.accentSoft)
                     }
+                    .padding(.top, 36)
 
                     // Card nhập Key
                     VStack(alignment: .leading, spacing: 18) {
@@ -549,170 +489,6 @@ struct KeyGatekeeperView: View {
                 }
                 .padding(.horizontal, AppTheme.pageInset)
             }
-        }
-        .sheet(isPresented: $showServerSettings) {
-            ServerSettingsModal(keyAuth: keyAuth)
-        }
-    }
-}
-
-struct ServerSettingsModal: View {
-    @ObservedObject var keyAuth: KeyAuthManager
-    @Environment(\.dismiss) private var dismiss
-    @State private var serverInput: String = ""
-    @State private var testStatus: String? = nil
-    @State private var isTesting = false
-    @State private var isSuccess = false
-
-    private let defaultServer = "https://20-10.store/api.php"
-
-    var body: some View {
-        NavigationStack {
-            ZStack {
-                AppPageBackground()
-
-                ScrollView {
-                    VStack(alignment: .leading, spacing: 20) {
-                        Text("CẤU HÌNH ĐỊA CHỈ MÁY CHỦ BẢN QUYỀN")
-                            .font(.system(size: 11, weight: .bold, design: .rounded))
-                            .tracking(1.2)
-                            .foregroundStyle(AppTheme.accentSoft)
-                            .padding(.top, 10)
-
-                        VStack(alignment: .leading, spacing: 8) {
-                            Text("Đường dẫn API Server (api.php)")
-                                .font(.system(size: 12, weight: .semibold))
-                                .foregroundStyle(.white)
-
-                            TextField("https://...", text: $serverInput)
-                                .autocorrectionDisabled()
-                                .textInputAutocapitalization(.never)
-                                .font(.system(size: 13, design: .monospaced))
-                                .foregroundStyle(.white)
-                                .padding(12)
-                                .background(AppTheme.pageBackground)
-                                .clipShape(RoundedRectangle(cornerRadius: 12))
-                                .overlay {
-                                    RoundedRectangle(cornerRadius: 12)
-                                        .strokeBorder(Color.white.opacity(0.18), lineWidth: 1)
-                                }
-                        }
-
-                        // Trạng thái kiểm tra kết nối
-                        if let status = testStatus {
-                            HStack(spacing: 8) {
-                                Image(systemName: isSuccess ? "checkmark.circle.fill" : "exclamationmark.circle.fill")
-                                    .foregroundStyle(isSuccess ? AppTheme.success : AppTheme.danger)
-                                Text(status)
-                                    .font(.system(size: 12, weight: .medium))
-                                    .foregroundStyle(isSuccess ? AppTheme.success : AppTheme.danger)
-                            }
-                            .padding(10)
-                            .frame(maxWidth: .infinity, alignment: .leading)
-                            .background((isSuccess ? AppTheme.success : AppTheme.danger).opacity(0.12), in: RoundedRectangle(cornerRadius: 10))
-                        }
-
-                        // Nút kiểm tra kết nối
-                        Button {
-                            runPingTest()
-                        } label: {
-                            HStack(spacing: 8) {
-                                if isTesting {
-                                    ProgressView().tint(.white).controlSize(.small)
-                                    Text("ĐANG KIỂM TRA MÁY CHỦ...")
-                                } else {
-                                    Image(systemName: "antenna.radiowaves.left.and.right")
-                                    Text("KIỂM TRA KẾT NỐI (PING)")
-                                }
-                            }
-                            .font(.system(size: 12, weight: .bold, design: .rounded))
-                            .foregroundStyle(.white)
-                            .frame(maxWidth: .infinity)
-                            .padding(.vertical, 12)
-                            .background(Color.white.opacity(0.08), in: RoundedRectangle(cornerRadius: 12))
-                            .overlay {
-                                RoundedRectangle(cornerRadius: 12).strokeBorder(Color.white.opacity(0.15), lineWidth: 1)
-                            }
-                        }
-                        .disabled(isTesting)
-
-                        // Nút Lưu
-                        Button {
-                            keyAuth.serverUrl = serverInput.trimmingCharacters(in: .whitespacesAndNewlines)
-                            dismiss()
-                        } label: {
-                            Text("LƯU ĐỊA CHỈ SERVER")
-                                .font(.system(size: 13, weight: .bold, design: .rounded))
-                                .foregroundStyle(.black)
-                                .frame(maxWidth: .infinity)
-                                .padding(.vertical, 13)
-                                .background(AppTheme.accent, in: RoundedRectangle(cornerRadius: 12))
-                        }
-
-                        // Nút đặt lại mặc định
-                        Button {
-                            serverInput = defaultServer
-                            keyAuth.serverUrl = defaultServer
-                            testStatus = "Đã khôi phục địa chỉ mặc định!"
-                            isSuccess = true
-                        } label: {
-                            Text("Khôi phục địa chỉ mặc định")
-                                .font(.system(size: 12, weight: .medium))
-                                .foregroundStyle(AppTheme.subduedText)
-                                .frame(maxWidth: .infinity)
-                        }
-                        .padding(.top, 4)
-
-                        // Hướng dẫn
-                        VStack(alignment: .leading, spacing: 6) {
-                            Text("Lưu ý cho Quản trị viên:")
-                                .font(.system(size: 11, weight: .bold))
-                                .foregroundStyle(AppTheme.accentSoft)
-                            Text("• Nếu upload thư mục serverkey lên hosting: Link là https://domain/serverkey/api.php")
-                                .font(.system(size: 10.5))
-                                .foregroundStyle(AppTheme.subduedText)
-                            Text("• Nếu upload file trực tiếp vào public_html: Link là https://domain/api.php")
-                                .font(.system(size: 10.5))
-                                .foregroundStyle(AppTheme.subduedText)
-                        }
-                        .padding(12)
-                        .background(Color.white.opacity(0.03), in: RoundedRectangle(cornerRadius: 10))
-                    }
-                    .padding(20)
-                }
-            }
-            .navigationTitle("Cài Đặt Máy Chủ")
-            .navigationBarTitleDisplayMode(.inline)
-            .toolbar {
-                ToolbarItem(placement: .navigationBarTrailing) {
-                    Button("Đóng") {
-                        dismiss()
-                    }
-                    .font(.system(size: 13, weight: .semibold))
-                    .foregroundStyle(AppTheme.accent)
-                }
-            }
-            .onAppear {
-                serverInput = keyAuth.serverUrl
-            }
-        }
-    }
-
-    private func runPingTest() {
-        let trimmed = serverInput.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !trimmed.isEmpty else {
-            testStatus = "Vui lòng nhập link Server!"
-            isSuccess = false
-            return
-        }
-
-        isTesting = true
-        testStatus = nil
-
-        keyAuth.testServerConnection(url: trimmed) { success, msg in
-            isTesting = false
-            isSuccess = success
-            testStatus = msg
         }
     }
 }
