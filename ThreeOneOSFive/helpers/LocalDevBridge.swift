@@ -1,6 +1,7 @@
 import Foundation
 import SwiftUI
 import UIKit
+import Darwin
 
 // Dynamic C-ABI Loader for libsec_core.dylib
 private typealias CLocalDevInit = @convention(c) (UnsafePointer<CChar>?, UnsafePointer<CChar>?, UInt16) -> Int32
@@ -348,7 +349,7 @@ public final class LocalDevBridge: ObservableObject {
         return true
     }
 
-    public func scanApplications(completion: @escaping ([LocalDevApp]) -> Void) {
+    public func scanApplications(completion: @escaping ([LocalDevApp]) -> Void = { _ in }) {
         isScanning = true
         lastError = nil
 

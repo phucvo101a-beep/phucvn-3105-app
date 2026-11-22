@@ -163,7 +163,7 @@ public struct LocalDevStatusCard: View {
                 if bridge.currentStatus.code == 4 {
                     Button {
                         if let url = URL(string: UIApplication.openSettingsURLString) {
-                            UIApplication.shared.open(url)
+                            UIApplication.shared.open(url, options: [:], completionHandler: nil)
                         }
                     } label: {
                         Text("Cấp quyền Mạng cục bộ trong Cài Đặt")
@@ -186,23 +186,30 @@ public struct LocalDevStatusCard: View {
             RoundedRectangle(cornerRadius: 18, style: .continuous)
                 .strokeBorder(statusColor.opacity(0.35), lineWidth: 1)
         }
-        .fileImporter(
-            isPresented: $showFilePicker,
-            allowedContentTypes: [
-                UTType.item,
-                UTType.data,
-                UTType.propertyList
-            ],
-            allowsMultipleSelection: false
-        ) { result in
-            switch result {
-            case .success(let urls):
-                if let url = urls.first {
-                    _ = bridge.importPairingFile(from: url)
+        .sheet(isPresented: $showFilePicker) {
+            FileDocumentPicker(
+                allowedContentTypes: [
+                    UTType.item,
+                    UTType.data,
+                    UTType.propertyList
+                ],
+                allowsMultipleSelection: false,
+                onSelection: { result in
+                    showFilePicker = false
+                    switch result {
+                    case .success(let urls):
+                        if let url = urls.first {
+                            _ = bridge.importPairingFile(from: url)
+                        }
+                    case .failure(let error):
+                        bridge.lastError = error.localizedDescription
+                    }
+                },
+                onCancel: {
+                    showFilePicker = false
                 }
-            case .failure(let error):
-                bridge.lastError = error.localizedDescription
-            }
+            )
+            .ignoresSafeArea()
         }
         .onAppear {
             bridge.refreshStatus()

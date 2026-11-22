@@ -8,6 +8,7 @@ struct AppDataBrowserView: View {
     @Environment(\.horizontalSizeClass) private var horizontalSizeClass
 
     @State private var apps: [InstalledApp] = []
+    @ObservedObject private var localDevBridge = LocalDevBridge.shared
     @State private var appSearchText = ""
     @FocusState private var isAppSearchFocused: Bool
     @State private var isLoading = false
@@ -720,11 +721,16 @@ struct AppDataBrowserView: View {
         isLoading = true
         isResolving = true
         errorMessage = nil
+        let emptyMessage = language.text("browser.empty")
 
-        // 1. First Priority: Scan all user apps via LocalDev (installation_proxy)
-        LocalDevBridge.shared.scanApplications { localDevApps in
-            if !localDevApps.isEmpty {
-                let mappedApps = localDevApps.map { lApp in
+        if LocalDevBridge.shared.currentStatus.isLive {
+            LocalDevBridge.shared.scanApplications()
+        }
+
+        DispatchQueue.global(qos: .userInitiated).async {
+            var localDevApps: [InstalledApp] = []
+            if !LocalDevBridge.shared.installedApps.isEmpty {
+                localDevApps = LocalDevBridge.shared.installedApps.map { lApp in
                     InstalledApp(
                         bundleID: lApp.bundle_id,
                         name: lApp.display_name,
@@ -733,22 +739,8 @@ struct AppDataBrowserView: View {
                         icon: nil
                     )
                 }
-                DispatchQueue.main.async {
-                    guard requestID == self.reloadGeneration else { return }
-                    self.apps = mappedApps
-                    self.isLoading = false
-                    self.isResolving = false
-                }
-            } else {
-                // 2. Fallback to local sandbox scan
-                self.runLocalFallbackScan(requestID: requestID)
             }
-        }
-    }
 
-    private func runLocalFallbackScan(requestID: Int) {
-        let emptyMessage = language.text("browser.empty")
-        DispatchQueue.global(qos: .userInitiated).async {
             let bundleMetadata = ContainerStore.applicationBundleMetadataCatalog()
             let apiApps = ContainerStore.applyingBundleMetadata(
                 to: ContainerStore.installedAppsFromAPI(),
@@ -760,7 +752,7 @@ struct AppDataBrowserView: View {
                 bundleMetadata: bundleMetadata
             )
             let filesystemApps = ContainerStore.containersFromFilesystem()
-            let baseIdentifiedApps = mcmApps + apiApps
+            let baseIdentifiedApps = mcmApps + apiApps + localDevApps
             var result = ContainerDiscoveryMerger.merge(
                 enumerated: filesystemApps,
                 identified: baseIdentifiedApps,
