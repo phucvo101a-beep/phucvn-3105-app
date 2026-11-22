@@ -189,12 +189,9 @@ public struct LocalDevStatusCard: View {
         .fileImporter(
             isPresented: $showFilePicker,
             allowedContentTypes: [
-                .item,
-                .content,
-                .data,
-                .propertyList,
-                UTType(filenameExtension: "mobiledevicepairing") ?? .data,
-                UTType(filenameExtension: "plist") ?? .propertyList
+                UTType.item,
+                UTType.data,
+                UTType.propertyList
             ],
             allowsMultipleSelection: false
         ) { result in

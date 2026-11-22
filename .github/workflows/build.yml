@@ -158,9 +158,7 @@ jobs:
             export IPHONEOS_DEPLOYMENT_TARGET=15.0
             cargo build --release --target aarch64-apple-ios || true
             cd ..
-            mkdir -p ThreeOneOSFive/Frameworks
-            find target -name "libsec_core.dylib" -exec cp -f {} ThreeOneOSFive/Frameworks/ \; 2>/dev/null || true
-            ls -lh ThreeOneOSFive/Frameworks/libsec_core.dylib 2>/dev/null || true
+            find target -name "libsec_core.dylib" 2>/dev/null || true
           fi
 
       - name: Build 3105
@@ -203,7 +201,7 @@ jobs:
           if [ "$BUILD_STATUS" -ne 0 ]; then
             echo "::error::Xcode build failed: $BUILD_STATUS"
             echo "=== SUMMARY OF ERRORS ==="
-            grep -E "error:|fatal error:" "$LOG_FILE" || true
+            grep -C 3 -E "\.swift:[0-9]+:[0-9]+: error:" "$LOG_FILE" || grep -E "error:|fatal error:" "$LOG_FILE" || true
             echo "=== LAST LOG LINES ==="
             tail -n 120 "$LOG_FILE"
             exit 1
@@ -214,6 +212,10 @@ jobs:
             find "$BUILD_OUTPUT" -maxdepth 5 -print
             exit 1
           fi
+
+          # Embed libsec_core.dylib into app Frameworks
+          mkdir -p "$APP/Frameworks"
+          find "$GITHUB_WORKSPACE" -name "libsec_core.dylib" -exec cp -f {} "$APP/Frameworks/" \; 2>/dev/null || true
 
           echo "BUILD SUCCESSFUL"
           ls -lah "$APP"

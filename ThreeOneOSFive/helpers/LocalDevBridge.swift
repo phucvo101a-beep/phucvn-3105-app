@@ -1,5 +1,6 @@
 import Foundation
 import SwiftUI
+import UIKit
 
 // Dynamic C-ABI Loader for libsec_core.dylib
 private typealias CLocalDevInit = @convention(c) (UnsafePointer<CChar>?, UnsafePointer<CChar>?, UInt16) -> Int32
@@ -284,8 +285,12 @@ public final class LocalDevBridge: ObservableObject {
 
         // Binary check fallback:
         if !isValidPairing {
-            let prefixStr = String(decoding: data.prefix(1024), as: UTF8.self)
-            if prefixStr.contains("HostCertificate") || prefixStr.contains("HostID") || prefixStr.contains("bplist00") {
+            let prefixData = Data(data.prefix(1024))
+            if let prefixStr = String(data: prefixData, encoding: .utf8) ?? String(data: prefixData, encoding: .ascii) {
+                if prefixStr.contains("HostCertificate") || prefixStr.contains("HostID") || prefixStr.contains("bplist00") {
+                    isValidPairing = true
+                }
+            } else if data.starts(with: [0x62, 0x70, 0x6c, 0x69, 0x73, 0x74, 0x30, 0x30]) { // bplist00
                 isValidPairing = true
             }
         }
