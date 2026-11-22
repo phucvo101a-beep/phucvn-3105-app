@@ -23,27 +23,18 @@ enum ExploitSupportPolicy {
         verifiedIOS27Builds.first { $0.build == build }?.publicBeta
     }
 
+    /// Determines if the physical kernel exploit (kexploit_opa334) can safely run on this kernel.
+    /// ONLY enabled on iOS 17.0–17.7.x and iOS 18.0–18.7.1.
+    /// MUST be false for iOS 26.x, 27.x, 15.x, 16.x to prevent kernel panic / reboot!
     static func supportsKernelExploit(major: Int, minor: Int, patch: Int) -> Bool {
         guard minor >= 0, patch >= 0 else { return false }
-
-        if major == 15 || major == 16 {
-            return true
-        }
 
         if major == 17 {
             return minor <= 7
         }
 
         if major == 18 {
-            return true
-        }
-
-        if major == 26 {
-            return minor < 6 || (minor == 6 && patch <= 1)
-        }
-
-        if major == 27 {
-            return minor <= 2
+            return minor < 7 || (minor == 7 && patch <= 1)
         }
 
         return false

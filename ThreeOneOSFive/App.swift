@@ -121,6 +121,10 @@ class AppState: ObservableObject {
     }
 
     private func maybeAutoRunKernelExploit() {
+        let v = AppInfo.versionTuple
+        guard ExploitSupportPolicy.supportsKernelExploit(major: v.major, minor: v.minor, patch: v.patch) else {
+            return
+        }
         guard !kernelExploitRunning,
               !exploitStatus.isSuccess,
               !exploitStatus.isFailed,
