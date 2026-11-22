@@ -16,8 +16,10 @@ fn main() {
     let x25519_secret = X25519Secret::random_from_rng(&mut rng);
     let x25519_public = X25519Public::from(&x25519_secret);
 
-    // 2. Generate Ed25519 Keypair
-    let ed25519_signing = Ed25519SigningKey::generate(&mut rng);
+    // 2. Generate Ed25519 Keypair (secure random 32-byte secret)
+    let mut ed_secret = [0u8; 32];
+    rng.fill_bytes(&mut ed_secret);
+    let ed25519_signing = Ed25519SigningKey::from_bytes(&ed_secret);
     let ed25519_verifying = ed25519_signing.verifying_key();
 
     // 3. Generate Pre-Shared Pepper (32 bytes)
