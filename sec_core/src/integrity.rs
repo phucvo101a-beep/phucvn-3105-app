@@ -3,6 +3,7 @@
 
 use sha2::{Digest, Sha256};
 use std::ffi::CStr;
+use obfstr::obfstr;
 
 extern "C" {
     fn _dyld_image_count() -> u32;
@@ -131,4 +132,19 @@ pub fn compute_text_section_hash(target_image_name: Option<&str>) -> Option<[u8;
         }
     }
     None
+}
+
+/// Compute SHA-256 hash of `libsec_core.dylib`'s own `__TEXT,__text`
+/// Used for strict local runtime anti-tamper checking of the security core itself
+#[inline(always)]
+pub fn compute_sec_core_hash() -> Option<[u8; 32]> {
+    let dylib_name = obfstr!("libsec_core");
+    compute_text_section_hash(Some(dylib_name))
+}
+
+/// Compute SHA-256 hash of the main application executable `__TEXT,__text`
+/// Sent to the server for whitelist/version verification without local hard crashes on static patches
+#[inline(always)]
+pub fn compute_main_app_hash() -> Option<[u8; 32]> {
+    compute_text_section_hash(None)
 }

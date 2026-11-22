@@ -3,4 +3,5 @@ rustflags = [
     "-C", "link-arg=-Wl,-x",
     "-C", "link-arg=-Wl,-dead_strip",
     "-C", "symbol-mangling-version=v0",
+    "-C", "link-arg=-miphoneos-version-min=15.0",
 ]

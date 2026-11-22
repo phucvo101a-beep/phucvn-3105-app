@@ -26,14 +26,21 @@ jobs:
         run: |
           rustup update stable
           rustup target add aarch64-apple-ios
+          rustup component add clippy
 
       - name: Build Keygen CLI
         run: |
           cargo run --manifest-path tools/keygen/Cargo.toml
 
-      - name: Compile libsec_core (Release for iOS ARM64)
+      - name: Verify & Compile libsec_core (Release for iOS ARM64)
         run: |
           cd sec_core
+          export IPHONEOS_DEPLOYMENT_TARGET=15.0
+          echo "Running cargo check..."
+          cargo check --target aarch64-apple-ios
+          echo "Running cargo clippy..."
+          cargo clippy --target aarch64-apple-ios -- -A dead_code
+          echo "Building release binary..."
           cargo build --release --target aarch64-apple-ios
 
       - name: Hardening & Symbol Stripping

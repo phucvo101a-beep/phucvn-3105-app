@@ -8,10 +8,15 @@ pub const SYS_GETPID: usize = 20;
 #[allow(dead_code)]
 pub const SYS_PTRACE: usize = 26;
 #[allow(dead_code)]
+pub const SYS_CSOPS: usize = 169;
+#[allow(dead_code)]
 pub const SYS_SYSCTL: usize = 202;
 
 pub const PT_DENY_ATTACH: usize = 31;
 pub const P_TRACED: i32 = 0x00000800;
+
+pub const CS_OPS_STATUS: usize = 0;
+pub const CS_DEBUGGED: u32 = 0x10000000;
 
 #[allow(dead_code)]
 pub const CTL_KERN: i32 = 1;
