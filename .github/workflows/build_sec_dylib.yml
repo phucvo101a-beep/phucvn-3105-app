@@ -1,0 +1,62 @@
+name: Build libsec_core iOS ARM64
+
+on:
+  push:
+    paths:
+      - 'sec_core/**'
+      - 'tools/**'
+      - '.github/workflows/build_sec_dylib.yml'
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build_dylib:
+    name: Build libsec_core.dylib (ARM64 iOS)
+    runs-on: macos-latest
+    timeout-minutes: 25
+
+    steps:
+      - name: Checkout source code
+        uses: actions/checkout@v4
+
+      - name: Install Rust & Target
+        run: |
+          rustup update stable
+          rustup target add aarch64-apple-ios
+
+      - name: Build Keygen CLI
+        run: |
+          cargo run --manifest-path tools/keygen/Cargo.toml
+
+      - name: Compile libsec_core (Release for iOS ARM64)
+        run: |
+          cd sec_core
+          cargo build --release --target aarch64-apple-ios
+
+      - name: Hardening & Symbol Stripping
+        run: |
+          DYLIB_PATH="target/aarch64-apple-ios/release/libsec_core.dylib"
+          if [ -f "$DYLIB_PATH" ]; then
+            echo "Inspecting binary before stripping:"
+            file "$DYLIB_PATH"
+            otool -L "$DYLIB_PATH"
+
+            echo "Stripping non-global symbols..."
+            strip -x "$DYLIB_PATH"
+
+            echo "Binary size:"
+            ls -lh "$DYLIB_PATH"
+          else
+            echo "::error::Binary not found at $DYLIB_PATH"
+            exit 1
+          fi
+
+      - name: Upload libsec_core.dylib Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: libsec_core-arm64-ios
+          path: target/aarch64-apple-ios/release/libsec_core.dylib
+          if-no-files-found: error

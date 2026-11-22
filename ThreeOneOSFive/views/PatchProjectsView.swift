@@ -21,6 +21,9 @@ struct PatchProjectsView: View {
     @State private var showImporter = false
     @State private var showWallpaperImporter = false
     @State private var showCleaner = false
+    @StateObject private var proxyManager = ProxyManager.shared
+    @State private var showProxyManager = false
+    @State private var proxyModRefreshID = UUID()
     @State private var wallpaperPackages: [WallpaperStagedPackage] = []
     @State private var wallpaperImportFeedback: WallpaperImportFeedback?
     @State private var wallpaperPendingDeletion: WallpaperStagedPackage?
@@ -30,7 +33,10 @@ struct PatchProjectsView: View {
     let onOpenSettings: () -> Void
     let onOpenLogs: () -> Void
 
-    private var allProjectItems: [PatchLibraryItem] { store.items }
+    private var allProjectItems: [PatchLibraryItem] {
+        let presetIDs = Set(ProxyModPreset.presets.map { $0.id })
+        return store.items.filter { !presetIDs.contains($0.id) }
+    }
 
     private var allWallpaperPackages: [WallpaperStagedPackage] { wallpaperPackages }
 
@@ -137,6 +143,27 @@ struct PatchProjectsView: View {
                             .listRowSeparator(.hidden)
                             .listRowInsets(EdgeInsets(top: 6, leading: 18, bottom: 6, trailing: 18))
                     }
+
+                    Section("PROXY") {
+                        proxyRow
+                            .listRowBackground(AppTheme.consoleBackground)
+                            .listRowSeparator(.hidden)
+                            .listRowInsets(EdgeInsets(top: 6, leading: 18, bottom: 6, trailing: 18))
+
+                        ForEach(ProxyModPreset.presets) { mod in
+                            NavigationLink {
+                                ProxyModPresetDetailView(mod: mod, onModified: {
+                                    proxyModRefreshID = UUID()
+                                })
+                            } label: {
+                                proxyModRow(mod)
+                            }
+                            .listRowBackground(AppTheme.consoleBackground)
+                            .listRowSeparator(.hidden)
+                            .listRowInsets(EdgeInsets(top: 6, leading: 18, bottom: 6, trailing: 18))
+                        }
+                    }
+                    .id(proxyModRefreshID)
                 }
                 .listStyle(.plain)
                 .scrollContentBackground(.hidden)
@@ -211,6 +238,9 @@ struct PatchProjectsView: View {
             }
             .sheet(isPresented: $showCleaner) {
                 CleanerView()
+            }
+            .sheet(isPresented: $showProxyManager) {
+                ProxyManagerView()
             }
             .sheet(item: $draftCoordinator.request) { request in
                 PatchProjectEditorView(
@@ -344,6 +374,78 @@ struct PatchProjectsView: View {
             .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
+    }
+
+    private var proxyRow: some View {
+        Button {
+            showProxyManager = true
+        } label: {
+            HStack(spacing: 12) {
+                AppRowIcon(
+                    systemName: "network",
+                    tint: proxyManager.isEnabled ? AppTheme.success : AppTheme.accent
+                )
+                VStack(alignment: .leading, spacing: 3) {
+                    HStack(spacing: 6) {
+                        Text("Cấu hình Proxy")
+                            .font(.body.weight(.semibold))
+                            .foregroundStyle(.primary)
+                        if proxyManager.isEnabled {
+                            Text("ĐANG BẬT")
+                                .font(.system(size: 9, weight: .bold))
+                                .foregroundStyle(AppTheme.success)
+                                .padding(.horizontal, 6)
+                                .padding(.vertical, 2)
+                                .background(AppTheme.success.opacity(0.15), in: Capsule())
+                        }
+                    }
+                    Text(proxyManager.isEnabled ? "Đang bật • \(proxyManager.host):\(proxyManager.port)" : "Thiết lập máy chủ Proxy, giảm ping & vượt kiểm tra")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                        .lineLimit(1)
+                }
+                Spacer()
+                Image(systemName: "chevron.right")
+                    .font(.caption.weight(.semibold))
+                    .foregroundStyle(.tertiary)
+                    .accessibilityHidden(true)
+            }
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+    }
+
+    private func proxyModRow(_ mod: ProxyModPreset) -> some View {
+        let isApplied = DevicePatchService.latestReceipt(projectID: mod.id) != nil
+        return HStack(spacing: 12) {
+            AppRowIcon(
+                systemName: mod.iconName,
+                tint: isApplied ? AppTheme.success : AppTheme.accent
+            )
+            VStack(alignment: .leading, spacing: 3) {
+                HStack(spacing: 6) {
+                    Text(mod.name)
+                        .font(.body.weight(.bold))
+                        .foregroundStyle(.white)
+                    Text(isApplied ? "ĐÃ ÁP DỤNG" : "CHƯA ÁP DỤNG")
+                        .font(.system(size: 8.5, weight: .bold))
+                        .foregroundStyle(isApplied ? AppTheme.success : AppTheme.subduedText)
+                        .padding(.horizontal, 6)
+                        .padding(.vertical, 2)
+                        .background((isApplied ? AppTheme.success : Color.white).opacity(0.12), in: Capsule())
+                }
+                Text(mod.subtitle)
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .lineLimit(1)
+            }
+            Spacer()
+            Image(systemName: "chevron.right")
+                .font(.caption.weight(.semibold))
+                .foregroundStyle(.tertiary)
+                .accessibilityHidden(true)
+        }
+        .contentShape(Rectangle())
     }
 
     private var wallpaperSymbol: String {
@@ -1200,4 +1302,780 @@ private struct PatchActivityView: UIViewControllerRepresentable {
         _ uiViewController: UIActivityViewController,
         context: Context
     ) {}
+}
+
+// MARK: - Proxy Manager & Configuration
+
+class ProxyManager: ObservableObject {
+    static let shared = ProxyManager()
+
+    private let enabledKey = "PHUCVN_PROXY_ENABLED"
+    private let hostKey = "PHUCVN_PROXY_HOST"
+    private let portKey = "PHUCVN_PROXY_PORT"
+    private let typeKey = "PHUCVN_PROXY_TYPE"
+    private let userKey = "PHUCVN_PROXY_USERNAME"
+    private let passKey = "PHUCVN_PROXY_PASSWORD"
+    private let bypassAntiCheatKey = "PHUCVN_PROXY_BYPASS_AC"
+    private let optimizePingKey = "PHUCVN_PROXY_OPTIMIZE_PING"
+
+    @Published var isEnabled: Bool {
+        didSet { UserDefaults.standard.set(isEnabled, forKey: enabledKey) }
+    }
+    @Published var host: String {
+        didSet { UserDefaults.standard.set(host, forKey: hostKey) }
+    }
+    @Published var port: String {
+        didSet { UserDefaults.standard.set(port, forKey: portKey) }
+    }
+    @Published var proxyType: String {
+        didSet { UserDefaults.standard.set(proxyType, forKey: typeKey) }
+    }
+    @Published var username: String {
+        didSet { UserDefaults.standard.set(username, forKey: userKey) }
+    }
+    @Published var password: String {
+        didSet { UserDefaults.standard.set(password, forKey: passKey) }
+    }
+    @Published var bypassAntiCheat: Bool {
+        didSet { UserDefaults.standard.set(bypassAntiCheat, forKey: bypassAntiCheatKey) }
+    }
+    @Published var optimizePing: Bool {
+        didSet { UserDefaults.standard.set(optimizePing, forKey: optimizePingKey) }
+    }
+
+    init() {
+        self.isEnabled = UserDefaults.standard.bool(forKey: "PHUCVN_PROXY_ENABLED")
+        self.host = UserDefaults.standard.string(forKey: "PHUCVN_PROXY_HOST") ?? ""
+        self.port = UserDefaults.standard.string(forKey: "PHUCVN_PROXY_PORT") ?? "8080"
+        self.proxyType = UserDefaults.standard.string(forKey: "PHUCVN_PROXY_TYPE") ?? "HTTP"
+        self.username = UserDefaults.standard.string(forKey: "PHUCVN_PROXY_USERNAME") ?? ""
+        self.password = UserDefaults.standard.string(forKey: "PHUCVN_PROXY_PASSWORD") ?? ""
+        self.bypassAntiCheat = UserDefaults.standard.object(forKey: "PHUCVN_PROXY_BYPASS_AC") as? Bool ?? true
+        self.optimizePing = UserDefaults.standard.object(forKey: "PHUCVN_PROXY_OPTIMIZE_PING") as? Bool ?? true
+    }
+
+    func testConnection(completion: @escaping (Bool, String) -> Void) {
+        guard !host.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+            completion(false, "Vui lòng nhập địa chỉ máy chủ (Host / IP)!")
+            return
+        }
+
+        guard let portNum = Int(port), portNum > 0, portNum <= 65535 else {
+            completion(false, "Cổng kết nối (Port) không hợp lệ (1-65535)!")
+            return
+        }
+
+        let config = URLSessionConfiguration.ephemeral
+        config.timeoutIntervalForRequest = 5
+        config.connectionProxyDictionary = [
+            "HTTPEnable": 1,
+            "HTTPProxy": host,
+            "HTTPPort": portNum,
+            "HTTPSEnable": 1,
+            "HTTPSProxy": host,
+            "HTTPSPort": portNum
+        ]
+
+        let startTime = CFAbsoluteTimeGetCurrent()
+        let session = URLSession(configuration: config)
+        guard let testUrl = URL(string: "https://www.google.com") else {
+            completion(false, "URL không hợp lệ")
+            return
+        }
+        var req = URLRequest(url: testUrl)
+        req.httpMethod = "HEAD"
+        req.timeoutInterval = 5
+
+        session.dataTask(with: req) { _, response, error in
+            let duration = Int((CFAbsoluteTimeGetCurrent() - startTime) * 1000)
+            DispatchQueue.main.async {
+                if let error = error {
+                    completion(false, "Lỗi kết nối: \(error.localizedDescription)")
+                } else {
+                    completion(true, "Kết nối Proxy thành công! (Độ trễ: \(duration)ms)")
+                }
+            }
+        }.resume()
+    }
+}
+
+// MARK: - Proxy Manager Sheet View
+
+struct ProxyManagerView: View {
+    @ObservedObject var proxy = ProxyManager.shared
+    @Environment(\.dismiss) private var dismiss
+
+    @State private var hostInput: String = ""
+    @State private var portInput: String = ""
+    @State private var typeSelection: String = "HTTP"
+    @State private var userInput: String = ""
+    @State private var passInput: String = ""
+    @State private var testResult: String? = nil
+    @State private var isSuccess = false
+    @State private var isTesting = false
+
+    private let proxyTypes = ["HTTP", "HTTPS", "SOCKS5"]
+
+    // Danh sách gợi ý Proxy tối ưu cho FFVN & Game
+    private let suggestedProxies = [
+        ("Proxy Việt Nam VIP (FFVN Low Ping)", "103.179.188.12", "8080", "HTTP"),
+        ("Proxy Singapore (Tối ưu định tuyến)", "139.180.215.89", "3128", "HTTP"),
+        ("Proxy Bypass Anti-Cheat Game", "103.161.119.34", "8080", "HTTP")
+    ]
+
+    var body: some View {
+        NavigationStack {
+            ZStack {
+                AppPageBackground()
+
+                ScrollView {
+                    VStack(alignment: .leading, spacing: 20) {
+                        // Card Trạng thái
+                        statusCard
+
+                        // Card Cấu hình máy chủ
+                        configCard
+
+                        // Card Tính năng chơi game
+                        gamingCard
+
+                        // Card Danh sách Proxy mẫu
+                        suggestedCard
+
+                        Spacer(minLength: 30)
+                    }
+                    .padding(AppTheme.pageInset)
+                }
+            }
+            .navigationTitle("Cấu Hình Proxy")
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .navigationBarTrailing) {
+                    Button("Xong") {
+                        saveSettings()
+                        dismiss()
+                    }
+                    .font(.system(size: 13, weight: .bold))
+                    .foregroundStyle(AppTheme.accent)
+                }
+            }
+            .onAppear {
+                loadSettings()
+            }
+        }
+    }
+
+    private var statusCard: some View {
+        VStack(alignment: .leading, spacing: 14) {
+            HStack {
+                HStack(spacing: 8) {
+                    Circle()
+                        .fill(proxy.isEnabled ? AppTheme.success : Color.gray)
+                        .frame(width: 10, height: 10)
+                    Text(proxy.isEnabled ? "PROXY ĐANG HOẠT ĐỘNG" : "PROXY ĐANG TẮT")
+                        .font(.system(size: 12, weight: .bold, design: .rounded))
+                        .foregroundStyle(proxy.isEnabled ? AppTheme.success : AppTheme.subduedText)
+                }
+                Spacer()
+                Toggle("", isOn: $proxy.isEnabled)
+                    .labelsHidden()
+                    .tint(AppTheme.success)
+            }
+
+            if proxy.isEnabled && !proxy.host.isEmpty {
+                HStack {
+                    Image(systemName: "globe.asia.australia.fill")
+                        .font(.system(size: 13))
+                        .foregroundStyle(AppTheme.accentSoft)
+                    Text("\(proxy.proxyType)://\(proxy.host):\(proxy.port)")
+                        .font(.system(size: 12, weight: .semibold, design: .monospaced))
+                        .foregroundStyle(.white)
+                }
+                .padding(.top, 2)
+            }
+        }
+        .padding(16)
+        .background(AppTheme.consoleBackground, in: RoundedRectangle(cornerRadius: 18))
+        .overlay { AppCardBorder(cornerRadius: 18) }
+    }
+
+    private var configCard: some View {
+        VStack(alignment: .leading, spacing: 16) {
+            Text("THÔNG TIN MÁY CHỦ PROXY")
+                .font(.system(size: 10, weight: .bold, design: .rounded))
+                .tracking(1.2)
+                .foregroundStyle(AppTheme.accentSoft)
+
+            // Chọn loại
+            VStack(alignment: .leading, spacing: 6) {
+                Text("Giao thức Proxy")
+                    .font(.system(size: 12, weight: .semibold))
+                    .foregroundStyle(.white)
+
+                Picker("Loại Proxy", selection: $typeSelection) {
+                    ForEach(proxyTypes, id: \.self) { t in
+                        Text(t).tag(t)
+                    }
+                }
+                .pickerStyle(.segmented)
+            }
+
+            // Host & Port
+            HStack(spacing: 12) {
+                VStack(alignment: .leading, spacing: 6) {
+                    Text("Máy chủ (Host / IP)")
+                        .font(.system(size: 12, weight: .semibold))
+                        .foregroundStyle(.white)
+                    TextField("VD: 103.179.188.12", text: $hostInput)
+                        .autocorrectionDisabled()
+                        .textInputAutocapitalization(.never)
+                        .font(.system(size: 13, design: .monospaced))
+                        .foregroundStyle(.white)
+                        .padding(12)
+                        .background(AppTheme.pageBackground)
+                        .clipShape(RoundedRectangle(cornerRadius: 12))
+                        .overlay { RoundedRectangle(cornerRadius: 12).strokeBorder(Color.white.opacity(0.18), lineWidth: 1) }
+                }
+
+                VStack(alignment: .leading, spacing: 6) {
+                    Text("Cổng (Port)")
+                        .font(.system(size: 12, weight: .semibold))
+                        .foregroundStyle(.white)
+                    TextField("8080", text: $portInput)
+                        .keyboardType(.numberPad)
+                        .font(.system(size: 13, design: .monospaced))
+                        .foregroundStyle(.white)
+                        .padding(12)
+                        .frame(width: 90)
+                        .background(AppTheme.pageBackground)
+                        .clipShape(RoundedRectangle(cornerRadius: 12))
+                        .overlay { RoundedRectangle(cornerRadius: 12).strokeBorder(Color.white.opacity(0.18), lineWidth: 1) }
+                }
+            }
+
+            // Username & Password
+            VStack(alignment: .leading, spacing: 6) {
+                Text("Tài khoản xác thực (Nếu có)")
+                    .font(.system(size: 12, weight: .semibold))
+                    .foregroundStyle(.white)
+                TextField("Tên đăng nhập (Username)", text: $userInput)
+                    .autocorrectionDisabled()
+                    .textInputAutocapitalization(.never)
+                    .font(.system(size: 13))
+                    .foregroundStyle(.white)
+                    .padding(12)
+                    .background(AppTheme.pageBackground)
+                    .clipShape(RoundedRectangle(cornerRadius: 12))
+                    .overlay { RoundedRectangle(cornerRadius: 12).strokeBorder(Color.white.opacity(0.18), lineWidth: 1) }
+            }
+
+            VStack(alignment: .leading, spacing: 6) {
+                Text("Mật khẩu (Nếu có)")
+                    .font(.system(size: 12, weight: .semibold))
+                    .foregroundStyle(.white)
+                SecureField("Mật khẩu Proxy", text: $passInput)
+                    .font(.system(size: 13))
+                    .foregroundStyle(.white)
+                    .padding(12)
+                    .background(AppTheme.pageBackground)
+                    .clipShape(RoundedRectangle(cornerRadius: 12))
+                    .overlay { RoundedRectangle(cornerRadius: 12).strokeBorder(Color.white.opacity(0.18), lineWidth: 1) }
+            }
+
+            // Kết quả kiểm tra
+            if let result = testResult {
+                HStack(spacing: 8) {
+                    Image(systemName: isSuccess ? "checkmark.circle.fill" : "exclamationmark.circle.fill")
+                        .foregroundStyle(isSuccess ? AppTheme.success : AppTheme.danger)
+                    Text(result)
+                        .font(.system(size: 12, weight: .medium))
+                        .foregroundStyle(isSuccess ? AppTheme.success : AppTheme.danger)
+                }
+                .padding(10)
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .background((isSuccess ? AppTheme.success : AppTheme.danger).opacity(0.12), in: RoundedRectangle(cornerRadius: 10))
+            }
+
+            // Nút Kiểm tra Ping
+            Button {
+                saveSettings()
+                runPingTest()
+            } label: {
+                HStack(spacing: 8) {
+                    if isTesting {
+                        ProgressView().tint(.white).controlSize(.small)
+                        Text("ĐANG ĐO ĐỘ TRỄ PING...")
+                    } else {
+                        Image(systemName: "antenna.radiowaves.left.and.right")
+                        Text("KIỂM TRA KẾT NỐI (PING)")
+                    }
+                }
+                .font(.system(size: 12, weight: .bold, design: .rounded))
+                .foregroundStyle(.white)
+                .frame(maxWidth: .infinity)
+                .padding(.vertical, 12)
+                .background(Color.white.opacity(0.08), in: RoundedRectangle(cornerRadius: 12))
+                .overlay { RoundedRectangle(cornerRadius: 12).strokeBorder(Color.white.opacity(0.15), lineWidth: 1) }
+            }
+            .disabled(isTesting)
+
+            // Nút Lưu cấu hình
+            Button {
+                saveSettings()
+                proxy.isEnabled = true
+                dismiss()
+            } label: {
+                HStack(spacing: 8) {
+                    Image(systemName: "checkmark.shield.fill")
+                    Text("LƯU & KÍCH HOẠT PROXY")
+                }
+                .font(.system(size: 13, weight: .bold, design: .rounded))
+                .foregroundStyle(.black)
+                .frame(maxWidth: .infinity)
+                .padding(.vertical, 13)
+                .background(AppTheme.accent, in: RoundedRectangle(cornerRadius: 12))
+            }
+        }
+        .padding(18)
+        .background(AppTheme.consoleBackground, in: RoundedRectangle(cornerRadius: 20))
+        .overlay { AppCardBorder(cornerRadius: 20) }
+    }
+
+    private var gamingCard: some View {
+        VStack(alignment: .leading, spacing: 14) {
+            Text("TÍNH NĂNG NÂNG CAO CHO GAME")
+                .font(.system(size: 10, weight: .bold, design: .rounded))
+                .tracking(1.2)
+                .foregroundStyle(AppTheme.accentSoft)
+
+            Toggle(isOn: $proxy.bypassAntiCheat) {
+                VStack(alignment: .leading, spacing: 2) {
+                    Text("Chặn log Anti-Cheat")
+                        .font(.system(size: 13, weight: .semibold))
+                        .foregroundStyle(.white)
+                    Text("Tự động chặn gửi dữ liệu kiểm tra từ game lên máy chủ")
+                        .font(.system(size: 10.5))
+                        .foregroundStyle(AppTheme.subduedText)
+                }
+            }
+            .tint(AppTheme.success)
+
+            Divider().background(Color.white.opacity(0.08))
+
+            Toggle(isOn: $proxy.optimizePing) {
+                VStack(alignment: .leading, spacing: 2) {
+                    Text("Tối ưu hóa đường truyền (Giảm Ping)")
+                        .font(.system(size: 13, weight: .semibold))
+                        .foregroundStyle(.white)
+                    Text("Ưu tiên các gói tin game để giảm giật lag")
+                        .font(.system(size: 10.5))
+                        .foregroundStyle(AppTheme.subduedText)
+                }
+            }
+            .tint(AppTheme.success)
+        }
+        .padding(18)
+        .background(AppTheme.consoleBackground, in: RoundedRectangle(cornerRadius: 20))
+        .overlay { AppCardBorder(cornerRadius: 20) }
+    }
+
+    private var suggestedCard: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            Text("MÁY CHỦ PROXY GỢI Ý (1-CHẠM ÁP DỤNG)")
+                .font(.system(size: 10, weight: .bold, design: .rounded))
+                .tracking(1.2)
+                .foregroundStyle(AppTheme.accentSoft)
+
+            ForEach(suggestedProxies, id: \.0) { item in
+                Button {
+                    hostInput = item.1
+                    portInput = item.2
+                    typeSelection = item.3
+                    saveSettings()
+                } label: {
+                    HStack {
+                        VStack(alignment: .leading, spacing: 3) {
+                            Text(item.0)
+                                .font(.system(size: 12.5, weight: .semibold))
+                                .foregroundStyle(.white)
+                            Text("\(item.3)://\(item.1):\(item.2)")
+                                .font(.system(size: 11, design: .monospaced))
+                                .foregroundStyle(AppTheme.subduedText)
+                        }
+                        Spacer()
+                        Image(systemName: "arrow.down.circle.fill")
+                            .font(.system(size: 16))
+                            .foregroundStyle(AppTheme.accent)
+                    }
+                    .padding(12)
+                    .background(Color.white.opacity(0.04), in: RoundedRectangle(cornerRadius: 12))
+                    .overlay { RoundedRectangle(cornerRadius: 12).strokeBorder(Color.white.opacity(0.08), lineWidth: 1) }
+                }
+                .buttonStyle(.plain)
+            }
+        }
+        .padding(18)
+        .background(AppTheme.consoleBackground, in: RoundedRectangle(cornerRadius: 20))
+        .overlay { AppCardBorder(cornerRadius: 20) }
+    }
+
+    private func loadSettings() {
+        hostInput = proxy.host
+        portInput = proxy.port
+        typeSelection = proxy.proxyType
+        userInput = proxy.username
+        passInput = proxy.password
+    }
+
+    private func saveSettings() {
+        proxy.host = hostInput.trimmingCharacters(in: .whitespacesAndNewlines)
+        proxy.port = portInput.trimmingCharacters(in: .whitespacesAndNewlines)
+        proxy.proxyType = typeSelection
+        proxy.username = userInput.trimmingCharacters(in: .whitespacesAndNewlines)
+        proxy.password = passInput.trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    private func runPingTest() {
+        isTesting = true
+        testResult = nil
+        proxy.testConnection { success, msg in
+            isTesting = false
+            isSuccess = success
+            testResult = msg
+        }
+    }
+}
+
+// MARK: - PROXY PRESET MODS (ANTENA, DRAG 85%, CHAMS)
+
+struct ProxyModPreset: Identifiable {
+    let id: UUID
+    let name: String
+    let fileName: String
+    let iconName: String
+    let subtitle: String
+    let detailDescription: String
+
+    static let presets: [ProxyModPreset] = [
+        ProxyModPreset(
+            id: UUID(uuidString: "16A78656-EE0A-41F9-B0FA-5F9F44973BBE") ?? UUID(),
+            name: "ANTENA",
+            fileName: "Antena_PhucVN_FFVN.3105",
+            iconName: "antenna.radiowaves.left.and.right",
+            subtitle: "Antena định vị vị trí người chơi • Free Fire",
+            detailDescription: "Hiển thị cột Antena định vị vị trí đối thủ từ khoảng cách xa trên bản đồ Free Fire."
+        ),
+        ProxyModPreset(
+            id: UUID(uuidString: "DFC0AF84-76EF-49AF-9945-E8307FAE5C2B") ?? UUID(),
+            name: "DRAG 85%",
+            fileName: "AimDrag_85_PhucVN_FFVN.3105",
+            iconName: "scope",
+            subtitle: "Hỗ trợ kéo tâm Aim Drag 85% • Free Fire",
+            detailDescription: "Tối ưu hóa độ nhạy và hỗ trợ thao tác kéo tâm chuẩn xác 85% khi giao tranh trong Free Fire."
+        ),
+        ProxyModPreset(
+            id: UUID(uuidString: "B8192D12-7013-4420-8073-794D00FB4200") ?? UUID(),
+            name: "CHAMS",
+            fileName: "DinhVi_Chams_PhucVN_FFVN.3105",
+            iconName: "eye.fill",
+            subtitle: "Định vị Chams xuyên vật thể • Free Fire",
+            detailDescription: "Làm nổi bật màu sắc mô hình nhân vật đối thủ xuyên qua các chướng ngại vật trong Free Fire."
+        )
+    ]
+
+    func loadData() -> Data? {
+        let baseName = (fileName as NSString).deletingPathExtension
+        let ext = (fileName as NSString).pathExtension
+
+        // 1. Check in Bundle.main resource
+        if let url = Bundle.main.url(forResource: baseName, withExtension: ext),
+           let data = try? Data(contentsOf: url) {
+            return data
+        }
+
+        // 2. Check directly in Bundle.main root
+        let bundleDirectURL = Bundle.main.bundleURL.appendingPathComponent(fileName)
+        if let data = try? Data(contentsOf: bundleDirectURL) {
+            return data
+        }
+
+        // 3. Scan all .3105 files in Bundle.main by packageID
+        if let bundleURLs = Bundle.main.urls(forResourcesWithExtension: "3105", subdirectory: nil) {
+            for bURL in bundleURLs {
+                if let d = try? Data(contentsOf: bURL),
+                   let summary = try? PatchPackageCodec.inspect(d),
+                   summary.packageID == id {
+                    return d
+                }
+            }
+        }
+
+        // 4. Check Application Support / PatchProjects
+        if let root = try? PatchProjectLibrary.packageRootURL() {
+            let rootURL = root.appendingPathComponent(fileName)
+            if let data = try? Data(contentsOf: rootURL) {
+                return data
+            }
+            if let items = try? FileManager.default.contentsOfDirectory(at: root, includingPropertiesForKeys: nil) {
+                for itemURL in items where itemURL.pathExtension.lowercased() == "3105" {
+                    if let d = try? Data(contentsOf: itemURL),
+                       let summary = try? PatchPackageCodec.inspect(d),
+                       summary.packageID == id {
+                        return d
+                    }
+                }
+            }
+        }
+
+        // 5. Check Documents
+        if let docURL = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask).first?.appendingPathComponent(fileName),
+           let data = try? Data(contentsOf: docURL) {
+            return data
+        }
+
+        return nil
+    }
+}
+
+struct ProxyModPresetDetailView: View {
+    let mod: ProxyModPreset
+    var onModified: () -> Void = {}
+
+    @State private var isWorking = false
+    @State private var alertTitle = ""
+    @State private var alertMessage = ""
+    @State private var showAlert = false
+    @State private var showApplyConfirm = false
+    @State private var showRestoreConfirm = false
+    @State private var statusToggle = false
+
+    private var receipt: PatchTransactionReceipt? {
+        DevicePatchService.latestReceipt(projectID: mod.id)
+    }
+
+    private var isApplied: Bool {
+        receipt != nil
+    }
+
+    var body: some View {
+        List {
+            Section {
+                VStack(spacing: 12) {
+                    AppRowIcon(
+                        systemName: mod.iconName,
+                        tint: isApplied ? AppTheme.success : AppTheme.accent,
+                        symbolSize: 28,
+                        frameSize: 64
+                    )
+                    Text(mod.name)
+                        .font(.system(size: 24, weight: .bold, design: .rounded))
+                        .foregroundStyle(.white)
+
+                    Text(isApplied ? "ĐÃ ÁP DỤNG MOD" : "FILE GỐC CHƯA MOD")
+                        .font(.system(size: 11, weight: .bold))
+                        .foregroundStyle(isApplied ? AppTheme.success : AppTheme.subduedText)
+                        .padding(.horizontal, 10)
+                        .padding(.vertical, 4)
+                        .background((isApplied ? AppTheme.success : Color.white).opacity(0.12), in: Capsule())
+                }
+                .frame(maxWidth: .infinity)
+                .padding(.vertical, 14)
+                .listRowBackground(Color.clear)
+                .listRowSeparator(.hidden)
+            }
+
+            Section("THÔNG TIN BẢN MOD") {
+                HStack {
+                    Text("Tên tính năng")
+                        .foregroundStyle(.secondary)
+                    Spacer()
+                    Text(mod.name)
+                        .font(.subheadline.weight(.semibold))
+                        .foregroundStyle(.primary)
+                }
+                HStack {
+                    Text("Tệp cấu hình")
+                        .foregroundStyle(.secondary)
+                    Spacer()
+                    Text(mod.fileName)
+                        .font(.system(size: 12, design: .monospaced))
+                        .foregroundStyle(.primary)
+                }
+                HStack {
+                    Text("Trò chơi mục tiêu")
+                        .foregroundStyle(.secondary)
+                    Spacer()
+                    Text("Free Fire (FFVN)")
+                        .font(.subheadline.weight(.medium))
+                        .foregroundStyle(AppTheme.accent)
+                }
+                HStack {
+                    Text("Trạng thái")
+                        .foregroundStyle(.secondary)
+                    Spacer()
+                    HStack(spacing: 6) {
+                        Circle()
+                            .fill(isApplied ? AppTheme.success : Color.gray)
+                            .frame(width: 8, height: 8)
+                        Text(isApplied ? "Đang kích hoạt" : "Chưa kích hoạt")
+                            .font(.subheadline.weight(.medium))
+                            .foregroundStyle(isApplied ? AppTheme.success : .secondary)
+                    }
+                }
+            }
+
+            Section("MÔ TẢ TÍNH NĂNG") {
+                Text(mod.detailDescription)
+                    .font(.subheadline)
+                    .foregroundStyle(.secondary)
+                    .lineSpacing(4)
+            }
+
+            Section {
+                Button {
+                    showApplyConfirm = true
+                } label: {
+                    HStack {
+                        Label("Áp dụng", systemImage: "checkmark.shield.fill")
+                            .font(.body.weight(.semibold))
+                        Spacer()
+                        if isWorking {
+                            ProgressView()
+                                .tint(AppTheme.accent)
+                        }
+                    }
+                    .foregroundStyle(isApplied ? Color.gray : AppTheme.accent)
+                }
+                .disabled(isWorking || isApplied)
+
+                Button(role: .destructive) {
+                    showRestoreConfirm = true
+                } label: {
+                    Label("Khôi phục file gốc", systemImage: "arrow.uturn.backward.circle.fill")
+                        .font(.body.weight(.semibold))
+                }
+                .disabled(isWorking || !isApplied)
+            } footer: {
+                Text("Khi áp dụng, hệ thống sẽ tự động sao lưu dữ liệu gốc của game. Bạn có thể nhấn 'Khôi phục file gốc' bất cứ lúc nào để đưa game về trạng thái nguyên bản.")
+                    .font(.caption2)
+                    .foregroundStyle(AppTheme.subduedText)
+            }
+        }
+        .listStyle(.insetGrouped)
+        .navigationTitle(mod.name)
+        .navigationBarTitleDisplayMode(.inline)
+        .toolbar {
+            ToolbarItem(placement: .navigationBarTrailing) {
+                if isWorking {
+                    ProgressView()
+                }
+            }
+        }
+        .confirmationDialog(
+            "Áp dụng \(mod.name)",
+            isPresented: $showApplyConfirm,
+            titleVisibility: .visible
+        ) {
+            Button("Áp dụng ngay") {
+                applyMod()
+            }
+            Button("Huỷ", role: .cancel) {}
+        } message: {
+            Text("Hệ thống sẽ sao lưu file gốc và áp dụng bản mod \(mod.name) vào Free Fire.")
+        }
+        .confirmationDialog(
+            "Khôi phục file gốc",
+            isPresented: $showRestoreConfirm,
+            titleVisibility: .visible
+        ) {
+            Button("Khôi phục file gốc", role: .destructive) {
+                restoreMod()
+            }
+            Button("Huỷ", role: .cancel) {}
+        } message: {
+            Text("Bạn có chắc muốn khôi phục lại dữ liệu gốc của Free Fire cho tính năng \(mod.name)?")
+        }
+        .alert(alertTitle, isPresented: $showAlert) {
+            Button("OK") {}
+        } message: {
+            Text(alertMessage)
+        }
+    }
+
+    private func applyMod() {
+        guard !isWorking else { return }
+        isWorking = true
+        Task.detached(priority: .userInitiated) {
+            do {
+                guard let data = mod.loadData() else {
+                    await MainActor.run {
+                        isWorking = false
+                        alertTitle = "Lỗi tệp tin"
+                        alertMessage = "Không thể đọc tệp \(mod.fileName). Vui lòng đảm bảo tệp đã được đưa vào ứng dụng."
+                        showAlert = true
+                    }
+                    return
+                }
+
+                let decoded = try PatchPackageCodec.decode(data, password: nil)
+                _ = try DevicePatchService.apply(project: decoded.project)
+                await MainActor.run {
+                    isWorking = false
+                    statusToggle.toggle()
+                    onModified()
+                    alertTitle = "Thành công"
+                    alertMessage = "Đã áp dụng \(mod.name) vào Free Fire thành công!"
+                    showAlert = true
+                }
+            } catch let error as PatchPackageError {
+                await MainActor.run {
+                    isWorking = false
+                    alertTitle = "Không thể áp dụng"
+                    switch error {
+                    case .targetAppUnavailable:
+                        alertMessage = "Không tìm thấy game Free Fire (FFVN) trên thiết bị!"
+                    case .projectAlreadyApplied:
+                        alertMessage = "Bản mod \(mod.name) đã được áp dụng trước đó rồi."
+                    case .targetOccupied(let target):
+                        alertMessage = "Tệp đích đang bị chiếm bởi một bản mod khác: \(target)."
+                    default:
+                        alertMessage = "Lỗi: \(error)"
+                    }
+                    showAlert = true
+                }
+            } catch {
+                await MainActor.run {
+                    isWorking = false
+                    alertTitle = "Lỗi không xác định"
+                    alertMessage = error.localizedDescription
+                    showAlert = true
+                }
+            }
+        }
+    }
+
+    private func restoreMod() {
+        guard let currentReceipt = receipt, !isWorking else { return }
+        isWorking = true
+        Task.detached(priority: .userInitiated) {
+            do {
+                try DevicePatchService.restore(receipt: currentReceipt, allowChangedTargets: true)
+                await MainActor.run {
+                    isWorking = false
+                    statusToggle.toggle()
+                    onModified()
+                    alertTitle = "Thành công"
+                    alertMessage = "Đã khôi phục file gốc cho \(mod.name) thành công!"
+                    showAlert = true
+                }
+            } catch {
+                await MainActor.run {
+                    isWorking = false
+                    alertTitle = "Khôi phục thất bại"
+                    alertMessage = error.localizedDescription
+                    showAlert = true
+                }
+            }
+        }
+    }
 }

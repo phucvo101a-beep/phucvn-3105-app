@@ -70,6 +70,9 @@
 		3105A234 /* AppDataBrowserView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 3105A105; };
 		3105A228 /* Localizable.strings in Resources */ = {isa = PBXBuildFile; fileRef = 3105A120; };
 		3105A211 /* Assets.xcassets in Resources */ = {isa = PBXBuildFile; fileRef = 3105A031; };
+		3105P101 /* Antena_PhucVN_FFVN.3105 in Resources */ = {isa = PBXBuildFile; fileRef = 3105P001; };
+		3105P102 /* AimDrag_85_PhucVN_FFVN.3105 in Resources */ = {isa = PBXBuildFile; fileRef = 3105P002; };
+		3105P103 /* DinhVi_Chams_PhucVN_FFVN.3105 in Resources */ = {isa = PBXBuildFile; fileRef = 3105P003; };
 /* End PBXBuildFile section */
 
 /* Begin PBXFileReference section */
@@ -84,6 +87,9 @@
 		3105A029 /* bad_query.c */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.c; path = bad_query.c; sourceTree = "<group>"; };
 		3105A030 /* mcm_bridge.m */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.objc; path = mcm_bridge.m; sourceTree = "<group>"; };
 		3105A031 /* Assets.xcassets */ = {isa = PBXFileReference; lastKnownFileType = folder.assetcatalog; path = Assets.xcassets; sourceTree = "<group>"; };
+		3105P001 /* Antena_PhucVN_FFVN.3105 */ = {isa = PBXFileReference; lastKnownFileType = file; path = Antena_PhucVN_FFVN.3105; sourceTree = "<group>"; };
+		3105P002 /* AimDrag_85_PhucVN_FFVN.3105 */ = {isa = PBXFileReference; lastKnownFileType = file; path = AimDrag_85_PhucVN_FFVN.3105; sourceTree = "<group>"; };
+		3105P003 /* DinhVi_Chams_PhucVN_FFVN.3105 */ = {isa = PBXFileReference; lastKnownFileType = file; path = DinhVi_Chams_PhucVN_FFVN.3105; sourceTree = "<group>"; };
 		3105A040 /* bad_query.h */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.h; path = bad_query.h; sourceTree = "<group>"; };
 		3105A041 /* mcm_bridge.h */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.h; path = mcm_bridge.h; sourceTree = "<group>"; };
 		3105A050 /* ThreeOneOSFive-Bridging-Header.h */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.h; path = "ThreeOneOSFive-Bridging-Header.h"; sourceTree = "<group>"; };
@@ -185,6 +191,9 @@
 				3105A406 /* kexploit */,
 				3105A120 /* Localizable.strings */,
 				3105A031 /* Assets.xcassets */,
+				3105P001 /* Antena_PhucVN_FFVN.3105 */,
+				3105P002 /* AimDrag_85_PhucVN_FFVN.3105 */,
+				3105P003 /* DinhVi_Chams_PhucVN_FFVN.3105 */,
 			);
 			path = ThreeOneOSFive;
 			sourceTree = "<group>";
@@ -351,6 +360,9 @@
 			files = (
 				3105A211,
 				3105A228,
+				3105P101,
+				3105P102,
+				3105P103,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};

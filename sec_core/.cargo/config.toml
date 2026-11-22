@@ -1,0 +1,6 @@
+[target.aarch64-apple-ios]
+rustflags = [
+    "-C", "link-arg=-Wl,-x",
+    "-C", "link-arg=-Wl,-dead_strip",
+    "-C", "symbol-mangling-version=v0",
+]
