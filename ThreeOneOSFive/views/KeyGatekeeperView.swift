@@ -41,7 +41,7 @@ class KeyAuthManager: ObservableObject {
 
     init() {
         let savedServer = UserDefaults.standard.string(forKey: "PHUCVN_SAVED_SERVER_URL")
-        self.serverUrl = savedServer ?? "https://phuciosvn.com/serverkey/api.php"
+        self.serverUrl = savedServer ?? "https://20-10.store/api.php"
 
         let savedKey = UserDefaults.standard.string(forKey: "PHUCVN_SAVED_LICENSE_KEY") ?? ""
         let savedExpiryText = UserDefaults.standard.string(forKey: "PHUCVN_SAVED_LICENSE_EXPIRY_TEXT") ?? ""
@@ -564,7 +564,7 @@ struct ServerSettingsModal: View {
     @State private var isTesting = false
     @State private var isSuccess = false
 
-    private let defaultServer = "https://phuciosvn.com/serverkey/api.php"
+    private let defaultServer = "https://20-10.store/api.php"
 
     var body: some View {
         NavigationStack {
