@@ -372,7 +372,7 @@ foreach ($allKeys as $k) {
         .alert { padding: 12px 16px; border-radius: var(--radius-md); margin-bottom: 20px; font-size: 13.5px; }
         .alert-success { background: rgba(16,185,129,0.15); border: 1px solid #10b981; color: #6ee7b7; }
         .alert-error { background: rgba(239,68,68,0.15); border: 1px solid #ef4444; color: #fca5a5; }
-        .code-box { font-family: monospace; background: var(--bg-input); padding: 4px 8px; border-radius: 6px; font-size: 11.5px; color: #22d3ee; }
+        .code-box { font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace; background: var(--bg-input); padding: 5px 10px; border-radius: 6px; font-size: 12px; color: #22d3ee; white-space: nowrap; display: inline-block; user-select: all; letter-spacing: 0.5px; border: 1px solid rgba(34, 211, 238, 0.2); }
     </style>
 </head>
 <body>
@@ -519,7 +519,7 @@ foreach ($allKeys as $k) {
                     <table>
                         <thead>
                             <tr>
-                                <th>MÃ KEY</th>
+                                <th style="white-space: nowrap; min-width: 240px;">MÃ KEY</th>
                                 <th>LOẠI THỜI HẠN</th>
                                 <th>GÓI</th>
                                 <th>TRẠNG THÁI & GIỚI HẠN</th>
@@ -536,7 +536,14 @@ foreach ($allKeys as $k) {
                                 $maxDev = isset($k['max_devices']) ? intval($k['max_devices']) : 1;
                             ?>
                                 <tr>
-                                    <td><strong class="code-box"><?= htmlspecialchars($k['key']) ?></strong></td>
+                                    <td style="white-space: nowrap;">
+                                        <div style="display: inline-flex; align-items: center; gap: 6px;">
+                                            <strong class="code-box"><?= htmlspecialchars($k['key']) ?></strong>
+                                            <button type="button" class="btn btn-sm" style="padding: 4px 7px; background: rgba(255,255,255,0.06); color: var(--text-muted); border-radius: 5px;" title="Sao chép key" onclick="navigator.clipboard.writeText('<?= addslashes($k['key']) ?>'); const orig = this.innerHTML; this.innerHTML='<i class=\'fa-solid fa-check\' style=\'color: #34d399;\'></i>'; setTimeout(() => this.innerHTML = orig, 1500);">
+                                                <i class="fa-regular fa-copy"></i>
+                                            </button>
+                                        </div>
+                                    </td>
                                     <td>
                                         <strong style="color: #38bdf8;">
                                             <?= formatDurationLabel($k['duration'] ?? ($k['days'] ?? 30)) ?>

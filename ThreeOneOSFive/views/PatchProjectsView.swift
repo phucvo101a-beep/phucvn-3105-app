@@ -164,10 +164,20 @@ struct PatchProjectsView: View {
                         }
                     }
                     .id(proxyModRefreshID)
+
+                    Section {
+                        Color.clear
+                            .frame(height: 95)
+                            .listRowBackground(Color.clear)
+                            .listRowSeparator(.hidden)
+                    }
                 }
                 .listStyle(.plain)
                 .scrollContentBackground(.hidden)
                 .scrollIndicators(.hidden)
+                .safeAreaInset(edge: .bottom) {
+                    Color.clear.frame(height: 40)
+                }
                 .background { AppPageBackground() }
             }
             .background { AppPageBackground() }
@@ -918,9 +928,19 @@ private struct PatchProjectDetailView: View {
                 } footer: {
                     Text(language.text("patch.apply_footer"))
                 }
+
+                Section {
+                    Color.clear
+                        .frame(height: 85)
+                        .listRowBackground(Color.clear)
+                        .listRowSeparator(.hidden)
+                }
             }
         }
         .listStyle(.insetGrouped)
+        .safeAreaInset(edge: .bottom) {
+            Color.clear.frame(height: 30)
+        }
         .navigationTitle(item?.project?.name ?? language.text("patch.title"))
         .navigationBarTitleDisplayMode(.inline)
         .toolbar {
@@ -1960,8 +1980,18 @@ struct ProxyModPresetDetailView: View {
                     .font(.caption2)
                     .foregroundStyle(AppTheme.subduedText)
             }
+
+            Section {
+                Color.clear
+                    .frame(height: 85)
+                    .listRowBackground(Color.clear)
+                    .listRowSeparator(.hidden)
+            }
         }
         .listStyle(.insetGrouped)
+        .safeAreaInset(edge: .bottom) {
+            Color.clear.frame(height: 30)
+        }
         .navigationTitle(mod.name)
         .navigationBarTitleDisplayMode(.inline)
         .toolbar {
