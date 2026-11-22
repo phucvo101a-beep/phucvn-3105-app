@@ -155,7 +155,7 @@ jobs:
           rustup target add aarch64-apple-ios 2>/dev/null || true
           if [ -d "sec_core" ]; then
             cd sec_core
-            export IPHONEOS_DEPLOYMENT_TARGET=15.0
+            export IPHONEOS_DEPLOYMENT_TARGET=16.0
             cargo build --release --target aarch64-apple-ios || true
             cd ..
             find target -name "libsec_core.dylib" 2>/dev/null || true
