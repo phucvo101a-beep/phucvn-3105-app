@@ -1,33 +1,83 @@
 import Foundation
 import SwiftUI
 
-// C-ABI Linkage to libsec_core.dylib
-@_silgen_name("localdev_init")
-private func c_localdev_init(_ storagePath: UnsafePointer<CChar>?, _ defaultHost: UnsafePointer<CChar>?, _ port: UInt16) -> Int32
+// Dynamic C-ABI Loader for libsec_core.dylib
+private typealias CLocalDevInit = @convention(c) (UnsafePointer<CChar>?, UnsafePointer<CChar>?, UInt16) -> Int32
+private typealias CLocalDevImportPairing = @convention(c) (UnsafePointer<UInt8>, Int) -> UnsafePointer<CChar>?
+private typealias CLocalDevStatus = @convention(c) () -> UnsafePointer<CChar>?
+private typealias CLocalDevScanApps = @convention(c) () -> UnsafePointer<CChar>?
+private typealias CLocalDevListDir = @convention(c) (Int32, UnsafePointer<CChar>?, UnsafePointer<CChar>) -> UnsafePointer<CChar>?
+private typealias CLocalDevReadFile = @convention(c) (Int32, UnsafePointer<CChar>?, UnsafePointer<CChar>, UnsafeMutablePointer<Int>) -> UnsafeMutablePointer<UInt8>?
+private typealias CLocalDevWriteFile = @convention(c) (Int32, UnsafePointer<CChar>?, UnsafePointer<CChar>, UnsafePointer<UInt8>, Int) -> UnsafePointer<CChar>?
+private typealias CLocalDevFreeString = @convention(c) (UnsafePointer<CChar>?) -> Void
+private typealias CLocalDevFreeBytes = @convention(c) (UnsafeMutablePointer<UInt8>?, Int) -> Void
 
-@_silgen_name("localdev_import_pairing")
-private func c_localdev_import_pairing(_ data: UnsafePointer<UInt8>, _ len: Int) -> UnsafePointer<CChar>?
+private final class LocalDevLib {
+    static let shared = LocalDevLib()
 
-@_silgen_name("localdev_status")
-private func c_localdev_status() -> UnsafePointer<CChar>?
+    var fnInit: CLocalDevInit?
+    var fnImportPairing: CLocalDevImportPairing?
+    var fnStatus: CLocalDevStatus?
+    var fnScanApps: CLocalDevScanApps?
+    var fnListDir: CLocalDevListDir?
+    var fnReadFile: CLocalDevReadFile?
+    var fnWriteFile: CLocalDevWriteFile?
+    var fnFreeString: CLocalDevFreeString?
+    var fnFreeBytes: CLocalDevFreeBytes?
 
-@_silgen_name("localdev_scan_apps")
-private func c_localdev_scan_apps() -> UnsafePointer<CChar>?
+    private var handle: UnsafeMutableRawPointer?
 
-@_silgen_name("localdev_list_dir")
-private func c_localdev_list_dir(_ serviceType: Int32, _ bundleID: UnsafePointer<CChar>?, _ path: UnsafePointer<CChar>) -> UnsafePointer<CChar>?
+    init() {
+        resolveSymbols()
+    }
 
-@_silgen_name("localdev_read_file")
-private func c_localdev_read_file(_ serviceType: Int32, _ bundleID: UnsafePointer<CChar>?, _ path: UnsafePointer<CChar>, _ outLen: UnsafeMutablePointer<Int>) -> UnsafeMutablePointer<UInt8>?
+    func resolveSymbols() {
+        if handle == nil {
+            let candidates = [
+                Bundle.main.bundleURL.appendingPathComponent("Frameworks/libsec_core.dylib").path,
+                Bundle.main.bundleURL.appendingPathComponent("libsec_core.dylib").path,
+                "@executable_path/Frameworks/libsec_core.dylib",
+                "@rpath/libsec_core.dylib"
+            ]
+            for path in candidates {
+                if let h = dlopen(path, RTLD_NOW | RTLD_GLOBAL) {
+                    handle = h
+                    break
+                }
+            }
+        }
 
-@_silgen_name("localdev_write_file")
-private func c_localdev_write_file(_ serviceType: Int32, _ bundleID: UnsafePointer<CChar>?, _ path: UnsafePointer<CChar>, _ data: UnsafePointer<UInt8>, _ len: Int) -> UnsafePointer<CChar>?
+        let symTarget = handle ?? UnsafeMutableRawPointer(bitPattern: -2) // RTLD_DEFAULT
 
-@_silgen_name("localdev_free_string")
-private func c_localdev_free_string(_ ptr: UnsafePointer<CChar>?)
-
-@_silgen_name("localdev_free_bytes")
-private func c_localdev_free_bytes(_ ptr: UnsafeMutablePointer<UInt8>?, _ len: Int)
+        if let sym = dlsym(symTarget, "localdev_init") {
+            fnInit = unsafeBitCast(sym, to: CLocalDevInit.self)
+        }
+        if let sym = dlsym(symTarget, "localdev_import_pairing") {
+            fnImportPairing = unsafeBitCast(sym, to: CLocalDevImportPairing.self)
+        }
+        if let sym = dlsym(symTarget, "localdev_status") {
+            fnStatus = unsafeBitCast(sym, to: CLocalDevStatus.self)
+        }
+        if let sym = dlsym(symTarget, "localdev_scan_apps") {
+            fnScanApps = unsafeBitCast(sym, to: CLocalDevScanApps.self)
+        }
+        if let sym = dlsym(symTarget, "localdev_list_dir") {
+            fnListDir = unsafeBitCast(sym, to: CLocalDevListDir.self)
+        }
+        if let sym = dlsym(symTarget, "localdev_read_file") {
+            fnReadFile = unsafeBitCast(sym, to: CLocalDevReadFile.self)
+        }
+        if let sym = dlsym(symTarget, "localdev_write_file") {
+            fnWriteFile = unsafeBitCast(sym, to: CLocalDevWriteFile.self)
+        }
+        if let sym = dlsym(symTarget, "localdev_free_string") {
+            fnFreeString = unsafeBitCast(sym, to: CLocalDevFreeString.self)
+        }
+        if let sym = dlsym(symTarget, "localdev_free_bytes") {
+            fnFreeBytes = unsafeBitCast(sym, to: CLocalDevFreeBytes.self)
+        }
+    }
+}
 
 public enum LocalDevServiceType: Int32 {
     case deviceAfc = 1
@@ -123,15 +173,18 @@ public final class LocalDevBridge: ObservableObject {
     }
 
     public func initCore() {
+        LocalDevLib.shared.resolveSymbols()
         let path = storageDirectory.path
         let host = "10.7.0.1"
-        _ = c_localdev_init(path, host, 62078)
+        _ = LocalDevLib.shared.fnInit?(path, host, 62078)
         refreshStatus()
     }
 
     public func refreshStatus() {
-        guard let cStr = c_localdev_status() else { return }
-        defer { c_localdev_free_string(cStr) }
+        LocalDevLib.shared.resolveSymbols()
+        guard let fnStatus = LocalDevLib.shared.fnStatus,
+              let cStr = fnStatus() else { return }
+        defer { LocalDevLib.shared.fnFreeString?(cStr) }
         let jsonStr = String(cString: cStr)
 
         if let data = jsonStr.data(using: .utf8),
@@ -159,11 +212,19 @@ public final class LocalDevBridge: ObservableObject {
             return false
         }
 
-        let bytes = [UInt8](data)
-        guard let cStr = c_localdev_import_pairing(bytes, bytes.count) else {
+        LocalDevLib.shared.resolveSymbols()
+        guard let fnImport = LocalDevLib.shared.fnImportPairing else {
+            DispatchQueue.main.async {
+                self.lastError = "Lõi bảo mật chưa sẵn sàng"
+            }
             return false
         }
-        defer { c_localdev_free_string(cStr) }
+
+        let bytes = [UInt8](data)
+        guard let cStr = fnImport(bytes, bytes.count) else {
+            return false
+        }
+        defer { LocalDevLib.shared.fnFreeString?(cStr) }
 
         let jsonStr = String(cString: cStr)
         if let respData = jsonStr.data(using: .utf8),
@@ -182,15 +243,17 @@ public final class LocalDevBridge: ObservableObject {
         lastError = nil
 
         DispatchQueue.global(qos: .userInitiated).async {
-            guard let cStr = c_localdev_scan_apps() else {
+            LocalDevLib.shared.resolveSymbols()
+            guard let fnScan = LocalDevLib.shared.fnScanApps,
+                  let cStr = fnScan() else {
                 DispatchQueue.main.async {
                     self.isScanning = false
-                    self.lastError = "Lỗi kết nối installation_proxy"
+                    self.lastError = "Lỗi kết nối installation_proxy hoặc lõi LocalDev"
                     completion([])
                 }
                 return
             }
-            defer { c_localdev_free_string(cStr) }
+            defer { LocalDevLib.shared.fnFreeString?(cStr) }
 
             let jsonStr = String(cString: cStr)
             var resultApps: [LocalDevApp] = []
@@ -211,10 +274,12 @@ public final class LocalDevBridge: ObservableObject {
     }
 
     public func listDirectory(service: LocalDevServiceType, bundleID: String?, path: String) -> [String] {
-        guard let cStr = c_localdev_list_dir(service.rawValue, bundleID, path) else {
+        LocalDevLib.shared.resolveSymbols()
+        guard let fnList = LocalDevLib.shared.fnListDir,
+              let cStr = fnList(service.rawValue, bundleID, path) else {
             return []
         }
-        defer { c_localdev_free_string(cStr) }
+        defer { LocalDevLib.shared.fnFreeString?(cStr) }
 
         let jsonStr = String(cString: cStr)
         if let data = jsonStr.data(using: .utf8),
@@ -226,20 +291,24 @@ public final class LocalDevBridge: ObservableObject {
     }
 
     public func readFile(service: LocalDevServiceType, bundleID: String?, path: String) -> Data? {
+        LocalDevLib.shared.resolveSymbols()
+        guard let fnRead = LocalDevLib.shared.fnReadFile else { return nil }
         var outLen = 0
-        guard let bufPtr = c_localdev_read_file(service.rawValue, bundleID, path, &outLen), outLen > 0 else {
+        guard let bufPtr = fnRead(service.rawValue, bundleID, path, &outLen), outLen > 0 else {
             return nil
         }
-        defer { c_localdev_free_bytes(bufPtr, outLen) }
+        defer { LocalDevLib.shared.fnFreeBytes?(bufPtr, outLen) }
         return Data(bytes: bufPtr, count: outLen)
     }
 
     public func writeFile(service: LocalDevServiceType, bundleID: String?, path: String, data: Data) -> Bool {
+        LocalDevLib.shared.resolveSymbols()
+        guard let fnWrite = LocalDevLib.shared.fnWriteFile else { return false }
         let bytes = [UInt8](data)
-        guard let cStr = c_localdev_write_file(service.rawValue, bundleID, path, bytes, bytes.count) else {
+        guard let cStr = fnWrite(service.rawValue, bundleID, path, bytes, bytes.count) else {
             return false
         }
-        defer { c_localdev_free_string(cStr) }
+        defer { LocalDevLib.shared.fnFreeString?(cStr) }
         let jsonStr = String(cString: cStr)
         return jsonStr.contains("\"success\":true")
     }
