@@ -1816,6 +1816,22 @@ struct ProxyModPreset: Identifiable {
             iconName: "person.crop.circle.badge.checkmark",
             subtitle: "Hỗ trợ ghim tâm Aim Neck • Free Fire",
             detailDescription: "Tối ưu hóa độ nhạy và hỗ trợ ghim tâm vào vùng cổ đối thủ khi giao tranh trong Free Fire."
+        ),
+        ProxyModPreset(
+            id: UUID(uuidString: "5A53E415-D850-4722-ADF3-1FAE7E73F9AB") ?? UUID(),
+            name: "AIM NECK ANTENA",
+            fileName: "AimNeck_Antena_PhucVN_FFVN.3105",
+            iconName: "antenna.radiowaves.left.and.right",
+            subtitle: "Hỗ trợ ghim tâm Aim Neck & Antena • Free Fire",
+            detailDescription: "Kết hợp ghim tâm vùng cổ (Aim Neck) và cột Antena định vị vị trí đối thủ tầm xa trong Free Fire."
+        ),
+        ProxyModPreset(
+            id: UUID(uuidString: "233DAE36-3734-4E2B-8C66-C491B540B4B5") ?? UUID(),
+            name: "AIM DRAG ANTENA",
+            fileName: "AimDrag_85_Antena_PhucVN_FFVN.3105",
+            iconName: "scope",
+            subtitle: "Hỗ trợ kéo tâm Aim Drag 85% & Antena • Free Fire",
+            detailDescription: "Kết hợp trợ lực kéo tâm 85% (Aim Drag) và cột Antena định vị đối thủ tầm xa trong Free Fire."
         )
     ]
 

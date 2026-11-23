@@ -317,6 +317,7 @@ $allKeys = getKeys();
 $allLogs = readJsonFile(LOGS_FILE, []);
 
 $search = strtolower(trim($_GET['q'] ?? ''));
+$keySearch = strtolower(trim($_GET['key_q'] ?? ''));
 if (!empty($search)) {
     $filteredUsers = [];
     foreach ($allUsers as $u) {
@@ -556,7 +557,12 @@ foreach ($allKeys as $k) {
 
             <div class="content-card">
                 <div class="card-header">
-                    <span class="card-title"><i class="fa-solid fa-list-check"></i> Kho Mã Key Đã Tạo & Quản Lý Thiết Bị (<?= count($allKeys) ?>)</span>
+                    <span class="card-title">
+                        <i class="fa-solid fa-list-check"></i> Kho Mã Key Đã Tạo & Quản Lý Thiết Bị 
+                        <span id="keyCountBadge" class="badge badge-member" style="font-size: 11.5px; margin-left: 8px;">
+                            <?= count($allKeys) ?> key
+                        </span>
+                    </span>
                     <form method="POST" style="display:inline;" onsubmit="return confirm('CẢNH BÁO: Reset toàn bộ thiết bị của TẤT CẢ các key trong hệ thống? Khách hàng sẽ được phép kích hoạt lại trên máy mới.');">
                         <input type="hidden" name="action" value="reset_all_keys">
                         <button type="submit" class="btn btn-warning btn-sm" title="Reset tất cả thiết bị của mọi key">
@@ -564,6 +570,43 @@ foreach ($allKeys as $k) {
                         </button>
                     </form>
                 </div>
+
+                <!-- THANH TÌM KIẾM VÀ BỘ LỌC KEY THÔNG MINH -->
+                <div style="background: rgba(255,255,255,0.02); border: 1px solid rgba(255,255,255,0.06); border-radius: var(--radius-md); padding: 12px 14px; margin-bottom: 18px; display: flex; gap: 10px; align-items: center; flex-wrap: wrap; justify-content: space-between;">
+                    <div style="display: flex; gap: 10px; align-items: center; flex: 1; min-width: 260px; max-width: 520px; position: relative;">
+                        <i class="fa-solid fa-magnifying-glass" style="position: absolute; left: 12px; color: var(--text-muted); font-size: 13px; pointer-events: none;"></i>
+                        <input type="text" id="searchKeyInput" class="form-input" placeholder="Tìm theo mã key, HWID thiết bị, gói..." style="padding-left: 36px; padding-right: 32px; height: 38px; font-size: 13px;" value="<?= htmlspecialchars($keySearch) ?>" oninput="filterKeys()" autocomplete="off">
+                        <button type="button" id="clearSearchKeyBtn" style="position: absolute; right: 10px; background: none; border: none; color: var(--text-muted); cursor: pointer; display: none; padding: 4px;" title="Xóa tìm kiếm" onclick="clearKeySearch()">
+                            <i class="fa-solid fa-xmark"></i>
+                        </button>
+                    </div>
+
+                    <div style="display: flex; gap: 8px; align-items: center; flex-wrap: wrap;">
+                        <!-- Lọc trạng thái -->
+                        <select id="filterKeyStatus" class="form-select" style="width: auto; height: 38px; font-size: 12.5px; padding: 0 12px;" onchange="filterKeys()">
+                            <option value="all">⚡ Tất cả trạng thái</option>
+                            <option value="unused">✨ Chưa dùng (0 máy)</option>
+                            <option value="in_use">📱 Đang dùng</option>
+                            <option value="full">🔒 Đã đủ máy</option>
+                            <option value="infinite">♾️ Vô hạn máy</option>
+                        </select>
+
+                        <!-- Lọc thời hạn -->
+                        <select id="filterKeyDuration" class="form-select" style="width: auto; height: 38px; font-size: 12.5px; padding: 0 12px;" onchange="filterKeys()">
+                            <option value="all">⏱️ Tất cả thời hạn</option>
+                            <option value="permanent">Vĩnh Viễn</option>
+                            <option value="30d">30 Ngày</option>
+                            <option value="7d">7 Ngày</option>
+                            <option value="1d">1 Ngày</option>
+                            <option value="1h">1 Giờ</option>
+                        </select>
+
+                        <button type="button" class="btn btn-sm" onclick="resetKeyFilters()" style="height: 38px; background: rgba(255,255,255,0.06); color: var(--text-muted);" title="Làm mới bộ lọc">
+                            <i class="fa-solid fa-rotate-left"></i>
+                        </button>
+                    </div>
+                </div>
+
                 <div class="table-responsive">
                     <table>
                         <thead>
@@ -577,14 +620,32 @@ foreach ($allKeys as $k) {
                                 <th>THAO TÁC</th>
                             </tr>
                         </thead>
-                        <tbody>
+                        <tbody id="keysTableBody">
                             <?php if (empty($allKeys)): ?>
                                 <tr><td colspan="7" style="text-align: center; color: var(--text-muted); padding: 30px;">Chưa có mã key nào. Hãy chọn loại key ở trên để tạo.</td></tr>
                             <?php else: foreach (array_reverse($allKeys) as $k): 
                                 $devCount = isset($k['devices']) && is_array($k['devices']) ? count($k['devices']) : 0;
                                 $maxDev = isset($k['max_devices']) ? intval($k['max_devices']) : 1;
+                                $hwidsJoined = '';
+                                if (!empty($k['devices']) && is_array($k['devices'])) {
+                                    $hwidsJoined = implode(' ', array_column($k['devices'], 'hwid'));
+                                }
+                                $statusSlug = 'in_use';
+                                if ($maxDev === 0) {
+                                    $statusSlug = 'infinite';
+                                } elseif ($devCount === 0) {
+                                    $statusSlug = 'unused';
+                                } elseif ($devCount >= $maxDev) {
+                                    $statusSlug = 'full';
+                                }
                             ?>
-                                <tr>
+                                <tr class="key-row" 
+                                    data-key="<?= strtolower(htmlspecialchars($k['key'])) ?>"
+                                    data-duration="<?= strtolower(htmlspecialchars($k['duration'] ?? ($k['days'] ?? ''))) ?>"
+                                    data-role="<?= strtolower(htmlspecialchars($k['role'] ?? 'vip')) ?>"
+                                    data-status="<?= $statusSlug ?>"
+                                    data-hwids="<?= strtolower(htmlspecialchars($hwidsJoined)) ?>"
+                                >
                                     <td style="white-space: nowrap;">
                                         <div style="display: inline-flex; align-items: center; gap: 6px;">
                                             <strong class="code-box"><?= htmlspecialchars($k['key']) ?></strong>
@@ -674,6 +735,12 @@ foreach ($allKeys as $k) {
                                     </td>
                                 </tr>
                             <?php endforeach; endif; ?>
+                            <tr id="noKeyMatchRow" style="display: none;">
+                                <td colspan="7" style="text-align: center; color: var(--text-muted); padding: 32px;">
+                                    <i class="fa-solid fa-magnifying-glass" style="font-size: 20px; margin-bottom: 8px; display: block; color: #64748b;"></i>
+                                    Không tìm thấy mã key nào phù hợp với điều kiện tìm kiếm.
+                                </td>
+                            </tr>
                         </tbody>
                     </table>
                 </div>
@@ -932,6 +999,82 @@ foreach ($allKeys as $k) {
     </div>
 
     <script>
+        function filterKeys() {
+            var query = (document.getElementById('searchKeyInput')?.value || '').trim().toLowerCase();
+            var statusFilter = document.getElementById('filterKeyStatus')?.value || 'all';
+            var durationFilter = document.getElementById('filterKeyDuration')?.value || 'all';
+            var clearBtn = document.getElementById('clearSearchKeyBtn');
+
+            if (clearBtn) {
+                clearBtn.style.display = query ? 'block' : 'none';
+            }
+
+            var rows = document.querySelectorAll('#keysTableBody tr.key-row');
+            var visibleCount = 0;
+
+            rows.forEach(function(row) {
+                var key = row.getAttribute('data-key') || '';
+                var hwids = row.getAttribute('data-hwids') || '';
+                var duration = row.getAttribute('data-duration') || '';
+                var status = row.getAttribute('data-status') || '';
+                var textContent = row.textContent.toLowerCase();
+
+                var matchesQuery = !query || key.includes(query) || hwids.includes(query) || textContent.includes(query);
+                var matchesStatus = (statusFilter === 'all') || (status === statusFilter);
+
+                var matchesDuration = true;
+                if (durationFilter !== 'all') {
+                    if (durationFilter === 'permanent') {
+                        matchesDuration = duration.includes('permanent') || duration.includes('vĩnh viễn') || key.includes('life');
+                    } else if (durationFilter === '30d') {
+                        matchesDuration = duration.includes('30') || key.includes('30d');
+                    } else if (durationFilter === '7d') {
+                        matchesDuration = duration.includes('7') || key.includes('7d');
+                    } else if (durationFilter === '1d') {
+                        matchesDuration = duration.includes('1d') || duration === '1' || key.includes('1d');
+                    } else if (durationFilter === '1h') {
+                        matchesDuration = duration.includes('1h') || key.includes('1h');
+                    }
+                }
+
+                if (matchesQuery && matchesStatus && matchesDuration) {
+                    row.style.display = '';
+                    visibleCount++;
+                } else {
+                    row.style.display = 'none';
+                }
+            });
+
+            var badge = document.getElementById('keyCountBadge');
+            if (badge) {
+                badge.textContent = visibleCount + ' / ' + rows.length + ' key';
+            }
+
+            var noMatchRow = document.getElementById('noKeyMatchRow');
+            if (noMatchRow) {
+                noMatchRow.style.display = (visibleCount === 0 && rows.length > 0) ? '' : 'none';
+            }
+        }
+
+        function clearKeySearch() {
+            var input = document.getElementById('searchKeyInput');
+            if (input) {
+                input.value = '';
+                filterKeys();
+                input.focus();
+            }
+        }
+
+        function resetKeyFilters() {
+            var searchInput = document.getElementById('searchKeyInput');
+            var statusSelect = document.getElementById('filterKeyStatus');
+            var durationSelect = document.getElementById('filterKeyDuration');
+            if (searchInput) searchInput.value = '';
+            if (statusSelect) statusSelect.value = 'all';
+            if (durationSelect) durationSelect.value = 'all';
+            filterKeys();
+        }
+
         function switchTab(tabId, btn) {
             document.querySelectorAll('.tab-pane').forEach(el => el.style.display = 'none');
             document.querySelectorAll('.tab-btn').forEach(el => el.classList.remove('active'));
@@ -955,6 +1098,11 @@ foreach ($allKeys as $k) {
             var tabBtn = document.querySelector('.tab-btn[onclick*="' + savedTab + '"]');
             if (tabBtn) {
                 switchTab(savedTab, tabBtn);
+            }
+
+            // Kích hoạt bộ lọc tìm kiếm key nếu có sẵn query
+            if (document.getElementById('searchKeyInput')?.value) {
+                filterKeys();
             }
         });
     </script>
