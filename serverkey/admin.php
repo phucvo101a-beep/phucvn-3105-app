@@ -8,7 +8,9 @@ require_once __DIR__ . '/config.php';
 $settings = getSettings();
 $msg = $_SESSION['flash_msg'] ?? '';
 $error = $_SESSION['flash_error'] ?? '';
-unset($_SESSION['flash_msg'], $_SESSION['flash_error']);
+$newlyCreatedKeys = $_SESSION['newly_created_keys'] ?? [];
+$newlyCreatedMeta = $_SESSION['newly_created_meta'] ?? null;
+unset($_SESSION['flash_msg'], $_SESSION['flash_error'], $_SESSION['newly_created_keys'], $_SESSION['newly_created_meta']);
 
 // Đăng xuất
 if (isset($_GET['action']) && $_GET['action'] === 'logout') {
@@ -151,6 +153,7 @@ if ($isLoggedIn && $_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['action
         elseif ($duration === 'permanent') $prefix = 'LIFE-';
 
         $keys = getKeys();
+        $createdKeys = [];
         for ($k = 0; $k < $qty; $k++) {
             $keyCode = 'PHUCVN-' . $prefix . strtoupper(substr(bin2hex(random_bytes(3)), 0, 4) . '-' . substr(bin2hex(random_bytes(3)), 0, 4));
             $keys[] = [
@@ -164,12 +167,20 @@ if ($isLoggedIn && $_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['action
                 'used_at' => null,
                 'created_at' => date('Y-m-d H:i:s')
             ];
+            $createdKeys[] = $keyCode;
         }
         saveKeys($keys);
         $durName = formatDurationLabel($duration);
         $devName = ($maxDevices === 0) ? 'Không giới hạn thiết bị' : "{$maxDevices} thiết bị";
         addLog('admin', 'admin', "Tạo {$qty} Key bản quyền mới loại {$durName} (Giới hạn: {$devName})");
         $msg = "Đã tạo thành công {$qty} Key bản quyền loại {$durName} (Giới hạn: {$devName})!";
+        $_SESSION['newly_created_keys'] = $createdKeys;
+        $_SESSION['newly_created_meta'] = [
+            'duration' => $durName,
+            'devices' => $devName,
+            'qty' => $qty,
+            'role' => strtoupper($role)
+        ];
     }
 
     // 7. Xóa Key bản quyền
@@ -554,6 +565,83 @@ foreach ($allKeys as $k) {
                     <button type="submit" class="btn btn-primary"><i class="fa-solid fa-key"></i> Sinh Mã Key Ngay</button>
                 </form>
             </div>
+
+            <?php if (!empty($newlyCreatedKeys)): 
+                $allKeysText = implode("\n", $newlyCreatedKeys);
+            ?>
+                <!-- BẢNG MÃ KEY VỪA TẠO & NÚT SAO CHÉP TẤT CẢ -->
+                <div id="newlyCreatedKeysCard" class="content-card" style="border: 2px solid #a855f7; box-shadow: 0 0 30px rgba(168, 85, 247, 0.4); background: linear-gradient(180deg, rgba(168, 85, 247, 0.16) 0%, var(--bg-surface) 100%); margin-bottom: 24px;">
+                    <div class="card-header" style="border-bottom: 1px solid rgba(168, 85, 247, 0.3); padding-bottom: 14px; margin-bottom: 16px;">
+                        <div>
+                            <span class="card-title" style="color: #f3e8ff; font-size: 17px; font-weight: 800;">
+                                <i class="fa-solid fa-circle-check" style="color: #34d399; font-size: 20px;"></i>
+                                Danh Sách <?= count($newlyCreatedKeys) ?> Mã Key Vừa Tạo Mới
+                            </span>
+                            <div style="font-size: 12.5px; color: var(--text-muted); margin-top: 5px;">
+                                Thời hạn: <strong style="color: #38bdf8;"><?= htmlspecialchars($newlyCreatedMeta['duration'] ?? '') ?></strong> • 
+                                Giới hạn: <strong style="color: #34d399;"><?= htmlspecialchars($newlyCreatedMeta['devices'] ?? '') ?></strong> • 
+                                Gói: <span class="badge badge-vip"><?= htmlspecialchars($newlyCreatedMeta['role'] ?? 'VIP') ?></span>
+                            </div>
+                        </div>
+
+                        <div style="display: flex; gap: 8px; align-items: center; flex-wrap: wrap;">
+                            <!-- NÚT SAO CHÉP TẤT CẢ KEY VỪA TẠO -->
+                            <button type="button" class="btn btn-primary" id="copyAllKeysBtn" onclick="copyAllCreatedKeys()" style="background: linear-gradient(135deg, #9333ea, #06b6d4); font-weight: 700; padding: 9px 18px; font-size: 13.5px; box-shadow: 0 4px 15px rgba(147, 51, 234, 0.45); cursor: pointer;">
+                                <i class="fa-solid fa-copy"></i> Sao Chép Tất Cả Key Vừa Tạo (<?= count($newlyCreatedKeys) ?>)
+                            </button>
+
+                            <button type="button" class="btn btn-sm" style="background: rgba(255,255,255,0.08); color: var(--text-muted);" onclick="document.getElementById('newlyCreatedKeysCard').style.display='none'" title="Đóng bảng này">
+                                <i class="fa-solid fa-xmark"></i> Đóng
+                            </button>
+                        </div>
+                    </div>
+
+                    <!-- Khung xem nhanh danh sách key (mỗi key 1 dòng) -->
+                    <div style="margin-bottom: 16px;">
+                        <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 6px;">
+                            <label class="form-label" style="margin-bottom: 0; font-size: 11.5px; color: #cbd5e1;">
+                                <i class="fa-solid fa-list"></i> Danh sách dạng văn bản (Click vào để bôi đen toàn bộ):
+                            </label>
+                            <span style="font-size: 11px; color: var(--text-muted);"><?= count($newlyCreatedKeys) ?> dòng</span>
+                        </div>
+                        <textarea id="allCreatedKeysTextarea" readonly style="width: 100%; height: <?= min(200, max(72, count($newlyCreatedKeys) * 26 + 22)) ?>px; background: rgba(0,0,0,0.45); border: 1px solid rgba(168, 85, 247, 0.3); border-radius: var(--radius-md); padding: 10px 14px; color: #22d3ee; font-family: ui-monospace, SFMono-Regular, Consolas, monospace; font-size: 13px; line-height: 1.6; resize: vertical; outline: none;" onclick="this.select();"><?= htmlspecialchars($allKeysText) ?></textarea>
+                    </div>
+
+                    <!-- Bảng chi tiết từng key vừa tạo -->
+                    <div class="table-responsive" style="max-height: 320px; overflow-y: auto;">
+                        <table>
+                            <thead>
+                                <tr>
+                                    <th style="width: 50px;">STT</th>
+                                    <th style="min-width: 250px;">MÃ KEY</th>
+                                    <th>THỜI HẠN</th>
+                                    <th>GIỚI HẠN MÁY</th>
+                                    <th>GÓI</th>
+                                    <th style="text-align: right;">THAO TÁC</th>
+                                </tr>
+                            </thead>
+                            <tbody>
+                                <?php foreach ($newlyCreatedKeys as $i => $nKey): ?>
+                                    <tr>
+                                        <td style="color: var(--text-muted); font-size: 12px; font-weight: 700;">#<?= $i + 1 ?></td>
+                                        <td>
+                                            <strong class="code-box" style="font-size: 13px; border-color: rgba(168, 85, 247, 0.45); color: #f3e8ff; background: rgba(147, 51, 234, 0.2);"><?= htmlspecialchars($nKey) ?></strong>
+                                        </td>
+                                        <td><strong style="color: #38bdf8;"><?= htmlspecialchars($newlyCreatedMeta['duration'] ?? '') ?></strong></td>
+                                        <td><span style="color: #34d399; font-weight: 700;"><?= htmlspecialchars($newlyCreatedMeta['devices'] ?? '') ?></span></td>
+                                        <td><span class="badge badge-vip"><?= htmlspecialchars($newlyCreatedMeta['role'] ?? 'VIP') ?></span></td>
+                                        <td style="text-align: right;">
+                                            <button type="button" class="btn btn-sm" style="padding: 5px 12px; background: rgba(255,255,255,0.08); color: #fff;" onclick="navigator.clipboard.writeText('<?= addslashes($nKey) ?>'); const o=this.innerHTML; this.innerHTML='<i class=\'fa-solid fa-check\' style=\'color: #34d399;\'></i> Đã chép'; setTimeout(()=>this.innerHTML=o, 1500);" title="Sao chép riêng key này">
+                                                <i class="fa-regular fa-copy"></i> Sao chép
+                                            </button>
+                                        </td>
+                                    </tr>
+                                <?php endforeach; ?>
+                            </tbody>
+                        </table>
+                    </div>
+                </div>
+            <?php endif; ?>
 
             <div class="content-card">
                 <div class="card-header">
@@ -1063,6 +1151,36 @@ foreach ($allKeys as $k) {
                 filterKeys();
                 input.focus();
             }
+        }
+
+        function copyAllCreatedKeys() {
+            var textarea = document.getElementById('allCreatedKeysTextarea');
+            var btn = document.getElementById('copyAllKeysBtn');
+            if (!textarea) return;
+
+            textarea.select();
+            if (navigator.clipboard && navigator.clipboard.writeText) {
+                navigator.clipboard.writeText(textarea.value).then(function() {
+                    showCopiedFeedback(btn);
+                }).catch(function() {
+                    document.execCommand('copy');
+                    showCopiedFeedback(btn);
+                });
+            } else {
+                document.execCommand('copy');
+                showCopiedFeedback(btn);
+            }
+        }
+
+        function showCopiedFeedback(btn) {
+            if (!btn) return;
+            var origHtml = btn.innerHTML;
+            btn.innerHTML = '<i class="fa-solid fa-check" style="color: #34d399;"></i> ĐÃ SAO CHÉP TẤT CẢ KEY!';
+            btn.style.background = '#059669';
+            setTimeout(function() {
+                btn.innerHTML = origHtml;
+                btn.style.background = 'linear-gradient(135deg, #9333ea, #06b6d4)';
+            }, 2500);
         }
 
         function resetKeyFilters() {
