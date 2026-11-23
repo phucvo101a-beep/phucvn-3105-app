@@ -14,21 +14,64 @@ unset($_SESSION['flash_msg'], $_SESSION['flash_error'], $_SESSION['newly_created
 
 // Đăng xuất
 if (isset($_GET['action']) && $_GET['action'] === 'logout') {
-    unset($_SESSION['admin_logged_in']);
+    unset($_SESSION['admin_logged_in'], $_SESSION['admin_current_user']);
     header('Location: admin.php');
     exit;
 }
 
-// Đăng nhập Admin
+// Đăng nhập Admin (Hỗ trợ cả Master Admin trong Cài đặt và Tài khoản có quyền ADMIN trong Quản lý tài khoản)
 if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['action']) && $_POST['action'] === 'admin_login') {
     $adminUser = trim($_POST['username'] ?? '');
     $adminPass = trim($_POST['password'] ?? '');
 
+    $loginOk = false;
+    $loggedUsername = $adminUser;
+
+    // 1. Kiểm tra tài khoản Master Admin cấu hình trong settings
     if ($adminUser === $settings['admin_user'] && $adminPass === $settings['admin_pass']) {
+        $loginOk = true;
+        $loggedUsername = $settings['admin_user'];
+    } 
+    // 2. Kiểm tra danh sách tài khoản được cấp quyền Admin trong hệ thống (users.json)
+    else {
+        $foundUser = findUserByUsername($adminUser);
+        if ($foundUser) {
+            if (empty($foundUser['is_active'])) {
+                $error = 'Tài khoản này đã bị khóa!';
+            } elseif (verifyUserPassword($adminPass, $foundUser['password'] ?? '')) {
+                if (strtolower($foundUser['role'] ?? '') === 'admin') {
+                    // Kiểm tra hạn sử dụng của tài khoản admin (nếu có hạn)
+                    if (!empty($foundUser['expiry_date']) && $foundUser['expiry_date'] !== 'permanent') {
+                        $now = new DateTime();
+                        $exp = new DateTime($foundUser['expiry_date']);
+                        if ($now > $exp) {
+                            $error = 'Tài khoản Quản trị này đã hết hạn sử dụng (' . $exp->format('d/m/Y H:i') . ')!';
+                        } else {
+                            $loginOk = true;
+                            $loggedUsername = $foundUser['username'];
+                        }
+                    } else {
+                        $loginOk = true;
+                        $loggedUsername = $foundUser['username'];
+                    }
+                } else {
+                    $error = 'Tài khoản "' . htmlspecialchars($foundUser['username']) . '" có vai trò ' . strtoupper($foundUser['role'] ?? 'MEMBER') . ', không có quyền truy cập trang Quản Trị Admin!';
+                }
+            } else {
+                $error = 'Sai tài khoản hoặc mật khẩu quản trị!';
+            }
+        } else {
+            $error = 'Sai tài khoản hoặc mật khẩu quản trị!';
+        }
+    }
+
+    if ($loginOk) {
         $_SESSION['admin_logged_in'] = true;
+        $_SESSION['admin_current_user'] = $loggedUsername;
+        addLog('login_success', $loggedUsername, "Đăng nhập trang quản trị Admin thành công", null, $_SERVER['REMOTE_ADDR'] ?? null);
         header('Location: admin.php');
         exit;
-    } else {
+    } elseif (empty($error)) {
         $error = 'Sai tài khoản hoặc mật khẩu quản trị!';
     }
 }
@@ -474,6 +517,10 @@ foreach ($allKeys as $k) {
             <span><?= htmlspecialchars($settings['app_name']) ?> <span style="font-size: 11px; color: var(--accent-cyan); font-weight: normal;">Control Center</span></span>
         </div>
         <div class="nav-links">
+            <span style="font-size: 12.5px; color: #cbd5e1; display: inline-flex; align-items: center; gap: 6px; margin-right: 6px;">
+                <i class="fa-solid fa-user-shield" style="color: #34d399;"></i>
+                <strong style="color: #fff;"><?= htmlspecialchars($_SESSION['admin_current_user'] ?? $settings['admin_user']) ?></strong>
+            </span>
             <a href="https://phuciosvn.com/" target="_blank" class="nav-btn"><i class="fa-solid fa-cart-shopping"></i> Xem Shop phuciosvn.com</a>
             <a href="admin.php?action=logout" class="nav-btn logout"><i class="fa-solid fa-power-off"></i> Đăng Xuất</a>
         </div>
