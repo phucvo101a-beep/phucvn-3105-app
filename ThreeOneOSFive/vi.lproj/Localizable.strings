@@ -31,7 +31,7 @@
 "onboarding.install_message" = "3105 cần phương thức ký được hỗ trợ để truy cập các tính năng của thiết bị.";
 "onboarding.install_ok" = "Hoạt động với chứng chỉ doanh nghiệp, bao gồm eSign và các bản cài enterprise tương tự.";
 "onboarding.install_bad" = "Không hoạt động với SideStore, AltStore, 3uTools hoặc LiveContainer.";
-"onboarding.install_jailbreak" = "Trên iOS 15 đến iOS 27.2.1, 3105 hoạt động ổn định nhất trên thiết bị chưa jailbreak.";
+"onboarding.install_jailbreak" = "Trên iOS 16 đến iOS 27.2.1, 3105 hoạt động ổn định nhất trên thiết bị chưa jailbreak.";
 "onboarding.install_footer" = "Hãy dùng chứng chỉ được hỗ trợ trên thiết bị chưa jailbreak trước khi tiếp tục.";
 
 "dashboard.exploit_access" = "Quyền exploit";

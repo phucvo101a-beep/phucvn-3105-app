@@ -35,7 +35,7 @@ jobs:
       - name: Verify & Compile libsec_core (Release for iOS ARM64)
         run: |
           cd sec_core
-          export IPHONEOS_DEPLOYMENT_TARGET=15.0
+          export IPHONEOS_DEPLOYMENT_TARGET=16.0
           echo "Running cargo check..."
           cargo check --target aarch64-apple-ios
           echo "Running cargo clippy..."

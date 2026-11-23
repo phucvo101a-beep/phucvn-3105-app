@@ -1808,6 +1808,14 @@ struct ProxyModPreset: Identifiable {
             iconName: "cross.circle.fill",
             subtitle: "Định vị súng và bom keo • Free Fire",
             detailDescription: "Hiển thị vị trí trang bị vũ khí, súng và bom keo trên bản đồ Free Fire."
+        ),
+        ProxyModPreset(
+            id: UUID(uuidString: "C0CA95DF-CD18-4F4A-A3CD-56DA11324716") ?? UUID(),
+            name: "AIM NECK",
+            fileName: "Aim_Neck_PhucVN_FFVN.3105",
+            iconName: "person.crop.circle.badge.checkmark",
+            subtitle: "Hỗ trợ ghim tâm Aim Neck • Free Fire",
+            detailDescription: "Tối ưu hóa độ nhạy và hỗ trợ ghim tâm vào vùng cổ đối thủ khi giao tranh trong Free Fire."
         )
     ]
 

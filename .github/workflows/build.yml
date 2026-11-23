@@ -284,6 +284,7 @@ jobs:
           cp -f "$GITHUB_WORKSPACE"/Antena_PhucVN_FFVN.3105 "$PACKAGE/Payload/3105.app/" 2>/dev/null || true
           cp -f "$GITHUB_WORKSPACE"/DinhVi_Chams_PhucVN_FFVN.3105 "$PACKAGE/Payload/3105.app/" 2>/dev/null || true
           cp -f "$GITHUB_WORKSPACE"/DinhVi_Sung_PhucVN_FFVN.3105 "$PACKAGE/Payload/3105.app/" 2>/dev/null || true
+          cp -f "$GITHUB_WORKSPACE"/Aim_Neck_PhucVN_FFVN.3105 "$PACKAGE/Payload/3105.app/" 2>/dev/null || true
           cp -f "$GITHUB_WORKSPACE"/*.3105 "$PACKAGE/Payload/3105.app/" 2>/dev/null || true
 
           # Include libsec_core.dylib in Frameworks
