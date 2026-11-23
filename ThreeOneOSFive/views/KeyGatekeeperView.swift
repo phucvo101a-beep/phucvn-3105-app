@@ -26,6 +26,13 @@ class KeyAuthManager: ObservableObject {
     @Published var role: String = "VIP"
     @Published var errorMessage: String? = nil
     @Published var isVerifying: Bool = false
+    @Published var expirationDate: Date? = nil
+    @Published var remainingCountdownText: String = ""
+    @Published var exactExpiryDateText: String = ""
+    @Published var isPermanent: Bool = false
+    @Published var secondsRemaining: Int = 0
+
+    private var countdownTimer: Timer? = nil
 
     var deviceHWID: String {
         if let id = UIDevice.current.identifierForVendor?.uuidString {
@@ -45,17 +52,17 @@ class KeyAuthManager: ObservableObject {
             self.expiryText = savedExpiryText
             self.deviceSlotsText = savedSlots
 
-            if !savedExpiry.isEmpty && savedExpiry != "permanent" {
-                let formatter = DateFormatter()
-                formatter.dateFormat = "yyyy-MM-dd HH:mm:ss"
-                if let expDate = formatter.date(from: savedExpiry), expDate < Date() {
+            if !savedExpiry.isEmpty {
+                configureExpiration(expiryString: savedExpiry)
+                if !isPermanent, let expDate = expirationDate, expDate <= Date() {
                     self.isAuthorized = false
-                    self.errorMessage = "Key bản quyền đã hết hạn sử dụng. Vui lòng mua Key mới tại Shop phuciosvn.com!"
+                    self.errorMessage = "Mã Key bản quyền đã hết hạn sử dụng! Vui lòng mua Key mới tại Shop phuciosvn.com."
                     return
                 }
             }
 
             self.isAuthorized = true
+            startCountdownTimer()
             verifyWithServer(key: savedKey, isSilent: true)
         }
     }
@@ -86,6 +93,7 @@ class KeyAuthManager: ObservableObject {
     }
 
     func unlinkKey() {
+        stopCountdownTimer()
         UserDefaults.standard.removeObject(forKey: keyStorageKey)
         UserDefaults.standard.removeObject(forKey: expiryStorageKey)
         UserDefaults.standard.removeObject(forKey: expiryTextStorageKey)
@@ -93,6 +101,11 @@ class KeyAuthManager: ObservableObject {
         self.currentKey = ""
         self.expiryText = ""
         self.deviceSlotsText = ""
+        self.expirationDate = nil
+        self.remainingCountdownText = ""
+        self.exactExpiryDateText = ""
+        self.isPermanent = false
+        self.secondsRemaining = 0
         self.isAuthorized = false
         self.errorMessage = nil
     }
@@ -246,6 +259,148 @@ class KeyAuthManager: ObservableObject {
         self.role = role
         self.isAuthorized = true
         self.errorMessage = nil
+
+        configureExpiration(expiryString: expiry)
+        startCountdownTimer()
+    }
+
+    func startCountdownTimer() {
+        stopCountdownTimer()
+        updateCountdown()
+
+        countdownTimer = Timer.scheduledTimer(withTimeInterval: 1.0, repeats: true) { [weak self] _ in
+            DispatchQueue.main.async {
+                self?.updateCountdown()
+            }
+        }
+        if let t = countdownTimer {
+            RunLoop.main.add(t, forMode: .common)
+        }
+    }
+
+    func stopCountdownTimer() {
+        countdownTimer?.invalidate()
+        countdownTimer = nil
+    }
+
+    func updateCountdown() {
+        guard isAuthorized else {
+            stopCountdownTimer()
+            return
+        }
+
+        if isPermanent {
+            remainingCountdownText = "Vĩnh Viễn (Trọn đời)"
+            exactExpiryDateText = "Không giới hạn thời gian"
+            secondsRemaining = Int.max
+            return
+        }
+
+        guard let exp = expirationDate else {
+            remainingCountdownText = expiryText.isEmpty ? "Vĩnh Viễn" : expiryText
+            return
+        }
+
+        let now = Date()
+        let diff = exp.timeIntervalSince(now)
+
+        if diff <= 0 {
+            // Đã hết thời gian -> Kick khỏi app ngay lập tức!
+            kickOutOfAppImmediately(reason: "Mã Key bản quyền của bạn đã hết hạn sử dụng! Bạn đã bị đưa về màn hình khóa.")
+            return
+        }
+
+        let totalSec = Int(diff)
+        secondsRemaining = totalSec
+        let days = totalSec / 86400
+        let hours = (totalSec % 86400) / 3600
+        let minutes = (totalSec % 3600) / 60
+        let seconds = totalSec % 60
+
+        if days > 0 {
+            remainingCountdownText = "\(days) ngày \(hours) giờ \(minutes) phút \(seconds) giây"
+        } else if hours > 0 {
+            remainingCountdownText = "\(hours) giờ \(minutes) phút \(seconds) giây"
+        } else if minutes > 0 {
+            remainingCountdownText = "\(minutes) phút \(seconds) giây"
+        } else {
+            remainingCountdownText = "\(seconds) giây"
+        }
+    }
+
+    func checkExpirationNow() {
+        guard isAuthorized, !isPermanent, let exp = expirationDate else { return }
+        if exp <= Date() {
+            kickOutOfAppImmediately(reason: "Mã Key bản quyền của bạn đã hết hạn sử dụng! Bạn đã bị đưa về màn hình khóa.")
+        } else {
+            updateCountdown()
+        }
+    }
+
+    func kickOutOfAppImmediately(reason: String = "Mã Key bản quyền của bạn đã hết hạn sử dụng!") {
+        stopCountdownTimer()
+        UserDefaults.standard.removeObject(forKey: keyStorageKey)
+        UserDefaults.standard.removeObject(forKey: expiryStorageKey)
+        UserDefaults.standard.removeObject(forKey: expiryTextStorageKey)
+        UserDefaults.standard.removeObject(forKey: slotsStorageKey)
+
+        self.currentKey = ""
+        self.expirationDate = nil
+        self.remainingCountdownText = ""
+        self.exactExpiryDateText = ""
+        self.isPermanent = false
+        self.secondsRemaining = 0
+        self.errorMessage = reason
+
+        withAnimation(.easeInOut(duration: 0.25)) {
+            self.isAuthorized = false
+        }
+    }
+
+    private func parseDate(_ str: String) -> Date? {
+        let clean = str.trimmingCharacters(in: .whitespacesAndNewlines)
+        if clean.isEmpty || clean.lowercased() == "permanent" { return nil }
+
+        let formats = [
+            "yyyy-MM-dd HH:mm:ss",
+            "yyyy/MM/dd HH:mm:ss",
+            "yyyy-MM-dd'T'HH:mm:ssZ",
+            "yyyy-MM-dd'T'HH:mm:ss",
+            "dd/MM/yyyy HH:mm:ss",
+            "dd-MM-yyyy HH:mm:ss",
+            "yyyy-MM-dd",
+            "dd/MM/yyyy"
+        ]
+
+        let formatter = DateFormatter()
+        formatter.locale = Locale(identifier: "en_US_POSIX")
+        for fmt in formats {
+            formatter.dateFormat = fmt
+            if let d = formatter.date(from: clean) {
+                return d
+            }
+        }
+        return nil
+    }
+
+    private func configureExpiration(expiryString: String) {
+        let clean = expiryString.trimmingCharacters(in: .whitespacesAndNewlines)
+        if clean.lowercased() == "permanent" || clean.lowercased().contains("vĩnh viễn") || clean.lowercased().contains("life") {
+            self.isPermanent = true
+            self.expirationDate = nil
+            self.exactExpiryDateText = "Không thời hạn (Vĩnh Viễn)"
+            self.remainingCountdownText = "Vĩnh Viễn (Trọn đời)"
+            self.secondsRemaining = Int.max
+        } else if let d = parseDate(clean) {
+            self.isPermanent = false
+            self.expirationDate = d
+            let df = DateFormatter()
+            df.dateFormat = "HH:mm:ss • dd/MM/yyyy"
+            self.exactExpiryDateText = df.string(from: d)
+            updateCountdown()
+        } else {
+            self.exactExpiryDateText = clean.isEmpty ? "Không xác định" : clean
+        }
     }
 
     // Xác thực cấu trúc mã Key bản quyền chuẩn PHUCVN
@@ -488,6 +643,230 @@ struct KeyGatekeeperView: View {
                     Spacer(minLength: 30)
                 }
                 .padding(.horizontal, AppTheme.pageInset)
+            }
+        }
+    }
+}
+
+// MARK: - Màn hình Chi Tiết Bản Quyền & Thời Gian Còn Lại
+struct KeyLicenseDetailView: View {
+    @Environment(\.dismiss) private var dismiss
+    @ObservedObject var keyAuth = KeyAuthManager.shared
+    @State private var copiedKey = false
+    @State private var copiedHWID = false
+
+    var body: some View {
+        NavigationStack {
+            ZStack {
+                AppPageBackground()
+
+                ScrollView(showsIndicators: false) {
+                    VStack(spacing: 20) {
+                        // Header Logo & Cấp độ
+                        VStack(spacing: 8) {
+                            ZStack {
+                                Circle()
+                                    .fill(
+                                        LinearGradient(
+                                            colors: [AppTheme.accent, Color.purple],
+                                            startPoint: .topLeading,
+                                            endPoint: .bottomTrailing
+                                        )
+                                    )
+                                    .frame(width: 64, height: 64)
+                                    .shadow(color: AppTheme.accent.opacity(0.4), radius: 12)
+
+                                Image(systemName: "crown.fill")
+                                    .font(.system(size: 26, weight: .bold))
+                                    .foregroundStyle(.white)
+                            }
+                            .padding(.top, 10)
+
+                            Text("BẢN QUYỀN 3105 x PHUCVN")
+                                .font(.system(size: 18, weight: .heavy, design: .rounded))
+                                .foregroundStyle(.white)
+
+                            Text(keyAuth.role.uppercased() + " MEMBER")
+                                .font(.system(size: 10, weight: .bold, design: .rounded))
+                                .tracking(1.4)
+                                .foregroundStyle(AppTheme.accentSoft)
+                        }
+
+                        // Đồng Hồ Đếm Ngược Trực Tiếp (Giờ - Phút - Giây)
+                        VStack(spacing: 8) {
+                            Text(keyAuth.isPermanent ? "TRẠNG THÁI BẢN QUYỀN" : "THỜI GIAN SỬ DỤNG CÒN LẠI")
+                                .font(.system(size: 10, weight: .heavy, design: .rounded))
+                                .tracking(1.2)
+                                .foregroundStyle(AppTheme.subduedText)
+
+                            Text(keyAuth.remainingCountdownText.isEmpty ? (keyAuth.isPermanent ? "Vĩnh Viễn (Trọn đời)" : "Đang kiểm tra...") : keyAuth.remainingCountdownText)
+                                .font(.system(size: 18, weight: .heavy, design: .rounded))
+                                .foregroundStyle(keyAuth.isPermanent ? AppTheme.accent : (keyAuth.secondsRemaining < 3600 ? AppTheme.danger : AppTheme.success))
+                                .multilineTextAlignment(.center)
+                                .padding(.horizontal, 10)
+
+                            if !keyAuth.exactExpiryDateText.isEmpty {
+                                HStack(spacing: 5) {
+                                    Image(systemName: "calendar.badge.clock")
+                                        .font(.system(size: 11))
+                                    Text("Hết hạn lúc: \(keyAuth.exactExpiryDateText)")
+                                        .font(.system(size: 11, weight: .medium))
+                                }
+                                .foregroundStyle(AppTheme.subduedText)
+                            }
+                        }
+                        .padding(18)
+                        .frame(maxWidth: .infinity)
+                        .background(AppTheme.consoleBackground, in: RoundedRectangle(cornerRadius: 20, style: .continuous))
+                        .overlay { AppCardBorder(cornerRadius: 20) }
+
+                        // Thông tin Mã Key & Thiết Bị Liên Kết
+                        VStack(alignment: .leading, spacing: 14) {
+                            // Hàng Key
+                            VStack(alignment: .leading, spacing: 6) {
+                                Text("MÃ KEY ĐANG KÍCH HOẠT")
+                                    .font(.system(size: 10, weight: .bold))
+                                    .tracking(0.8)
+                                    .foregroundStyle(AppTheme.subduedText)
+
+                                HStack {
+                                    Text(keyAuth.currentKey.isEmpty ? "Chưa có key" : keyAuth.currentKey)
+                                        .font(.system(size: 13.5, weight: .bold, design: .monospaced))
+                                        .foregroundStyle(.white)
+                                        .lineLimit(1)
+                                        .minimumScaleFactor(0.8)
+
+                                    Spacer()
+
+                                    Button {
+                                        UIPasteboard.general.string = keyAuth.currentKey
+                                        copiedKey = true
+                                        DispatchQueue.main.asyncAfter(deadline: .now() + 2) { copiedKey = false }
+                                    } label: {
+                                        HStack(spacing: 4) {
+                                            Image(systemName: copiedKey ? "checkmark" : "doc.on.doc")
+                                            Text(copiedKey ? "Đã chép" : "Sao chép")
+                                        }
+                                        .font(.system(size: 11, weight: .bold))
+                                        .foregroundStyle(copiedKey ? AppTheme.success : AppTheme.accent)
+                                        .padding(.horizontal, 10)
+                                        .padding(.vertical, 6)
+                                        .background(Color.white.opacity(0.08), in: Capsule())
+                                    }
+                                }
+                                .padding(12)
+                                .background(AppTheme.pageBackground, in: RoundedRectangle(cornerRadius: 12))
+                            }
+
+                            // Giới hạn máy & Hạng
+                            HStack {
+                                VStack(alignment: .leading, spacing: 3) {
+                                    Text("GIỚI HẠN THIẾT BỊ")
+                                        .font(.system(size: 10, weight: .bold))
+                                        .tracking(0.8)
+                                        .foregroundStyle(AppTheme.subduedText)
+                                    Text(keyAuth.deviceSlotsText.isEmpty ? "1 máy" : keyAuth.deviceSlotsText)
+                                        .font(.system(size: 12.5, weight: .semibold))
+                                        .foregroundStyle(.white)
+                                }
+                                Spacer()
+                                VStack(alignment: .trailing, spacing: 3) {
+                                    Text("GÓI BẢN QUYỀN")
+                                        .font(.system(size: 10, weight: .bold))
+                                        .tracking(0.8)
+                                        .foregroundStyle(AppTheme.subduedText)
+                                    Text(keyAuth.role.uppercased())
+                                        .font(.system(size: 12.5, weight: .bold))
+                                        .foregroundStyle(AppTheme.accent)
+                                }
+                            }
+                            .padding(12)
+                            .background(AppTheme.pageBackground, in: RoundedRectangle(cornerRadius: 12))
+
+                            // HWID
+                            VStack(alignment: .leading, spacing: 6) {
+                                Text("MÃ THIẾT BỊ NÀY (HWID)")
+                                    .font(.system(size: 10, weight: .bold))
+                                    .tracking(0.8)
+                                    .foregroundStyle(AppTheme.subduedText)
+
+                                HStack {
+                                    Text(keyAuth.deviceHWID)
+                                        .font(.system(size: 11, weight: .medium, design: .monospaced))
+                                        .foregroundStyle(.white.opacity(0.85))
+                                        .lineLimit(1)
+                                        .truncationMode(.middle)
+
+                                    Spacer()
+
+                                    Button {
+                                        UIPasteboard.general.string = keyAuth.deviceHWID
+                                        copiedHWID = true
+                                        DispatchQueue.main.asyncAfter(deadline: .now() + 2) { copiedHWID = false }
+                                    } label: {
+                                        Image(systemName: copiedHWID ? "checkmark.circle.fill" : "doc.on.doc")
+                                            .font(.system(size: 12, weight: .bold))
+                                            .foregroundStyle(copiedHWID ? AppTheme.success : AppTheme.subduedText)
+                                            .frame(width: 28, height: 28)
+                                    }
+                                }
+                                .padding(10)
+                                .background(AppTheme.pageBackground, in: RoundedRectangle(cornerRadius: 12))
+                            }
+                        }
+                        .padding(18)
+                        .background(AppTheme.consoleBackground, in: RoundedRectangle(cornerRadius: 20))
+                        .overlay { AppCardBorder(cornerRadius: 20) }
+
+                        // Các nút hành động
+                        VStack(spacing: 12) {
+                            Link(destination: URL(string: "https://phuciosvn.com/")!) {
+                                HStack(spacing: 8) {
+                                    Image(systemName: "cart.fill")
+                                    Text("Gia Hạn / Mua Key Tại Shop phuciosvn.com")
+                                }
+                                .font(.system(size: 12.5, weight: .bold, design: .rounded))
+                                .foregroundStyle(AppTheme.accent)
+                                .frame(maxWidth: .infinity)
+                                .frame(height: 46)
+                                .background(Color.white.opacity(0.06), in: RoundedRectangle(cornerRadius: 14))
+                                .overlay {
+                                    RoundedRectangle(cornerRadius: 14)
+                                        .strokeBorder(AppTheme.accent.opacity(0.35), lineWidth: 1)
+                                }
+                            }
+
+                            Button(role: .destructive) {
+                                dismiss()
+                                DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) {
+                                    keyAuth.unlinkKey()
+                                }
+                            } label: {
+                                HStack(spacing: 6) {
+                                    Image(systemName: "rectangle.portrait.and.arrow.right")
+                                    Text("Đổi Key Khác / Đăng Xuất")
+                                }
+                                .font(.system(size: 12.5, weight: .bold, design: .rounded))
+                                .foregroundStyle(AppTheme.danger)
+                                .frame(maxWidth: .infinity)
+                                .frame(height: 44)
+                            }
+                        }
+                        .padding(.top, 4)
+                    }
+                    .padding(20)
+                }
+            }
+            .navigationTitle("Thông Tin Bản Quyền")
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .topBarTrailing) {
+                    Button("Đóng") {
+                        dismiss()
+                    }
+                    .font(.system(size: 14, weight: .semibold))
+                    .foregroundStyle(AppTheme.accent)
+                }
             }
         }
     }

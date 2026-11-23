@@ -61,6 +61,7 @@ struct ThreeOneOSFiveApp: App {
             .onChange(of: scenePhase) { phase in
                 guard phase == .active, !showOnboarding, keyAuth.isAuthorized else { return }
                 appState.detectSupport()
+                keyAuth.checkExpirationNow()
             }
             .onOpenURL { url in
                 patchDraftCoordinator.presentImport(url)

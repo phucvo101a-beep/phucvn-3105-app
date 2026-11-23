@@ -2,8 +2,10 @@ import SwiftUI
 
 struct HomeDashboardView: View {
     @Environment(\.dynamicTypeSize) private var dynamicTypeSize
+    @ObservedObject private var keyAuth = KeyAuthManager.shared
     @State private var showCleaner = false
     @State private var showWallpaper = false
+    @State private var showKeyDetails = false
 
     let isActive: Bool
     let onSelectSection: (AppSection) -> Void
@@ -20,6 +22,7 @@ struct HomeDashboardView: View {
             ScrollView(showsIndicators: false) {
                 VStack(alignment: .leading, spacing: 20) {
                     heading
+                    licenseStatusBar
                     heroPanel
                     deviceOverview
                     quickAccess
@@ -45,6 +48,9 @@ struct HomeDashboardView: View {
                     onOpenSettings: onOpenSettings,
                     onOpenLogs: onOpenLogs
                 )
+            }
+            .sheet(isPresented: $showKeyDetails) {
+                KeyLicenseDetailView()
             }
         }
     }
@@ -90,6 +96,67 @@ struct HomeDashboardView: View {
             .accessibilityLabel("Cài đặt và nhật ký")
         }
         .padding(.top, 4)
+    }
+
+    private var licenseStatusBar: some View {
+        Button {
+            showKeyDetails = true
+        } label: {
+            HStack(spacing: 12) {
+                ZStack {
+                    Circle()
+                        .fill(AppTheme.accent.opacity(0.18))
+                        .frame(width: 36, height: 36)
+                    Image(systemName: "key.fill")
+                        .font(.system(size: 14, weight: .bold))
+                        .foregroundStyle(AppTheme.accent)
+                }
+
+                VStack(alignment: .leading, spacing: 3) {
+                    HStack(spacing: 6) {
+                        Text("KEY BẢN QUYỀN:")
+                            .font(.system(size: 9.5, weight: .heavy, design: .rounded))
+                            .tracking(0.6)
+                            .foregroundStyle(AppTheme.accentSoft)
+
+                        Text(keyAuth.currentKey.isEmpty ? "Chưa kích hoạt" : keyAuth.currentKey)
+                            .font(.system(size: 11.5, weight: .bold, design: .monospaced))
+                            .foregroundStyle(.white)
+                            .lineLimit(1)
+                    }
+
+                    HStack(spacing: 4) {
+                        Text(keyAuth.isPermanent ? "Bản quyền:" : "Còn lại:")
+                            .font(.system(size: 10, weight: .medium))
+                            .foregroundStyle(AppTheme.subduedText)
+
+                        Text(keyAuth.remainingCountdownText.isEmpty ? (keyAuth.isPermanent ? "Vĩnh Viễn (Trọn đời)" : "Đang kiểm tra...") : keyAuth.remainingCountdownText)
+                            .font(.system(size: 11, weight: .bold, design: .rounded))
+                            .foregroundStyle(keyAuth.isPermanent ? AppTheme.accent : (keyAuth.secondsRemaining < 3600 ? AppTheme.danger : AppTheme.success))
+                            .lineLimit(1)
+                    }
+                }
+
+                Spacer(minLength: 4)
+
+                HStack(spacing: 4) {
+                    Text("Xem")
+                        .font(.system(size: 11, weight: .bold, design: .rounded))
+                        .foregroundStyle(AppTheme.accent)
+                    Image(systemName: "chevron.right")
+                        .font(.system(size: 10, weight: .semibold))
+                        .foregroundStyle(AppTheme.accent)
+                }
+                .padding(.horizontal, 9)
+                .padding(.vertical, 5)
+                .background(AppTheme.accent.opacity(0.12), in: Capsule())
+            }
+            .padding(.horizontal, 14)
+            .padding(.vertical, 11)
+            .background(AppTheme.consoleBackground, in: RoundedRectangle(cornerRadius: 18, style: .continuous))
+            .overlay { AppCardBorder(cornerRadius: 18) }
+        }
+        .buttonStyle(AppPressableStyle())
     }
 
     private var heroPanel: some View {

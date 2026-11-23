@@ -4,6 +4,9 @@ struct SettingsView: View {
     @Environment(\.dismiss) private var dismiss
     @Environment(\.appLanguage) private var language
     @EnvironmentObject private var appState: AppState
+    @ObservedObject private var keyAuth = KeyAuthManager.shared
+    @State private var copiedKey = false
+    @State private var showKeyDetails = false
 
     var body: some View {
         NavigationStack {
@@ -45,32 +48,92 @@ struct SettingsView: View {
                     }
 
                     SettingsGroup(title: "BẢN QUYỀN & MÁY CHỦ KEY") {
-                        SettingsValueRow(
-                            symbol: "key.fill",
-                            title: "Mã Key hiện tại",
-                            value: KeyAuthManager.shared.currentKey.isEmpty ? "Chưa kích hoạt" : KeyAuthManager.shared.currentKey
-                        )
+                        HStack {
+                            SettingsSymbol(symbol: "key.fill", tint: AppTheme.accent)
+                            VStack(alignment: .leading, spacing: 2) {
+                                Text("Mã Key bản quyền")
+                                    .font(.system(size: 13, weight: .bold, design: .rounded))
+                                    .foregroundStyle(.white)
+                                Text(keyAuth.currentKey.isEmpty ? "Chưa kích hoạt" : keyAuth.currentKey)
+                                    .font(.system(size: 11, weight: .semibold, design: .monospaced))
+                                    .foregroundStyle(AppTheme.accentSoft)
+                            }
+                            Spacer()
+                            if !keyAuth.currentKey.isEmpty {
+                                Button {
+                                    UIPasteboard.general.string = keyAuth.currentKey
+                                    copiedKey = true
+                                    DispatchQueue.main.asyncAfter(deadline: .now() + 2) { copiedKey = false }
+                                } label: {
+                                    Image(systemName: copiedKey ? "checkmark.circle.fill" : "doc.on.doc")
+                                        .font(.system(size: 12, weight: .bold))
+                                        .foregroundStyle(copiedKey ? AppTheme.success : AppTheme.accent)
+                                        .frame(width: 30, height: 30)
+                                        .background(Color.white.opacity(0.06), in: Circle())
+                                }
+                            }
+                        }
+                        .padding(.vertical, 4)
+
                         SettingsRowDivider()
-                        SettingsValueRow(
-                            symbol: "clock.fill",
-                            title: "Thời hạn bản quyền",
-                            value: KeyAuthManager.shared.expiryText.isEmpty ? "Vĩnh Viễn" : KeyAuthManager.shared.expiryText
-                        )
+
+                        HStack {
+                            SettingsSymbol(symbol: "clock.badge.checkmark.fill", tint: keyAuth.isPermanent ? AppTheme.accent : (keyAuth.secondsRemaining < 3600 ? AppTheme.danger : AppTheme.success))
+                            VStack(alignment: .leading, spacing: 2) {
+                                Text(keyAuth.isPermanent ? "Thời hạn sử dụng" : "Đếm ngược thời gian còn lại")
+                                    .font(.system(size: 13, weight: .bold, design: .rounded))
+                                    .foregroundStyle(.white)
+                                Text(keyAuth.remainingCountdownText.isEmpty ? (keyAuth.isPermanent ? "Vĩnh Viễn (Trọn đời)" : "Đang kiểm tra...") : keyAuth.remainingCountdownText)
+                                    .font(.system(size: 11.5, weight: .bold, design: .rounded))
+                                    .foregroundStyle(keyAuth.isPermanent ? AppTheme.accent : (keyAuth.secondsRemaining < 3600 ? AppTheme.danger : AppTheme.success))
+                            }
+                            Spacer()
+                        }
+                        .padding(.vertical, 4)
+
+                        if !keyAuth.exactExpiryDateText.isEmpty {
+                            SettingsRowDivider()
+                            SettingsValueRow(
+                                symbol: "calendar.badge.clock",
+                                title: "Thời điểm hết hạn",
+                                value: keyAuth.exactExpiryDateText
+                            )
+                        }
+
                         SettingsRowDivider()
                         SettingsValueRow(
                             symbol: "crown.fill",
                             title: "Cấp độ tài khoản",
-                            value: KeyAuthManager.shared.role
+                            value: keyAuth.role.uppercased() + " MEMBER"
                         )
+
                         SettingsRowDivider()
                         SettingsValueRow(
                             symbol: "iphone.gen3",
                             title: "Thiết bị liên kết",
-                            value: KeyAuthManager.shared.deviceSlotsText.isEmpty ? "1 máy" : KeyAuthManager.shared.deviceSlotsText
+                            value: keyAuth.deviceSlotsText.isEmpty ? "1 máy" : keyAuth.deviceSlotsText
                         )
+
                         SettingsRowDivider()
                         Button {
-                            KeyAuthManager.shared.unlinkKey()
+                            showKeyDetails = true
+                        } label: {
+                            HStack {
+                                SettingsSymbol(symbol: "info.circle.fill", tint: AppTheme.accent)
+                                Text("Xem chi tiết & Sao chép bản quyền")
+                                    .font(.system(size: 13, weight: .bold, design: .rounded))
+                                    .foregroundStyle(AppTheme.accent)
+                                Spacer()
+                                Image(systemName: "chevron.right")
+                                    .font(.system(size: 11, weight: .semibold))
+                                    .foregroundStyle(AppTheme.subduedText)
+                            }
+                            .padding(.vertical, 7)
+                        }
+
+                        SettingsRowDivider()
+                        Button {
+                            keyAuth.unlinkKey()
                         } label: {
                             HStack {
                                 SettingsSymbol(symbol: "rectangle.portrait.and.arrow.right", tint: AppTheme.danger)
@@ -175,6 +238,9 @@ struct SettingsView: View {
                         .font(.system(size: 13, weight: .semibold, design: .rounded))
                         .foregroundStyle(AppTheme.accent)
                 }
+            }
+            .sheet(isPresented: $showKeyDetails) {
+                KeyLicenseDetailView()
             }
         }
         .tint(AppTheme.accent)
