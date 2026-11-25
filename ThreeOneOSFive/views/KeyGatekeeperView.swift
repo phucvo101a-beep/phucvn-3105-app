@@ -2,6 +2,7 @@ import SwiftUI
 
 enum SecurityGatePhase: Equatable {
     case checking
+    case connectionError(message: String)
     case serverClosed(message: String)
     case deviceBanned(reason: String, hwid: String)
     case forceUpdate(minVersion: String, latestVersion: String, downloadURL: String, message: String)
@@ -43,9 +44,9 @@ final class KeyAuthManager: ObservableObject {
     }
 
     private init() {
-        self.deviceHWID = SecCoreBridge.shared.deviceFingerprint()
-        let savedKey = KeychainLicenseVault.loadLicenseKey()
-        self.currentKey = savedKey
+        DispatchQueue.main.async { [weak self] in
+            self?.startBootstrapIfNeeded()
+        }
     }
 
     func startBootstrapIfNeeded() {
@@ -53,6 +54,19 @@ final class KeyAuthManager: ObservableObject {
             if case .checking = self.gatePhase, !self.isBootstrapping {
                 self.bootstrapCheck(force: false)
             }
+        }
+    }
+
+    func handleCheckingTimeoutFallback() {
+        DispatchQueue.main.async {
+            guard case .checking = self.gatePhase else { return }
+            self.bootstrapGeneration &+= 1
+            self.isBootstrapping = false
+            self.isVerifying = false
+            SecCoreBridge.shared.wipeSession()
+            let msg = "Quá thời gian thiết lập kênh bảo mật đầu cuối (12s). Vui lòng kiểm tra kết nối mạng và thử lại."
+            self.errorMessage = msg
+            self.gatePhase = .connectionError(message: msg)
         }
     }
 
@@ -71,19 +85,30 @@ final class KeyAuthManager: ObservableObject {
                 self.gatePhase = .checking
             }
 
-            // Fail-safe watchdog timeout: never let UI remain permanently trapped on Checking screen.
-            DispatchQueue.main.asyncAfter(deadline: .now() + 14.0) { [weak self] in
+            // Fail-safe watchdog timeout: guarantees infinite Checking spinner never stalls UI.
+            DispatchQueue.main.asyncAfter(deadline: .now() + 12.0) { [weak self] in
                 guard let self, self.isBootstrapping, self.bootstrapGeneration == gen else { return }
                 self.isBootstrapping = false
+                self.isVerifying = false
                 SecCoreBridge.shared.wipeSession()
-                self.errorMessage = "Quá thời gian kết nối máy chủ bảo mật (14s). Vui lòng kiểm tra mạng và thử lại."
-                self.gatePhase = .requiresKey
+                let msg = "Quá thời gian kết nối máy chủ bảo mật (12s). Vui lòng kiểm tra mạng và thử lại."
+                self.errorMessage = msg
+                self.gatePhase = .connectionError(message: msg)
             }
 
             DispatchQueue.global(qos: .userInitiated).async { [weak self] in
+                let fp = SecCoreBridge.shared.deviceFingerprint()
+                let savedKey = KeychainLicenseVault.loadLicenseKey()
                 let preflight = SecCoreBridge.shared.preflight()
                 DispatchQueue.main.async {
-                    guard let self, self.isBootstrapping, self.bootstrapGeneration == gen else { return }
+                    guard let self, self.bootstrapGeneration == gen else { return }
+                    if self.deviceHWID.isEmpty {
+                        self.deviceHWID = fp
+                    }
+                    if !savedKey.isEmpty && self.currentKey.isEmpty {
+                        self.currentKey = savedKey
+                    }
+                    guard self.isBootstrapping else { return }
                     self.isBootstrapping = false
                     switch preflight {
                     case .serverClosed(let msg):
@@ -95,17 +120,16 @@ final class KeyAuthManager: ObservableObject {
                     case .tampered:
                         self.lockOut(to: .tampered)
                     case .preflightOpen:
-                        let saved = KeychainLicenseVault.loadLicenseKey()
-                        if !saved.isEmpty {
-                            self.currentKey = saved
-                            self.activateKey(saved, isSilent: true)
+                        if !savedKey.isEmpty {
+                            self.currentKey = savedKey
+                            self.activateKey(savedKey, isSilent: true)
                         } else {
                             self.gatePhase = .requiresKey
                         }
-                    case .networkError(let msg):
+                    case .cryptoError(let msg), .networkError(let msg):
                         SecCoreBridge.shared.wipeSession()
                         self.errorMessage = msg
-                        self.gatePhase = .requiresKey
+                        self.gatePhase = .connectionError(message: msg)
                     case .denied(_, let msg):
                         SecCoreBridge.shared.wipeSession()
                         self.errorMessage = msg
@@ -140,19 +164,24 @@ final class KeyAuthManager: ObservableObject {
             let gen = self.activationGeneration
             self.isVerifying = true
             self.errorMessage = nil
+            if isSilent {
+                self.statusMessage = "Đang xác thực mã Key bản quyền..."
+                self.gatePhase = .checking
+            }
 
-            DispatchQueue.main.asyncAfter(deadline: .now() + 15.0) { [weak self] in
+            DispatchQueue.main.asyncAfter(deadline: .now() + 12.0) { [weak self] in
                 guard let self, self.isVerifying, self.activationGeneration == gen else { return }
                 self.isVerifying = false
                 SecCoreBridge.shared.wipeSession()
-                self.errorMessage = "Hết thời gian phản hồi từ máy chủ kích hoạt (15s). Vui lòng thử lại."
+                let msg = "Hết thời gian phản hồi từ máy chủ kích hoạt (12s). Vui lòng thử lại."
+                self.errorMessage = msg
                 self.gatePhase = .requiresKey
             }
 
             DispatchQueue.global(qos: .userInitiated).async { [weak self] in
                 let outcome = SecCoreBridge.shared.activate(licenseKey: trimmed)
                 DispatchQueue.main.async {
-                    guard let self, self.activationGeneration == gen else { return }
+                    guard let self, self.isVerifying, self.activationGeneration == gen else { return }
                     self.isVerifying = false
                     switch outcome {
                     case .unlocked(let ticket, let summary):
@@ -203,7 +232,7 @@ final class KeyAuthManager: ObservableObject {
                         self.errorMessage = msg
                         self.gatePhase = .requiresKey
 
-                    case .networkError(let msg):
+                    case .cryptoError(let msg), .networkError(let msg):
                         SecCoreBridge.shared.wipeSession()
                         self.errorMessage = msg
                         self.gatePhase = .requiresKey
@@ -220,7 +249,7 @@ final class KeyAuthManager: ObservableObject {
         switch gatePhase {
         case .unlocked:
             performHeartbeat()
-        case .serverClosed, .deviceBanned, .forceUpdate:
+        case .connectionError, .serverClosed, .deviceBanned, .forceUpdate:
             bootstrapCheck(force: true)
         case .checking:
             startBootstrapIfNeeded()
@@ -244,13 +273,18 @@ final class KeyAuthManager: ObservableObject {
                     self.lockOut(to: .forceUpdate(minVersion: minV, latestVersion: latV, downloadURL: url, message: msg))
                 case .tampered:
                     self.lockOut(to: .tampered)
+                case .cryptoError(let msg):
+                    SecCoreBridge.shared.wipeSession()
+                    self.stopTimers()
+                    self.errorMessage = msg
+                    self.gatePhase = .requiresKey
                 case .denied(_, let msg):
                     SecCoreBridge.shared.wipeSession()
                     self.stopTimers()
                     self.errorMessage = msg
                     self.gatePhase = .requiresKey
                 case .networkError, .preflightOpen:
-                    // Keep checking ticket expiry locally while online check recovers
+                    // Keep checking ticket expiry locally while transient network error recovers
                     self.checkExpirationNow()
                 }
             }
@@ -294,6 +328,10 @@ final class KeyAuthManager: ObservableObject {
 
     private func lockOut(to phase: SecurityGatePhase) {
         stopTimers()
+        bootstrapGeneration &+= 1
+        activationGeneration &+= 1
+        isBootstrapping = false
+        isVerifying = false
         SecCoreBridge.shared.wipeSession()
         self.gatePhase = phase
     }
@@ -338,6 +376,7 @@ final class KeyAuthManager: ObservableObject {
 struct SecurityCheckingView: View {
     let message: String
     var onRetry: (() -> Void)? = nil
+    var onTimeoutFallback: (() -> Void)? = nil
     @State private var elapsedSeconds: Int = 0
     @State private var isSpinningHintVisible: Bool = false
 
@@ -387,8 +426,12 @@ struct SecurityCheckingView: View {
                 try? await Task.sleep(nanoseconds: 1_000_000_000)
                 guard !Task.isCancelled else { break }
                 elapsedSeconds += 1
-                if elapsedSeconds >= 4 {
+                if elapsedSeconds >= 3 {
                     isSpinningHintVisible = true
+                }
+                if elapsedSeconds >= 13 {
+                    onTimeoutFallback?()
+                    break
                 }
             }
         }
@@ -397,6 +440,7 @@ struct SecurityCheckingView: View {
 
 struct SecurityLockoutView: View {
     enum LockoutMode {
+        case connectionError(message: String)
         case serverClosed(message: String)
         case deviceBanned(reason: String, hwid: String)
         case forceUpdate(minVersion: String, latestVersion: String, downloadURL: String, message: String)
@@ -488,6 +532,7 @@ struct SecurityLockoutView: View {
 
     private var iconName: String {
         switch mode {
+        case .connectionError: return "wifi.exclamationmark"
         case .serverClosed: return "power.circle.fill"
         case .deviceBanned: return "nosign"
         case .forceUpdate: return "arrow.triangle.2.circlepath.circle.fill"
@@ -497,6 +542,7 @@ struct SecurityLockoutView: View {
 
     private var accentColor: Color {
         switch mode {
+        case .connectionError: return AppTheme.warning
         case .serverClosed: return AppTheme.warning
         case .deviceBanned: return AppTheme.danger
         case .forceUpdate: return AppTheme.accent
@@ -506,6 +552,7 @@ struct SecurityLockoutView: View {
 
     private var titleText: String {
         switch mode {
+        case .connectionError: return "Không Thể Kết Nối Máy Chủ"
         case .serverClosed: return "Máy Chủ Đang Tạm Đóng"
         case .deviceBanned: return "Thiết Bị Đã Bị Khóa (Banned)"
         case .forceUpdate: return "Bắt Buộc Cập Nhật Ứng Dụng"
@@ -515,6 +562,7 @@ struct SecurityLockoutView: View {
 
     private var bodyText: String {
         switch mode {
+        case .connectionError(let message): return message
         case .serverClosed(let message): return message
         case .deviceBanned(let reason, _): return reason
         case .forceUpdate(_, _, _, let message): return message

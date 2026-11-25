@@ -18,7 +18,7 @@ use serde_json::json;
 use std::ffi::{c_char, CStr, CString};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
-use zeroize::Zeroize;
+use zeroize::{Zeroize, Zeroizing};
 
 pub use localdev::ffi::*;
 
@@ -101,14 +101,40 @@ fn to_c_string(s: String) -> *mut c_char {
         .unwrap_or(core::ptr::null_mut())
 }
 
-fn execute_v3_exchange_flattened(op: &str, license_key: &str) -> Result<String, String> {
+enum ExchangeFailure {
+    Network(String),
+    Crypto(String),
+}
+
+impl ExchangeFailure {
+    fn into_error_json(self, include_ticket: bool) -> String {
+        let (status, code, msg) = match self {
+            ExchangeFailure::Network(msg) => ("network_error", "NETWORK_ERROR", msg),
+            ExchangeFailure::Crypto(msg) => ("crypto_error", "CRYPTO_ERROR", msg),
+        };
+        let mut obj = json!({
+            "ok": false,
+            "status": status,
+            "code": code,
+            "server_open": true,
+            "force_update": false,
+            "message": msg,
+        });
+        if include_ticket {
+            obj["ticket"] = json!("");
+        }
+        obj.to_string()
+    }
+}
+
+fn execute_v3_exchange_flattened(op: &str, license_key: &str) -> Result<String, ExchangeFailure> {
     let seed = secrets::gen::OPAQUE_SEED;
     let opaque_even = ((seed.wrapping_mul(seed)).wrapping_add(seed)) & 1;
     let mut step: u32 = if opaque_even == 0 { 11 } else { 99 };
     let mut tamper: u32 = 0;
     let mut pkt_opt: Option<crypto::EncryptedExchangePacket> = None;
-    let mut resp_raw = String::new();
-    let mut result_json = String::new();
+    let mut resp_raw = Zeroizing::new(String::new());
+    let mut result_json = Zeroizing::new(String::new());
 
     loop {
         match step {
@@ -124,49 +150,65 @@ fn execute_v3_exchange_flattened(op: &str, license_key: &str) -> Result<String, 
                 let fp = device::get_device_fingerprint();
                 let app_h = integrity::compute_app_binary_hash();
                 let sec_h = integrity::compute_sec_core_hash();
-                pkt_opt = Some(crypto::build_v3_request(
-                    op,
-                    &pkg,
-                    &ver,
-                    &bld,
-                    &fp,
-                    &app_h,
-                    &sec_h,
-                    tamper,
-                    license_key,
-                )?);
+                pkt_opt = Some(
+                    crypto::build_v3_request(
+                        op,
+                        &pkg,
+                        &ver,
+                        &bld,
+                        &fp,
+                        &app_h,
+                        &sec_h,
+                        tamper,
+                        license_key,
+                    )
+                    .map_err(ExchangeFailure::Crypto)?,
+                );
                 step = 33;
             }
             33 => {
-                let pkt = pkt_opt.as_ref().ok_or("Missing packet")?;
+                let pkt = pkt_opt
+                    .as_ref()
+                    .ok_or_else(|| ExchangeFailure::Crypto("Missing packet".to_string()))?;
                 let host = secrets::api_host();
                 let path = secrets::api_path();
-                resp_raw = network::post_encrypted_json(
+                *resp_raw = network::post_encrypted_json(
                     &host,
                     &path,
                     &pkt.outer_json,
                     secrets::primary_spki_pin(),
                     secrets::backup_spki_pin(),
                     secrets::gen::REQUIRE_SPKI_PIN,
-                )?;
+                )
+                .map_err(ExchangeFailure::Network)?;
                 step = 44;
             }
             44 => {
                 if perform_flattened_tamper_scan(false) != 0 {
                     sabotage::mark_tampered_and_terminate();
                 }
-                let pkt = pkt_opt.as_ref().ok_or("Missing packet")?;
-                let (decoded, raw_env) = crypto::verify_and_decrypt_v3_response(pkt, &resp_raw)?;
-                resp_raw.zeroize();
+                let pkt = pkt_opt
+                    .as_ref()
+                    .ok_or_else(|| ExchangeFailure::Crypto("Missing packet".to_string()))?;
+                let (decoded, raw_env) = crypto::verify_and_decrypt_v3_response(pkt, &resp_raw)
+                    .map_err(|e| {
+                        sabotage::wipe_vault(false);
+                        ExchangeFailure::Crypto(e)
+                    })?;
+                *resp_raw = String::new();
 
-                let mut ticket = String::new();
+                let mut ticket = Zeroizing::new(String::new());
                 if op == obfstr!("activate") || op == obfstr!("heartbeat") {
                     if decoded.server_open && !decoded.force_update && decoded.license.valid {
-                        ticket = sabotage::activate_vault_session(license_key, &decoded)?;
+                        *ticket = sabotage::activate_vault_session(license_key, &decoded)
+                            .map_err(|e| {
+                                sabotage::wipe_vault(false);
+                                ExchangeFailure::Crypto(e)
+                            })?;
                     } else {
                         sabotage::wipe_vault(false);
                     }
-                } else if !decoded.server_open || decoded.force_update {
+                } else if !decoded.server_open || decoded.force_update || decoded.code == "TAMPER_DETECTED" {
                     sabotage::wipe_vault(false);
                 }
 
@@ -181,18 +223,18 @@ fn execute_v3_exchange_flattened(op: &str, license_key: &str) -> Result<String, 
                     "download_url": decoded.download_url,
                     "message": decoded.message,
                     "license": decoded.license,
-                    "ticket": ticket,
+                    "ticket": ticket.as_str(),
                     "pkg": pkt.pkg,
                     "ver": pkt.ver,
                     "fp": pkt.fp,
                     "req_nonce": pkt.req_nonce_hex,
                     "raw_envelope": raw_env,
                 });
-                result_json = out.to_string();
+                *result_json = out.to_string();
                 step = 55;
             }
-            55 => return Ok(result_json),
-            _ => return Err(obfstr!("Control flow integrity error").to_string()),
+            55 => return Ok(core::mem::take(&mut *result_json)),
+            _ => return Err(ExchangeFailure::Crypto(obfstr!("Control flow integrity error").to_string())),
         }
     }
 }
@@ -202,17 +244,10 @@ fn execute_v3_exchange_flattened(op: &str, license_key: &str) -> Result<String, 
 pub extern "C" fn sec_core_preflight() -> *mut c_char {
     match execute_v3_exchange_flattened(obfstr!("preflight"), "") {
         Ok(json_s) => to_c_string(json_s),
-        Err(e) => to_c_string(
-            json!({
-                "ok": false,
-                "status": "network_error",
-                "code": "NETWORK_ERROR",
-                "server_open": true,
-                "force_update": false,
-                "message": e,
-            })
-            .to_string(),
-        ),
+        Err(e) => {
+            sabotage::wipe_vault(false);
+            to_c_string(e.into_error_json(false))
+        }
     }
 }
 
@@ -231,18 +266,7 @@ pub unsafe extern "C" fn sec_core_activate(key_cstr: *const c_char) -> *mut c_ch
         Ok(json_s) => to_c_string(json_s),
         Err(e) => {
             sabotage::wipe_vault(false);
-            to_c_string(
-                json!({
-                    "ok": false,
-                    "status": "network_error",
-                    "code": "NETWORK_ERROR",
-                    "server_open": true,
-                    "force_update": false,
-                    "message": e,
-                    "ticket": "",
-                })
-                .to_string(),
-            )
+            to_c_string(e.into_error_json(true))
         }
     };
     key_owned.zeroize();
@@ -265,15 +289,7 @@ pub extern "C" fn sec_core_heartbeat() -> *mut c_char {
     };
     match execute_v3_exchange_flattened(obfstr!("heartbeat"), &saved_key) {
         Ok(json_s) => to_c_string(json_s),
-        Err(e) => to_c_string(
-            json!({
-                "ok": false,
-                "status": "network_error",
-                "code": "NETWORK_ERROR",
-                "message": e,
-            })
-            .to_string(),
-        ),
+        Err(e) => to_c_string(e.into_error_json(false)),
     }
 }
 

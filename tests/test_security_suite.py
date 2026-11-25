@@ -1021,21 +1021,34 @@ class SecuritySuiteTests(unittest.TestCase):
         app_swift = (REPO_ROOT / "ThreeOneOSFive" / "App.swift").read_text(encoding="utf-8")
         self.assertIn("SecurityGateRootView", app_swift)
         self.assertIn("startBootstrapIfNeeded()", app_swift)
+        self.assertIn(".connectionError(let message)", app_swift)
 
         gate_swift = (REPO_ROOT / "ThreeOneOSFive" / "views" / "KeyGatekeeperView.swift").read_text(encoding="utf-8")
         self.assertIn("bootstrapGeneration", gate_swift)
         self.assertIn("activationGeneration", gate_swift)
         self.assertIn("asyncAfter(deadline:", gate_swift)
+        self.assertIn("handleCheckingTimeoutFallback", gate_swift)
+        self.assertIn("case connectionError(message: String)", gate_swift)
+
+        sec_bridge = (REPO_ROOT / "ThreeOneOSFive" / "helpers" / "SecCoreBridge.swift").read_text(encoding="utf-8")
+        self.assertIn("case cryptoError(message: String)", sec_bridge)
+        self.assertIn('if code == "TAMPER_DETECTED"', sec_bridge)
+        self.assertIn("sentPkg == localPkg", sec_bridge)
 
         ld_swift = (REPO_ROOT / "ThreeOneOSFive" / "helpers" / "LocalDevBridge.swift").read_text(encoding="utf-8")
         self.assertIn("isCoreInitialized", ld_swift)
         self.assertIn("DispatchQueue.global(qos: .utility).async", ld_swift)
 
         net_rs = (REPO_ROOT / "sec_core" / "src" / "network.rs").read_text(encoding="utf-8")
+        self.assertIn("resolve_addrs_with_timeout", net_rs)
         self.assertIn("read_http_response", net_rs)
         self.assertIn("decode_chunked_parts", net_rs)
         self.assertIn("is_ipv4()", net_rs)
         self.assertNotIn("read_to_end(", net_rs)
+
+        lib_rs = (REPO_ROOT / "sec_core" / "src" / "lib.rs").read_text(encoding="utf-8")
+        self.assertIn("ExchangeFailure", lib_rs)
+        self.assertIn("CRYPTO_ERROR", lib_rs)
 
         # Verify sec_core dlsym extern clash, unsafe FFI obfuscation & ios_ui dead_code remediation
         anti_hook_rs = (REPO_ROOT / "sec_core" / "src" / "anti_hook.rs").read_text(encoding="utf-8")

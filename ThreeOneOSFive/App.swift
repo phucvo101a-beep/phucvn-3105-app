@@ -48,6 +48,15 @@ private struct SecurityGateRootView: View {
             case .checking:
                 SecurityCheckingView(
                     message: keyAuth.statusMessage,
+                    onRetry: { keyAuth.bootstrapCheck(force: true) },
+                    onTimeoutFallback: {
+                        keyAuth.handleCheckingTimeoutFallback()
+                    }
+                )
+                .transition(.opacity)
+            case .connectionError(let message):
+                SecurityLockoutView(
+                    mode: .connectionError(message: message),
                     onRetry: { keyAuth.bootstrapCheck(force: true) }
                 )
                 .transition(.opacity)
@@ -114,6 +123,9 @@ private struct SecurityGateRootView: View {
                 } else {
                     KeyGatekeeperView(keyAuth: keyAuth)
                         .transition(.opacity)
+                        .onAppear {
+                            keyAuth.checkExpirationNow()
+                        }
                 }
             }
         }
@@ -122,6 +134,9 @@ private struct SecurityGateRootView: View {
             if !showOnboarding && keyAuth.activeVerifiedTicket != nil {
                 appState.detectSupport()
             }
+        }
+        .task {
+            keyAuth.startBootstrapIfNeeded()
         }
         .onChange(of: scenePhase) { phase in
             if phase == .active {

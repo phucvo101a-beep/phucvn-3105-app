@@ -28,12 +28,14 @@ private final class LocalDevLib {
     var fnFreeBytes: CLocalDevFreeBytes?
 
     private var handle: UnsafeMutableRawPointer?
+    private let resolveLock = NSLock()
 
-    init() {
-        resolveSymbols()
-    }
+    private init() {}
 
     func resolveSymbols() {
+        resolveLock.lock()
+        defer { resolveLock.unlock() }
+        if fnInit != nil && fnStatus != nil && fnFreeString != nil { return }
         if handle == nil {
             let candidates = [
                 Bundle.main.bundleURL.appendingPathComponent("Frameworks/libsec_core.dylib").path,

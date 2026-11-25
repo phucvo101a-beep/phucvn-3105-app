@@ -7,7 +7,7 @@ use rustls::{ClientConfig, ClientConnection, DigitallySignedStruct, Error as Rus
 use sha2::{Digest, Sha256};
 use std::io::{ErrorKind, Read, Write};
 use std::net::{SocketAddr, TcpStream, ToSocketAddrs};
-use std::sync::Arc;
+use std::sync::{mpsc, Arc};
 use std::time::{Duration, Instant};
 use subtle::ConstantTimeEq;
 
@@ -202,12 +202,30 @@ fn decode_chunked_parts(raw: &[u8]) -> Result<(Vec<u8>, bool), String> {
     Ok((out, saw_terminator))
 }
 
-fn connect_tcp_any(domain: &str, port: u16) -> Result<TcpStream, String> {
+fn resolve_addrs_with_timeout(domain: &str, port: u16, timeout: Duration) -> Result<Vec<SocketAddr>, String> {
     let host_port = format!("{domain}:{port}");
-    let resolved: Vec<SocketAddr> = host_port
-        .to_socket_addrs()
-        .map_err(|_| obfstr!("DNS resolution failed").to_string())?
-        .collect();
+    let (tx, rx) = mpsc::sync_channel(1);
+    std::thread::spawn(move || {
+        let res = host_port
+            .to_socket_addrs()
+            .map(|iter| iter.collect::<Vec<SocketAddr>>())
+            .map_err(|e| format!("DNS resolution failed: {e}"));
+        let _ = tx.send(res);
+    });
+    match rx.recv_timeout(timeout) {
+        Ok(res) => res,
+        Err(mpsc::RecvTimeoutError::Timeout) => Err(obfstr!("DNS resolution timed out").to_string()),
+        Err(mpsc::RecvTimeoutError::Disconnected) => Err(obfstr!("DNS resolution failed").to_string()),
+    }
+}
+
+fn connect_tcp_any(domain: &str, port: u16, overall_deadline: Instant) -> Result<TcpStream, String> {
+    let now = Instant::now();
+    if now >= overall_deadline {
+        return Err(obfstr!("Network connection deadline exceeded").to_string());
+    }
+    let dns_budget = (overall_deadline - now).min(Duration::from_millis(3500));
+    let resolved = resolve_addrs_with_timeout(domain, port, dns_budget)?;
     if resolved.is_empty() {
         return Err(obfstr!("No socket address").to_string());
     }
@@ -218,14 +236,14 @@ fn connect_tcp_any(domain: &str, port: u16) -> Result<TcpStream, String> {
     ordered.extend(resolved.iter().copied().filter(|a| a.is_ipv4()));
     ordered.extend(resolved.iter().copied().filter(|a| a.is_ipv6()));
 
-    let total_deadline = Instant::now() + Duration::from_secs(8);
+    let connect_deadline = overall_deadline.min(Instant::now() + Duration::from_secs(5));
     let mut last_err = String::from("No socket address");
     for addr in ordered {
-        let now = Instant::now();
-        if now >= total_deadline {
+        let cur = Instant::now();
+        if cur >= connect_deadline {
             break;
         }
-        let per_try = (total_deadline - now).min(Duration::from_secs(4));
+        let per_try = (connect_deadline - cur).min(Duration::from_millis(2500));
         match TcpStream::connect_timeout(&addr, per_try) {
             Ok(s) => return Ok(s),
             Err(e) => last_err = e.to_string(),
@@ -316,12 +334,13 @@ pub fn post_encrypted_json(
         return Err(obfstr!("SPKI pin missing in pinned release build").to_string());
     }
 
-    let tcp_stream = connect_tcp_any(domain, 443)?;
+    let overall_deadline = Instant::now() + Duration::from_secs(9);
+    let tcp_stream = connect_tcp_any(domain, 443, overall_deadline)?;
     tcp_stream
-        .set_read_timeout(Some(Duration::from_secs(5)))
+        .set_read_timeout(Some(Duration::from_secs(4)))
         .map_err(|e| e.to_string())?;
     tcp_stream
-        .set_write_timeout(Some(Duration::from_secs(5)))
+        .set_write_timeout(Some(Duration::from_secs(4)))
         .map_err(|e| e.to_string())?;
 
     let verifier = Arc::new(SpkiPinningVerifier {
@@ -361,7 +380,7 @@ pub fn post_encrypted_json(
     sock.flush()
         .map_err(|e| format!("TLS flush failed: {e}"))?;
 
-    let response_bytes = read_http_response(&mut sock, Instant::now() + Duration::from_secs(10))?;
+    let response_bytes = read_http_response(&mut sock, overall_deadline)?;
     if response_bytes.is_empty() {
         return Err(obfstr!("Empty TLS response").to_string());
     }

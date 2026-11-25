@@ -34,6 +34,7 @@ enum V3GateOutcome: Equatable {
     case forceUpdate(minVersion: String, latestVersion: String, downloadURL: String, message: String)
     case denied(code: String, message: String)
     case tampered(message: String)
+    case cryptoError(message: String)
     case networkError(message: String)
 }
 
@@ -53,6 +54,7 @@ final class SecCoreBridge {
 
     private static let expectedTicketMagic: Int32 = 0x3105_5A17
     private var dylibHandle: UnsafeMutableRawPointer?
+    private let resolveLock = NSLock()
 
     private var fnPreflight: CSecPreflight?
     private var fnActivate: CSecActivate?
@@ -65,11 +67,14 @@ final class SecCoreBridge {
     private var fnFreeString: CSecFreeString?
     private var fnFreeBytes: CSecFreeBytes?
 
-    private init() {
-        resolveDylib()
-    }
+    private init() {}
 
     private func resolveDylib() {
+        resolveLock.lock()
+        defer { resolveLock.unlock() }
+        if isCoreLoaded && fnDeviceFP != nil && fnTamperDetected != nil && fnFreeString != nil && fnFreeBytes != nil {
+            return
+        }
         if dylibHandle == nil {
             let candidates = [
                 Bundle.main.bundleURL.appendingPathComponent("Frameworks/libsec_core.dylib").path,
@@ -226,22 +231,31 @@ final class SecCoreBridge {
     private func parseGateJSON(_ jsonStr: String, isPreflight: Bool) -> V3GateOutcome {
         guard let data = jsonStr.data(using: .utf8),
               let dict = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else {
-            return .networkError(message: "Phản hồi nội bộ không hợp lệ.")
+            wipeSession()
+            return .cryptoError(message: "Phản hồi bảo mật nội bộ không hợp lệ.")
         }
         let ok = (dict["ok"] as? Bool) ?? false
         let code = (dict["code"] as? String) ?? "UNKNOWN"
         let msg = (dict["message"] as? String) ?? "Lỗi xác thực."
         if !ok {
+            wipeSession()
             if code == "TAMPER_DETECTED" { return .tampered(message: msg) }
+            if code == "CRYPTO_ERROR" {
+                return .cryptoError(message: "Xác thực chữ ký / giải mã máy chủ thất bại: \(msg)")
+            }
             return .deniedOrNetwork(code: code, message: msg)
         }
 
-        // Cross-verify server Ed25519 signature natively inside Swift CryptoKit!
+        // Cross-verify server Ed25519 signature & bundle/version binding inside Swift CryptoKit!
+        let localPkg = Bundle.main.bundleIdentifier ?? ""
+        let localVer = (Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String) ?? ""
         guard let rawEnvelope = dict["raw_envelope"] as? String,
               let sentPkg = dict["pkg"] as? String,
               let sentVer = dict["ver"] as? String,
               let sentFP = dict["fp"] as? String,
               let sentNonce = dict["req_nonce"] as? String,
+              (localPkg.isEmpty || sentPkg == localPkg),
+              (localVer.isEmpty || sentVer == localVer),
               verifyEnvelopeEd25519(
                   rawEnvelope: rawEnvelope,
                   expectedPkg: sentPkg,
@@ -250,7 +264,7 @@ final class SecCoreBridge {
                   expectedReqNonce: sentNonce
               ) else {
             wipeSession()
-            return .tampered(message: "Chữ ký xác thực từ máy chủ không hợp lệ!")
+            return .tampered(message: "Chữ ký xác thực hoặc thông tin phiên bản từ máy chủ không khớp!")
         }
 
         let serverOpen = (dict["server_open"] as? Bool) ?? false
@@ -271,9 +285,15 @@ final class SecCoreBridge {
             return .deviceBanned(reason: msg, hwid: sentFP)
         }
 
+        // Mandatory Anti-Tamper Gate (fail-closed even on signed server response)
+        if code == "TAMPER_DETECTED" {
+            wipeSession()
+            return .tampered(message: msg)
+        }
+
         // Mandatory Force Update Gate (fail-closed)
-        let localVer = (Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String) ?? sentVer
-        if forceUpdate || code == "FORCE_UPDATE" || SemVerComparator.compare(localVer, minVer) == .orderedAscending {
+        let resolvedVer = localVer.isEmpty ? sentVer : localVer
+        if forceUpdate || code == "FORCE_UPDATE" || SemVerComparator.compare(resolvedVer, minVer) == .orderedAscending {
             wipeSession()
             return .forceUpdate(
                 minVersion: minVer,
@@ -291,6 +311,7 @@ final class SecCoreBridge {
         let licValid = (licDict["valid"] as? Bool) ?? false
         let ticketStr = (dict["ticket"] as? String) ?? ""
         guard code == "OK", licValid, !ticketStr.isEmpty else {
+            wipeSession()
             return .denied(code: code, message: msg)
         }
 
@@ -312,7 +333,7 @@ final class SecCoreBridge {
         let ticket = RuntimeSessionTicket(
             rawTicket: ticketStr,
             packageID: sentPkg,
-            appVersion: localVer,
+            appVersion: resolvedVer,
             deviceFP: sentFP,
             ed25519Verified: true,
             issuedAt: Date(),
@@ -320,6 +341,7 @@ final class SecCoreBridge {
             isPermanent: isPerm
         )
         guard isActiveTicketValid(ticket) else {
+            wipeSession()
             return .denied(code: "TICKET_REJECTED", message: "Không thể xác nhận phiên bảo mật.")
         }
         return .unlocked(ticket: ticket, license: summary)
@@ -333,7 +355,8 @@ final class SecCoreBridge {
         expectedFP: String,
         expectedReqNonce: String
     ) -> Bool {
-        let pubData = GeneratedSecurityConfig.serverEd25519PublicKeyData()
+        var pubData = GeneratedSecurityConfig.serverEd25519PublicKeyData()
+        defer { secureWipeData(&pubData) }
         if pubData.allSatisfy({ $0 == 0 }) {
             return !GeneratedSecurityConfig.enforceStrictCrypto
         }
@@ -348,6 +371,7 @@ final class SecCoreBridge {
               let reqNonce = env["req_nonce"] as? String, reqNonce.lowercased() == expectedReqNonce.lowercased(),
               let sNonce = env["s_nonce"] as? String,
               let sTs = (env["s_ts"] as? Int64) ?? (env["s_ts"] as? Int).map({ Int64($0) }),
+              abs(Int64(Date().timeIntervalSince1970) - sTs) <= 300,
               let code = env["code"] as? String,
               let ctB64 = env["ct"] as? String,
               let ctData = Data(base64Encoded: ctB64),
@@ -363,6 +387,7 @@ final class SecCoreBridge {
         sigMsg.append(Data(resAad.utf8))
         sigMsg.append(Data("|".utf8))
         sigMsg.append(ctHash)
+        defer { secureWipeData(&sigMsg) }
         return publicKey.isValidSignature(sigData, for: sigMsg)
     }
 }

@@ -78,7 +78,8 @@ enum KeychainLicenseVault {
 
     static func saveLicenseKey(_ key: String) {
         let trimmed = key.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !trimmed.isEmpty, let data = trimmed.data(using: .utf8) else { return }
+        guard !trimmed.isEmpty, var data = trimmed.data(using: .utf8) else { return }
+        defer { secureWipeData(&data) }
         deleteLicenseKey()
         let query: [String: Any] = [
             kSecClass as String: kSecClassGenericPassword,
