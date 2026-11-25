@@ -132,8 +132,13 @@ jobs:
         run: |
           set -euo pipefail
           rustup target add aarch64-apple-ios
+          rustup component add clippy || true
           export IPHONEOS_DEPLOYMENT_TARGET=16.0
           cd "$STAGE/sec_core"
+          cargo check --target aarch64-apple-ios
+          if cargo clippy --version >/dev/null 2>&1; then
+            cargo clippy --target aarch64-apple-ios -- -D clashing-extern-declarations -W dead_code
+          fi
           cargo build --release --target aarch64-apple-ios
           DYLIB="$STAGE/sec_core/target/aarch64-apple-ios/release/libsec_core.dylib"
           if [ ! -s "$DYLIB" ]; then

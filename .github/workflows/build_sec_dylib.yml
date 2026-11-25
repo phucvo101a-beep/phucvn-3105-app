@@ -1,12 +1,6 @@
 name: Build libsec_core iOS ARM64
 
 on:
-  push:
-    paths:
-      - 'sec_core/**'
-      - 'tools/**'
-      - 'scripts/**'
-      - '.github/workflows/build_sec_dylib.yml'
   workflow_dispatch:
     inputs:
       runner:
