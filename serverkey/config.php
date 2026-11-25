@@ -352,7 +352,21 @@ function upsertUser($userData) {
  * Verifies password strictly via salted hash (plaintext password comparisons forbidden).
  */
 function verifyUserPassword($inputPassword, $storedHash): bool {
-    $hash = (string)$storedHash;
+    $hash = trim((string)$storedHash);
+    if (str_starts_with($hash, 'pbkdf2_sha256:')) {
+        $parts = explode(':', $hash, 4);
+        if (count($parts) !== 4) {
+            return false;
+        }
+        $iters = intval($parts[1]);
+        $salt = @hex2bin($parts[2]);
+        $expected = @hex2bin($parts[3]);
+        if ($iters < 100000 || $salt === false || $expected === false || strlen($expected) !== 32) {
+            return false;
+        }
+        $derived = hash_pbkdf2('sha256', (string)$inputPassword, $salt, $iters, 32, true);
+        return hash_equals($expected, $derived);
+    }
     if ($hash === '' || !str_starts_with($hash, '$')) {
         return false;
     }
@@ -474,10 +488,7 @@ function authenticateAndBindAdminAccount(string $username, string $password, arr
     $envUser = envValue('ADMIN_USERNAME', '');
     $envHash = envValue('ADMIN_PASS_HASH', '');
     $targetUser = $envUser !== '' ? $envUser : (string)($settings['admin_user'] ?? '');
-    $targetHash = (string)($settings['admin_pass_hash'] ?? '');
-    if ($targetHash === '') {
-        $targetHash = $envHash;
-    }
+    $targetHash = $envHash !== '' ? $envHash : (string)($settings['admin_pass_hash'] ?? '');
 
     $devHwid = (string)($devInfo['hwid'] ?? '');
     if ($devHwid === '' || findActiveBannedDevice($devHwid) !== null) {

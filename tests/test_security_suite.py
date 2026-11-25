@@ -1085,6 +1085,9 @@ class SecuritySuiteTests(unittest.TestCase):
         self.assertIn("sodium_memzero", core_php)
         self.assertIn("__destruct", core_php)
         self.assertIn("ip_kf:", core_php)
+        cfg_php = (REPO_ROOT / "serverkey" / "config.php").read_text(encoding="utf-8")
+        self.assertIn("pbkdf2_sha256:", cfg_php)
+        self.assertIn("$envHash !== '' ? $envHash", cfg_php)
 
         build_yml = (REPO_ROOT / ".github" / "workflows" / "build.yml").read_text(encoding="utf-8")
         self.assertIn("macho_hash.py\" verify-seal", build_yml)
