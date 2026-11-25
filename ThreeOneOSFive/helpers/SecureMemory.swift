@@ -1,3 +1,4 @@
+import Darwin
 import Foundation
 import Security
 
@@ -7,7 +8,7 @@ func secureWipeData(_ data: inout Data) {
     if count > 0 {
         data.withUnsafeMutableBytes { buf in
             if let base = buf.baseAddress {
-                memset_s(base, count, 0, count)
+                _ = memset_s(base, count, 0, count)
             }
         }
     }
@@ -56,14 +57,14 @@ final class SecureBytes {
 
     func wipe() {
         if let base = storage.baseAddress, storage.count > 0 {
-            memset_s(base, storage.count, 0, storage.count)
+            _ = memset_s(base, storage.count, 0, storage.count)
         }
     }
 
     deinit {
         if let base = storage.baseAddress {
             if storage.count > 0 {
-                memset_s(base, storage.count, 0, storage.count)
+                _ = memset_s(base, storage.count, 0, storage.count)
             }
             base.deallocate()
         }

@@ -94,18 +94,15 @@ jobs:
           SPKI2="${SEC_SPKI_PIN_BACKUP:-0000000000000000000000000000000000000000000000000000000000000000}"
 
           NON_STRICT=""
+          IS_PROD="true"
           if [ -z "$SEC_SERVER_X25519_PUB" ] || [ -z "$SEC_SERVER_ED25519_PUB" ] || [ -z "$SEC_PEPPER" ] || [ -z "$SEC_BUNDLE_MASTER_KEY" ]; then
-            if [ "$ALLOW_EPHEMERAL" = "true" ]; then
-              echo "::warning::Missing GitHub Secrets -> generating ephemeral CI test keys (non-production build!)"
-              SEC_SERVER_X25519_PUB=$(openssl rand -hex 32)
-              SEC_SERVER_ED25519_PUB=$(openssl rand -hex 32)
-              SEC_PEPPER=$(openssl rand -hex 32)
-              SEC_BUNDLE_MASTER_KEY=$(openssl rand -hex 32)
-              NON_STRICT="--non-strict"
-            else
-              echo "::error::Missing SEC_SERVER_X25519_PUB / SEC_SERVER_ED25519_PUB / SEC_PEPPER / SEC_BUNDLE_MASTER_KEY GitHub Secrets!"
-              exit 1
-            fi
+            echo "::warning::Chua cau hinh 4 GitHub Secrets -> Tu dong dung khoa test tam thoi (--non-strict) de van build duoc file .ipa khi push qua GitHub Desktop."
+            SEC_SERVER_X25519_PUB=$(openssl rand -hex 32)
+            SEC_SERVER_ED25519_PUB=$(openssl rand -hex 32)
+            SEC_PEPPER=$(openssl rand -hex 32)
+            SEC_BUNDLE_MASTER_KEY=$(openssl rand -hex 32)
+            NON_STRICT="--non-strict"
+            IS_PROD="false"
           fi
 
           MARKER_FILE="$RUNNER_TEMP/sec_seal_marker.hex"
@@ -124,6 +121,7 @@ jobs:
 
           echo "stage=$STAGE" >> "$GITHUB_OUTPUT"
           echo "marker_file=$MARKER_FILE" >> "$GITHUB_OUTPUT"
+          echo "is_production=$IS_PROD" >> "$GITHUB_OUTPUT"
 
       - name: Build, Strip & Self-Seal libsec_core.dylib (ARM64 iOS)
         id: secdylib
@@ -302,7 +300,7 @@ jobs:
 
       - name: Publish IPA to GitHub Release
         uses: softprops/action-gh-release@v2
-        if: success()
+        if: success() && steps.stage.outputs.is_production == 'true'
         with:
           tag_name: "latest"
           name: "3105 x PHUCVN Latest IPA (Hardened V3/V4)"

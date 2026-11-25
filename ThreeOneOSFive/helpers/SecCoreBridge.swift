@@ -203,7 +203,7 @@ final class SecCoreBridge {
             throw PatchPackageError.invalidPasswordOrCorruptedPackage
         }
         defer {
-            memset_s(validPtr, outLen, 0, outLen)
+            _ = memset_s(validPtr, outLen, 0, outLen)
             fnFreeBytes?(validPtr, outLen)
         }
         return SecureBytes(copying: validPtr, count: outLen)

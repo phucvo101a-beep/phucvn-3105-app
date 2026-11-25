@@ -343,7 +343,8 @@ pub static mut SEC_SELF_SEAL: [u8; 80] = {_fmt_rust_arr(bytes(seal_arr))};
         arr = ", ".join(f"0x{(b ^ m_byte):02X}" for b in val)
         return f'    static var {prop_name}: String {{ _d([{arr}], mask: 0x{m_byte:02X}) }}'
 
-    swift_cfg = f"""import Foundation
+    swift_cfg = f"""import Darwin
+import Foundation
 
 enum GeneratedSecurityConfig {{
     static let enforceStrictCrypto: Bool = {"true" if strict else "false"}
@@ -399,7 +400,7 @@ enum GeneratedSecurityConfig {{
         defer {{
             bytes.withUnsafeMutableBytes {{ buf in
                 if let base = buf.baseAddress {{
-                    memset_s(base, buf.count, 0, buf.count)
+                    _ = memset_s(base, buf.count, 0, buf.count)
                 }}
             }}
         }}

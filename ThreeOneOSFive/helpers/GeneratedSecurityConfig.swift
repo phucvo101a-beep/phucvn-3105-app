@@ -1,3 +1,4 @@
+import Darwin
 import Foundation
 
 /// CI Build-Time Security Constants Template for Swift
@@ -59,7 +60,7 @@ enum GeneratedSecurityConfig {
         defer {
             bytes.withUnsafeMutableBytes { buf in
                 if let base = buf.baseAddress {
-                    memset_s(base, buf.count, 0, buf.count)
+                    _ = memset_s(base, buf.count, 0, buf.count)
                 }
             }
         }
