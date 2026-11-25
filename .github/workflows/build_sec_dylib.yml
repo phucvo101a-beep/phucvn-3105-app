@@ -8,6 +8,16 @@ on:
       - 'scripts/**'
       - '.github/workflows/build_sec_dylib.yml'
   workflow_dispatch:
+    inputs:
+      runner:
+        description: 'Chọn máy ảo macOS'
+        required: true
+        default: 'macos-15-intel'
+        type: choice
+        options:
+          - macos-15-intel
+          - macos-13
+          - macos-latest
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
@@ -16,7 +26,7 @@ concurrency:
 jobs:
   build_dylib:
     name: Build, Strip & Seal libsec_core.dylib (ARM64 iOS)
-    runs-on: macos-latest
+    runs-on: ${{ inputs.runner || 'macos-15-intel' }}
     timeout-minutes: 25
 
     steps:
