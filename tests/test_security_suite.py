@@ -543,6 +543,54 @@ class SecuritySuiteTests(unittest.TestCase):
         self.assertFalse((dist_srv / ".env").exists())
         self.assertTrue((dist_srv / "data" / "banned_devices.json").exists())
 
+        # Verify non-secret fingerprints & whitespace-trimmed pepper in run_obfuscation
+        report_json = json.dumps(self.obf_report)
+        self.assertTrue(self.obf_report["strict_mode"])
+        self.assertEqual(self.obf_report["pepper_len"], len(self.pepper))
+        self.assertEqual(
+            self.obf_report["pepper_fp"],
+            hashlib.sha256(b"FP|" + self.pepper.encode("utf-8")).hexdigest()[:8],
+        )
+        self.assertEqual(
+            self.obf_report["x25519_pub_fp"],
+            hashlib.sha256(b"FP|" + self.x_pub.hex().encode("utf-8")).hexdigest()[:8],
+        )
+        self.assertNotIn(self.pepper, report_json)
+        self.assertNotIn(self.x_pub.hex(), report_json)
+        self.assertNotIn(self.ed_pub.hex(), report_json)
+        self.assertNotIn(self.bundle_master.hex(), report_json)
+
+        trim_stage = self.tmpdir / "stage_trim"
+        shutil.copytree(
+            REPO_ROOT,
+            trim_stage,
+            ignore=shutil.ignore_patterns(".git", "dist", "serverkey", "serverkey_core", "tests"),
+        )
+        trim_report = obfuscate_build.run_obfuscation(
+            workspace=trim_stage,
+            x25519_pub_hex=f" {self.x_pub.hex()}\n",
+            ed25519_pub_hex=self.ed_pub.hex(),
+            pepper=f"  {self.pepper}\r\n ",
+            bundle_master_hex=self.bundle_master.hex(),
+            api_host=" 20-10.store ",
+            api_path=" /api/v3 ",
+            strict=True,
+        )
+        self.assertEqual(trim_report["pepper_len"], len(self.pepper))
+        self.assertEqual(trim_report["pepper_fp"], self.obf_report["pepper_fp"])
+        self.assertEqual(trim_report["api_host"], "20-10.store")
+        self.assertEqual(trim_report["api_path"], "/api/v3")
+        gen_rs = (trim_stage / "sec_core" / "src" / "generated_secrets.rs").read_text("utf-8")
+        self.assertIn(f"pub const PEPPER_LEN: usize = {len(self.pepper)};", gen_rs)
+        with self.assertRaises(ValueError):
+            obfuscate_build.run_obfuscation(
+                workspace=trim_stage,
+                x25519_pub_hex=self.x_pub.hex(),
+                ed25519_pub_hex=self.ed_pub.hex(),
+                pepper="   \r\n",
+                bundle_master_hex=self.bundle_master.hex(),
+            )
+
     # -----------------------------------------------------------------------
     # SCENARIO 2: Server Kill-Switch (Closed -> Lock; Re-open -> Normal)
     # -----------------------------------------------------------------------

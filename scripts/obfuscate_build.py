@@ -9,6 +9,7 @@ CI Build-Time Obfuscation & Secret Injection Pipeline (runs on staging copy ONLY
 """
 
 import argparse
+import hashlib
 import os
 import re
 import secrets
@@ -227,6 +228,11 @@ def _obfuscate_swift_strings(text: str) -> tuple[str, int]:
     return "".join(out), replaced
 
 
+def _secret_fingerprint(raw: bytes) -> str:
+    """Returns non-secret 8-hex SHA-256 prefix for safe CI secret-matching checks."""
+    return hashlib.sha256(b"FP|" + raw).hexdigest()[:8]
+
+
 def run_obfuscation(
     workspace: Path,
     x25519_pub_hex: str,
@@ -242,10 +248,12 @@ def run_obfuscation(
     """Executes all obfuscation & sealing transforms in-place on `workspace` copy."""
     x_pub = bytes.fromhex(x25519_pub_hex.strip())
     ed_pub = bytes.fromhex(ed25519_pub_hex.strip())
-    pep_bytes = pepper.encode("utf-8")
+    pep_bytes = pepper.strip().encode("utf-8")
     b_master = bytes.fromhex(bundle_master_hex.strip())
     pin1 = bytes.fromhex(spki_primary_hex.strip())
     pin2 = bytes.fromhex(spki_backup_hex.strip())
+    api_host = api_host.strip()
+    api_path = api_path.strip()
     require_pin = pin1 != b"\x00" * 32 or pin2 != b"\x00" * 32
 
     if len(x_pub) != 32 or len(ed_pub) != 32 or len(b_master) != 32 or not (1 <= len(pep_bytes) <= 64):
@@ -439,6 +447,14 @@ enum GeneratedSecurityConfig {{
         packed_files.append(f"{p3105.relative_to(workspace)}:{bid}")
 
     return {
+        "strict_mode": strict,
+        "api_host": api_host,
+        "api_path": api_path,
+        "x25519_pub_fp": _secret_fingerprint(x_pub.hex().encode("utf-8")),
+        "ed25519_pub_fp": _secret_fingerprint(ed_pub.hex().encode("utf-8")),
+        "pepper_fp": _secret_fingerprint(pep_bytes),
+        "pepper_len": len(pep_bytes),
+        "bundle_master_fp": _secret_fingerprint(b_master.hex().encode("utf-8")),
         "seal_marker_hex": seal_marker.hex(),
         "v4_tag_hex": v4_tag.hex(),
         "c_symbols_renamed": len(c_sym_map),
