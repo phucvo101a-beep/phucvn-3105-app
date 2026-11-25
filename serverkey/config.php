@@ -91,6 +91,7 @@ define('NONCES_FILE', DATA_DIR . '/api_nonces.json');
 define('RATE_LIMITS_FILE', DATA_DIR . '/rate_limits.json');
 define('LOGIN_LIMITS_FILE', DATA_DIR . '/login_limits.json');
 define('BANNED_DEVICES_FILE', DATA_DIR . '/banned_devices.json');
+define('MASTER_SESSION_FILE', DATA_DIR . '/master_session.json');
 
 if (!file_exists(DATA_DIR)) {
     @mkdir(DATA_DIR, 0750, true);
@@ -163,6 +164,7 @@ function getSettings(): array {
         'auto_activate' => true,
         'default_duration' => '30d',
         'bind_hwid' => true,
+        'lock_master_hwid' => false,
         'telegram_support' => 'https://t.me/phuciosvn',
         // Kill-Switch & Force Update policies
         'server_open' => true,
@@ -362,7 +364,113 @@ function hashUserPassword($password): string {
     return password_hash((string)$password, $algo);
 }
 
-function verifyAdminCredentials(string $username, string $password, array $settings): array {
+function getServerDeviceCookieSecret(): string {
+    foreach (['PRE_SHARED_PEPPER', 'CI_SYNC_SECRET', 'SERVER_X25519_PRIV_HEX'] as $k) {
+        $v = trim(envValue($k, ''));
+        if ($v !== '' && !str_starts_with($v, 'REPLACE_WITH_')) {
+            return hash('sha256', 'PHUCVN-DEV-COOKIE|' . $v, true);
+        }
+    }
+    $keyFile = DATA_DIR . '/.device_hmac_key';
+    if (@is_file($keyFile)) {
+        $raw = trim((string)@file_get_contents($keyFile));
+        if (strlen($raw) >= 64) {
+            return hash('sha256', 'PHUCVN-DEV-COOKIE|' . $raw, true);
+        }
+    }
+    if (!file_exists(DATA_DIR)) {
+        @mkdir(DATA_DIR, 0750, true);
+    }
+    $randHex = bin2hex(random_bytes(32));
+    @file_put_contents($keyFile, $randHex, LOCK_EX);
+    @chmod($keyFile, 0600);
+    return hash('sha256', 'PHUCVN-DEV-COOKIE|' . $randHex, true);
+}
+
+function parseBrowserDeviceInfo(string $ua): array {
+    $u = strtolower($ua);
+    $os = 'UnknownOS';
+    if (str_contains($u, 'iphone')) $os = 'iPhone';
+    elseif (str_contains($u, 'ipad')) $os = 'iPad';
+    elseif (str_contains($u, 'android')) $os = 'Android';
+    elseif (str_contains($u, 'windows')) $os = 'Windows';
+    elseif (str_contains($u, 'macintosh') || str_contains($u, 'mac os x')) $os = 'macOS';
+    elseif (str_contains($u, 'linux')) $os = 'Linux';
+    elseif (str_contains($u, 'curl') || str_contains($u, 'python') || $u === '') $os = 'CLI';
+
+    $browser = 'Browser';
+    if (str_contains($u, 'edg/')) $browser = 'Edge';
+    elseif (str_contains($u, 'opr/') || str_contains($u, 'opera')) $browser = 'Opera';
+    elseif (str_contains($u, 'crios/') || str_contains($u, 'chrome/')) $browser = 'Chrome';
+    elseif (str_contains($u, 'fxios/') || str_contains($u, 'firefox/')) $browser = 'Firefox';
+    elseif (str_contains($u, 'safari/')) $browser = 'Safari';
+    elseif (str_contains($u, 'curl') || str_contains($u, 'python')) $browser = 'HTTPClient';
+
+    return [
+        'family' => $os . '|' . $browser,
+        'label' => $os . ' • ' . $browser,
+    ];
+}
+
+function deriveAccountHwidFromParts(string $devId, string $fpHash): string {
+    return 'DEV-' . strtoupper(substr(hash('sha256', "ACCT-HWID-V1|{$devId}|{$fpHash}"), 0, 28));
+}
+
+function resolveClientDeviceIdentity(?string $submittedFp = null, bool $issueCookie = true): array {
+    $ua = (string)($_SERVER['HTTP_USER_AGENT'] ?? '');
+    $parsedUa = parseBrowserDeviceInfo($ua);
+    $uaFamily = $parsedUa['family'];
+    $secret = getServerDeviceCookieSecret();
+
+    $rawCookie = (string)($_COOKIE['phucvn_srv_dev'] ?? '');
+    $devId = '';
+    $hasValidCookie = false;
+    if (str_contains($rawCookie, '.')) {
+        [$candId, $candSig] = explode('.', $rawCookie, 2);
+        if (preg_match('/^[0-9a-f]{32}$/', $candId) && preg_match('/^[0-9a-f]{64}$/', $candSig)) {
+            $expectedSig = hash_hmac('sha256', "DEVCOOKIE|{$candId}|{$uaFamily}", $secret);
+            if (hash_equals($expectedSig, $candSig)) {
+                $devId = $candId;
+                $hasValidCookie = true;
+            }
+        }
+    }
+
+    if ($devId === '') {
+        $devId = bin2hex(random_bytes(16));
+        $sig = hash_hmac('sha256', "DEVCOOKIE|{$devId}|{$uaFamily}", $secret);
+        $cookieVal = $devId . '.' . $sig;
+        $_COOKIE['phucvn_srv_dev'] = $cookieVal;
+        if ($issueCookie && PHP_SAPI !== 'cli' && !headers_sent()) {
+            $isHttps = (!empty($_SERVER['HTTPS']) && $_SERVER['HTTPS'] !== 'off')
+                || (($_SERVER['SERVER_PORT'] ?? '') == 443);
+            @setcookie('phucvn_srv_dev', $cookieVal, [
+                'expires' => time() + 86400 * 1825,
+                'path' => '/',
+                'httponly' => true,
+                'secure' => $isHttps,
+                'samesite' => 'Strict',
+            ]);
+        }
+    }
+
+    $fpNorm = trim((string)$submittedFp);
+    $fpHash = $fpNorm !== ''
+        ? hash('sha256', 'FP|' . $fpNorm . '|' . $uaFamily)
+        : hash('sha256', 'UA|' . $uaFamily);
+
+    return [
+        'hwid' => deriveAccountHwidFromParts($devId, $fpHash),
+        'dev_id' => $devId,
+        'fp_hash' => $fpHash,
+        'ua_family' => $uaFamily,
+        'ua_hash' => hash('sha256', $uaFamily),
+        'label' => $parsedUa['label'],
+        'has_valid_cookie' => $hasValidCookie,
+    ];
+}
+
+function authenticateAndBindAdminAccount(string $username, string $password, array $settings, array $devInfo, string $clientIp): array {
     $envUser = envValue('ADMIN_USERNAME', '');
     $envHash = envValue('ADMIN_PASS_HASH', '');
     $targetUser = $envUser !== '' ? $envUser : (string)($settings['admin_user'] ?? '');
@@ -371,28 +479,222 @@ function verifyAdminCredentials(string $username, string $password, array $setti
         $targetHash = $envHash;
     }
 
-    if ($targetUser !== '' && hash_equals($targetUser, $username) && verifyUserPassword($password, $targetHash)) {
-        return ['ok' => true, 'username' => $targetUser, 'error' => ''];
+    $devHwid = (string)($devInfo['hwid'] ?? '');
+    if ($devHwid === '' || findActiveBannedDevice($devHwid) !== null) {
+        return ['ok' => false, 'code' => 'DEVICE_BANNED', 'username' => $username, 'error' => 'Thiết bị này đã bị Admin cấm vĩnh viễn khỏi hệ thống!'];
     }
 
-    $foundUser = findUserByUsername($username);
-    if ($foundUser) {
-        if (empty($foundUser['is_active'])) {
-            return ['ok' => false, 'username' => '', 'error' => 'Tài khoản này đã bị khóa!'];
-        }
-        if (verifyUserPassword($password, (string)($foundUser['password'] ?? ''))) {
-            if (strtolower((string)($foundUser['role'] ?? '')) !== 'admin') {
-                return ['ok' => false, 'username' => '', 'error' => 'Tài khoản không có quyền Quản trị Admin!'];
+    if ($targetUser !== '' && hash_equals($targetUser, $username) && verifyUserPassword($password, $targetHash)) {
+        $res = withLockedJson(MASTER_SESSION_FILE, [], function (&$master, &$dirty) use ($devInfo, $clientIp, $settings, $targetUser) {
+            $lockHwid = !empty($settings['lock_master_hwid']);
+            $existingHwid = trim((string)($master['hwid'] ?? ''));
+            if ($lockHwid && $existingHwid !== '' && !hash_equals(strtolower($existingHwid), strtolower($devInfo['hwid']))) {
+                return [
+                    'ok' => false,
+                    'code' => 'HWID_MISMATCH',
+                    'username' => $targetUser,
+                    'bound_hwid' => $existingHwid,
+                    'error' => "Tài khoản Master Admin đã khóa cứng cho 1 thiết bị duy nhất ({$existingHwid}). Thiết bị khác không thể đăng nhập!",
+                ];
             }
-            if (!empty($foundUser['expiry_date']) && $foundUser['expiry_date'] !== 'permanent') {
-                if (new DateTime() > new DateTime($foundUser['expiry_date'])) {
-                    return ['ok' => false, 'username' => '', 'error' => 'Tài khoản Quản trị này đã hết hạn!'];
+            $sessToken = bin2hex(random_bytes(32));
+            $master['hwid'] = ($lockHwid && $existingHwid !== '') ? $existingHwid : $devInfo['hwid'];
+            $master['device_fp_hash'] = $devInfo['fp_hash'];
+            $master['device_label'] = $devInfo['label'];
+            $master['last_login'] = date('Y-m-d H:i:s');
+            $master['last_ip'] = $clientIp;
+            $master['active_session_token'] = $sessToken;
+            $master['active_ua_hash'] = $devInfo['ua_hash'];
+            $dirty = true;
+            return [
+                'ok' => true,
+                'code' => 'OK',
+                'username' => $targetUser,
+                'is_master' => true,
+                'session_token' => $sessToken,
+                'hwid' => $master['hwid'],
+                'fp_hash' => $devInfo['fp_hash'],
+                'ua_hash' => $devInfo['ua_hash'],
+                'device_label' => $devInfo['label'],
+                'bound_now' => ($existingHwid === ''),
+                'error' => '',
+            ];
+        });
+        return $res;
+    }
+
+    $enforceHwid = !array_key_exists('bind_hwid', $settings) || !empty($settings['bind_hwid']);
+    $targetLower = strtolower(trim($username));
+
+    return withLockedJson(USERS_FILE, [], function (&$users, &$dirty) use ($targetLower, $password, $devInfo, $clientIp, $enforceHwid) {
+        foreach ($users as $i => $u) {
+            if (strtolower(trim((string)($u['username'] ?? ''))) !== $targetLower) {
+                continue;
+            }
+            if (empty($u['is_active'])) {
+                return ['ok' => false, 'code' => 'ACCOUNT_LOCKED', 'username' => (string)$u['username'], 'error' => 'Tài khoản này đã bị khóa!'];
+            }
+            if (!verifyUserPassword($password, (string)($u['password'] ?? ''))) {
+                return ['ok' => false, 'code' => 'BAD_CREDENTIALS', 'username' => (string)$u['username'], 'error' => 'Sai tài khoản hoặc mật khẩu quản trị!'];
+            }
+            if (strtolower((string)($u['role'] ?? '')) !== 'admin') {
+                return ['ok' => false, 'code' => 'NO_ADMIN_ROLE', 'username' => (string)$u['username'], 'error' => 'Tài khoản không có quyền Quản trị Admin!'];
+            }
+            if (!empty($u['expiry_date']) && $u['expiry_date'] !== 'permanent') {
+                if (new DateTime() > new DateTime((string)$u['expiry_date'])) {
+                    return ['ok' => false, 'code' => 'EXPIRED', 'username' => (string)$u['username'], 'error' => 'Tài khoản Quản trị này đã hết hạn!'];
                 }
             }
-            return ['ok' => true, 'username' => (string)$foundUser['username'], 'error' => ''];
+
+            $boundHwid = trim((string)($u['hwid'] ?? ''));
+            if ($boundHwid !== '' && findActiveBannedDevice($boundHwid) !== null) {
+                return ['ok' => false, 'code' => 'DEVICE_BANNED', 'username' => (string)$u['username'], 'error' => 'Thiết bị liên kết với tài khoản này đang bị Ban vĩnh viễn!'];
+            }
+            if (!empty($u['is_hwid_blocked'])) {
+                return ['ok' => false, 'code' => 'HWID_BLOCKED', 'username' => (string)$u['username'], 'error' => 'Thiết bị của tài khoản này đang bị chặn truy cập!'];
+            }
+
+            if ($enforceHwid && $boundHwid !== '' && !hash_equals(strtolower($boundHwid), strtolower($devInfo['hwid']))) {
+                return [
+                    'ok' => false,
+                    'code' => 'HWID_MISMATCH',
+                    'username' => (string)$u['username'],
+                    'bound_hwid' => $boundHwid,
+                    'device_label' => (string)($u['device_label'] ?? ''),
+                    'error' => "Tài khoản chỉ được phép đăng nhập trên 1 thiết bị duy nhất! Đã liên kết với HWID: {$boundHwid}"
+                        . (!empty($u['device_label']) ? " ({$u['device_label']})" : '')
+                        . '. Liên hệ Admin bấm Reset HWID nếu muốn đổi máy.',
+                ];
+            }
+
+            $boundNow = ($boundHwid === '');
+            $sessToken = bin2hex(random_bytes(32));
+            $effectiveHwid = ($enforceHwid && $boundHwid !== '') ? $boundHwid : $devInfo['hwid'];
+            $users[$i]['hwid'] = $effectiveHwid;
+            $users[$i]['device_fp_hash'] = $devInfo['fp_hash'];
+            $users[$i]['device_label'] = $devInfo['label'];
+            $users[$i]['last_login'] = date('Y-m-d H:i:s');
+            $users[$i]['last_ip'] = $clientIp;
+            $users[$i]['active_session_token'] = $sessToken;
+            $users[$i]['active_ua_hash'] = $devInfo['ua_hash'];
+            $dirty = true;
+
+            return [
+                'ok' => true,
+                'code' => 'OK',
+                'username' => (string)$u['username'],
+                'is_master' => false,
+                'session_token' => $sessToken,
+                'hwid' => $effectiveHwid,
+                'fp_hash' => $devInfo['fp_hash'],
+                'ua_hash' => $devInfo['ua_hash'],
+                'device_label' => $devInfo['label'],
+                'bound_now' => $boundNow,
+                'error' => '',
+            ];
+        }
+        return ['ok' => false, 'code' => 'BAD_CREDENTIALS', 'username' => $username, 'error' => 'Sai tài khoản hoặc mật khẩu quản trị!'];
+    });
+}
+
+function verifyCurrentAdminSession(array $settings, array $devInfo): array {
+    if (empty($_SESSION['admin_logged_in'])) {
+        return ['valid' => false, 'reason' => ''];
+    }
+    $username = (string)($_SESSION['admin_current_user'] ?? '');
+    $sessToken = (string)($_SESSION['admin_session_token'] ?? '');
+    $sessHwid = (string)($_SESSION['admin_device_hwid'] ?? '');
+    $sessFpHash = (string)($_SESSION['admin_device_fp_hash'] ?? '');
+    $sessUaHash = (string)($_SESSION['admin_ua_hash'] ?? '');
+    $isMaster = !empty($_SESSION['admin_is_master']);
+
+    if ($username === '' || $sessToken === '' || $sessHwid === '' || $sessUaHash === '') {
+        return ['valid' => false, 'reason' => 'Phiên đăng nhập không hợp lệ. Vui lòng đăng nhập lại!'];
+    }
+    if (!hash_equals($sessUaHash, (string)($devInfo['ua_hash'] ?? ''))) {
+        return ['valid' => false, 'reason' => 'Phát hiện đổi trình duyệt/thiết bị. Phiên đã bị đăng xuất!'];
+    }
+    if (empty($devInfo['has_valid_cookie'])) {
+        return ['valid' => false, 'reason' => 'Cookie xác thực thiết bị bị mất hoặc sai chữ ký. Vui lòng đăng nhập lại!'];
+    }
+    $recomputedHwid = deriveAccountHwidFromParts((string)$devInfo['dev_id'], $sessFpHash);
+    if (!hash_equals(strtolower($sessHwid), strtolower($recomputedHwid))) {
+        return ['valid' => false, 'reason' => 'Định danh thiết bị không khớp với phiên làm việc!'];
+    }
+    if (findActiveBannedDevice($sessHwid) !== null) {
+        return ['valid' => false, 'reason' => 'Thiết bị này đã bị Ban khỏi hệ thống!'];
+    }
+
+    if ($isMaster) {
+        $master = readJsonFile(MASTER_SESSION_FILE, []);
+        $storedToken = (string)($master['active_session_token'] ?? '');
+        if ($storedToken === '' || !hash_equals($storedToken, $sessToken)) {
+            return ['valid' => false, 'reason' => 'Phiên Master Admin đã bị đăng xuất do đăng nhập từ thiết bị khác hoặc đã bị reset!'];
+        }
+        if (!empty($settings['lock_master_hwid']) && !empty($master['hwid'])) {
+            if (!hash_equals(strtolower((string)$master['hwid']), strtolower($sessHwid))) {
+                return ['valid' => false, 'reason' => 'Thiết bị hiện tại không khớp với HWID Master Admin đã khóa!'];
+            }
+        }
+        return ['valid' => true, 'reason' => ''];
+    }
+
+    $user = findUserByUsername($username);
+    if (!$user || empty($user['is_active']) || strtolower((string)($user['role'] ?? '')) !== 'admin') {
+        return ['valid' => false, 'reason' => 'Tài khoản đã bị khóa hoặc xóa quyền quản trị!'];
+    }
+    if (!empty($user['expiry_date']) && $user['expiry_date'] !== 'permanent') {
+        if (new DateTime() > new DateTime((string)$user['expiry_date'])) {
+            return ['valid' => false, 'reason' => 'Tài khoản quản trị đã hết hạn!'];
         }
     }
-    return ['ok' => false, 'username' => '', 'error' => 'Sai tài khoản hoặc mật khẩu quản trị!'];
+    $storedToken = (string)($user['active_session_token'] ?? '');
+    if ($storedToken === '' || !hash_equals($storedToken, $sessToken)) {
+        return ['valid' => false, 'reason' => 'Phiên đăng nhập đã bị thu hồi (Admin vừa Reset HWID / Kick phiên hoặc có đăng nhập mới)!'];
+    }
+    $boundHwid = trim((string)($user['hwid'] ?? ''));
+    if ($boundHwid === '' || !hash_equals(strtolower($boundHwid), strtolower($sessHwid))) {
+        return ['valid' => false, 'reason' => 'Liên kết thiết bị HWID của tài khoản đã thay đổi!'];
+    }
+    return ['valid' => true, 'reason' => ''];
+}
+
+function logoutAdminSession(string $username, bool $isMaster, string $sessionToken): void {
+    if ($sessionToken === '') {
+        return;
+    }
+    if ($isMaster) {
+        withLockedJson(MASTER_SESSION_FILE, [], function (&$master, &$dirty) use ($sessionToken) {
+            if (hash_equals((string)($master['active_session_token'] ?? ''), $sessionToken)) {
+                $master['active_session_token'] = '';
+                $dirty = true;
+            }
+            return true;
+        });
+        return;
+    }
+    $targetLower = strtolower(trim($username));
+    if ($targetLower === '') {
+        return;
+    }
+    withLockedJson(USERS_FILE, [], function (&$users, &$dirty) use ($targetLower, $sessionToken) {
+        foreach ($users as $i => $u) {
+            if (strtolower(trim((string)($u['username'] ?? ''))) === $targetLower) {
+                if (hash_equals((string)($u['active_session_token'] ?? ''), $sessionToken)) {
+                    $users[$i]['active_session_token'] = '';
+                    $dirty = true;
+                }
+                break;
+            }
+        }
+        return true;
+    });
+}
+
+function verifyAdminCredentials(string $username, string $password, array $settings): array {
+    $devInfo = resolveClientDeviceIdentity(null, false);
+    $clientIp = $_SERVER['REMOTE_ADDR'] ?? 'cli';
+    return authenticateAndBindAdminAccount($username, $password, $settings, $devInfo, $clientIp);
 }
 
 function normalizeKey(&$k) {

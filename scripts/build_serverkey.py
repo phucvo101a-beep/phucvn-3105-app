@@ -79,6 +79,7 @@ def package_serverkey(serverkey_dir: Path, out_dir: Path, rust_bin: Path | None 
         shutil.copy2(serverkey_dir / "data" / ".htaccess", data_out / ".htaccess")
     for fn in ("keys.json", "users.json", "logs.json", "build_manifests.json", "banned_devices.json"):
         (data_out / fn).write_text("[]\n", encoding="utf-8")
+    (data_out / "master_session.json").write_text("{}\n", encoding="utf-8")
     shutil.copy2(serverkey_dir / "data" / "settings.json", data_out / "settings.json")
 
     if rust_bin and rust_bin.exists():

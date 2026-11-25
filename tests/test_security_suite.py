@@ -854,6 +854,159 @@ class SecuritySuiteTests(unittest.TestCase):
         self.assertEqual(dec_unban["code"], "OK")
         self.assertIsNotNone(dec_unban["ephemeral_session_key"])
 
+    # -----------------------------------------------------------------------
+    # SCENARIO 7: Server Key Account 1-Device HWID & Single-Session Lock
+    # -----------------------------------------------------------------------
+    def test_07_serverkey_single_device_account_login(self):
+        cfg_text = (REPO_ROOT / "serverkey" / "config.php").read_text(encoding="utf-8")
+        admin_text = (REPO_ROOT / "serverkey" / "admin.php").read_text(encoding="utf-8")
+        for sym in (
+            "resolveClientDeviceIdentity",
+            "authenticateAndBindAdminAccount",
+            "verifyCurrentAdminSession",
+            "logoutAdminSession",
+        ):
+            self.assertIn(sym, cfg_text)
+        self.assertIn("authenticateAndBindAdminAccount", admin_text)
+        self.assertIn("verifyCurrentAdminSession", admin_text)
+        self.assertIn("kick_user_session", admin_text)
+        self.assertIn("adminDeviceFp", admin_text)
+
+        # Deterministic Python verification mirroring config.php HMAC cookie + HWID binding
+        secret = hashlib.sha256(b"PHUCVN-DEV-COOKIE|unit-test-pepper").digest()
+
+        def ua_family(ua: str) -> str:
+            u = ua.lower()
+            os_name = "iPhone" if "iphone" in u else ("Windows" if "windows" in u else "UnknownOS")
+            br = "Safari" if "safari" in u and "chrome" not in u else ("Chrome" if "chrome" in u else "Browser")
+            return f"{os_name}|{br}"
+
+        def make_cookie(dev_id: str, ua: str) -> str:
+            fam = ua_family(ua)
+            sig = hmac.new(secret, f"DEVCOOKIE|{dev_id}|{fam}".encode(), hashlib.sha256).hexdigest()
+            return f"{dev_id}.{sig}"
+
+        def resolve_hwid(cookie_val: str, ua: str, client_fp: str) -> Optional[str]:
+            fam = ua_family(ua)
+            if "." not in cookie_val:
+                return None
+            dev_id, sig = cookie_val.split(".", 1)
+            exp = hmac.new(secret, f"DEVCOOKIE|{dev_id}|{fam}".encode(), hashlib.sha256).hexdigest()
+            if not hmac.compare_digest(exp, sig):
+                return None
+            fp_hash = hashlib.sha256(f"FP|{client_fp}|{fam}".encode()).hexdigest()
+            return "DEV-" + hashlib.sha256(f"ACCT-HWID-V1|{dev_id}|{fp_hash}".encode()).hexdigest()[:28].upper()
+
+        ua_a = "Mozilla/5.0 (Windows NT 10.0) AppleWebKit/537.36 Chrome/130.0.0.0"
+        ua_b = "Mozilla/5.0 (iPhone; CPU iPhone OS 18_0 like Mac OS X) AppleWebKit/605.1.15 Safari/604.1"
+        hwid_a = resolve_hwid(make_cookie("a" * 32, ua_a), ua_a, "local-a|Win32|1920x1080")
+        hwid_b = resolve_hwid(make_cookie("b" * 32, ua_b), ua_b, "local-b|iPhone|390x844")
+        # Stolen cookie onto Device B must fail HMAC (different OS/browser) and yield different HWID
+        self.assertIsNone(resolve_hwid(make_cookie("a" * 32, ua_a), ua_b, "local-b|iPhone|390x844"))
+        self.assertNotEqual(hwid_a, hwid_b)
+        # Same cookie copied onto another Windows Chrome machine with different local fp fails HWID match
+        hwid_a_stolen = resolve_hwid(make_cookie("a" * 32, ua_a), ua_a, "local-stolen|Win32|1366x768")
+        self.assertNotEqual(hwid_a, hwid_a_stolen)
+
+        # If PHP CLI is installed (e.g. GitHub Actions ubuntu-latest), run full live PHP test!
+        php_bin = shutil.which("php")
+        if php_bin:
+            with tempfile.TemporaryDirectory() as tmpdir:
+                data_dir = Path(tmpdir) / "data"
+                data_dir.mkdir(parents=True, exist_ok=True)
+                pw_script = (REPO_ROOT / "serverkey" / "config.php").as_posix()
+                php_code = r'''
+                    putenv("SERVERKEY_DATA_DIR=" . $argv[1]);
+                    putenv("PRE_SHARED_PEPPER=unit-test-pepper-1234567890");
+                    require $argv[2];
+                    $users = [[
+                        "id" => "u1",
+                        "username" => "qdaimmo",
+                        "password" => hashUserPassword("Pass@123456"),
+                        "role" => "admin",
+                        "hwid" => "",
+                        "device_fp_hash" => "",
+                        "device_label" => "",
+                        "active_session_token" => "",
+                        "active_ua_hash" => "",
+                        "is_active" => true,
+                        "expiry_date" => "permanent",
+                        "last_login" => null,
+                        "last_ip" => "",
+                        "is_hwid_blocked" => false,
+                    ]];
+                    saveUsers($users);
+                    $settings = getSettings();
+
+                    // Device A first login
+                    $_SERVER["HTTP_USER_AGENT"] = "Mozilla/5.0 (Windows NT 10.0) Chrome/130.0.0.0";
+                    $_COOKIE = [];
+                    $devA = resolveClientDeviceIdentity("fp-pc-a", false);
+                    $resA1 = authenticateAndBindAdminAccount("qdaimmo", "Pass@123456", $settings, $devA, "1.1.1.1");
+                    if (empty($resA1["ok"]) || empty($resA1["bound_now"])) { fwrite(STDERR, "A1 failed\n"); exit(1); }
+
+                    // Re-resolve using issued cookie from A -> matches bound HWID on subsequent login
+                    $devA2 = resolveClientDeviceIdentity("fp-pc-a", false);
+                    $resA2 = authenticateAndBindAdminAccount("qdaimmo", "Pass@123456", $settings, $devA2, "1.1.1.1");
+                    if (empty($resA2["ok"]) || $resA2["hwid"] !== $resA1["hwid"]) { fwrite(STDERR, "A2 failed\n"); exit(2); }
+
+                    // Session verification passes for newest token, rejects older replaced token
+                    $_SESSION = [
+                        "admin_logged_in" => true,
+                        "admin_current_user" => "qdaimmo",
+                        "admin_is_master" => false,
+                        "admin_session_token" => $resA1["session_token"],
+                        "admin_device_hwid" => $resA1["hwid"],
+                        "admin_device_fp_hash" => $resA1["fp_hash"],
+                        "admin_ua_hash" => $resA1["ua_hash"],
+                    ];
+                    $vOld = verifyCurrentAdminSession($settings, $devA2);
+                    if (!empty($vOld["valid"])) { fwrite(STDERR, "Old session accepted\n"); exit(3); }
+                    $_SESSION["admin_session_token"] = $resA2["session_token"];
+                    $vNew = verifyCurrentAdminSession($settings, $devA2);
+                    if (empty($vNew["valid"])) { fwrite(STDERR, "New session rejected: " . $vNew["reason"] . "\n"); exit(4); }
+
+                    // Device B attempts login with valid password -> MUST BE REJECTED (HWID_MISMATCH)
+                    $_SERVER["HTTP_USER_AGENT"] = "Mozilla/5.0 (iPhone; CPU iPhone OS 18_0) Safari/604.1";
+                    $_COOKIE = [];
+                    $devB = resolveClientDeviceIdentity("fp-iphone-b", false);
+                    $resB = authenticateAndBindAdminAccount("qdaimmo", "Pass@123456", $settings, $devB, "2.2.2.2");
+                    if (!empty($resB["ok"]) || ($resB["code"] ?? "") !== "HWID_MISMATCH") { fwrite(STDERR, "B was not blocked!\n"); exit(5); }
+
+                    // Reset HWID -> Device A session invalid immediately, Device B can now bind once
+                    withLockedJson(USERS_FILE, [], function(&$list, &$dirty) {
+                        $list[0]["hwid"] = "";
+                        $list[0]["active_session_token"] = "";
+                        $dirty = true;
+                        return true;
+                    });
+                    $_SERVER["HTTP_USER_AGENT"] = "Mozilla/5.0 (Windows NT 10.0) Chrome/130.0.0.0";
+                    if (!empty(verifyCurrentAdminSession($settings, $devA2)["valid"])) { fwrite(STDERR, "A stayed valid after reset!\n"); exit(6); }
+
+                    $_SERVER["HTTP_USER_AGENT"] = "Mozilla/5.0 (iPhone; CPU iPhone OS 18_0) Safari/604.1";
+                    $resB2 = authenticateAndBindAdminAccount("qdaimmo", "Pass@123456", $settings, $devB, "2.2.2.2");
+                    if (empty($resB2["ok"])) { fwrite(STDERR, "B2 failed after reset\n"); exit(7); }
+
+                    // Now Device A is locked out!
+                    $_SERVER["HTTP_USER_AGENT"] = "Mozilla/5.0 (Windows NT 10.0) Chrome/130.0.0.0";
+                    $resA3 = authenticateAndBindAdminAccount("qdaimmo", "Pass@123456", $settings, $devA2, "1.1.1.1");
+                    if (!empty($resA3["ok"]) || ($resA3["code"] ?? "") !== "HWID_MISMATCH") { fwrite(STDERR, "A3 was not blocked after B bound!\n"); exit(8); }
+
+                    // Banning Device B HWID blocks login even if HWID matches
+                    banDeviceHwid($resB2["hwid"], "test ban", "admin", "");
+                    $_SERVER["HTTP_USER_AGENT"] = "Mozilla/5.0 (iPhone; CPU iPhone OS 18_0) Safari/604.1";
+                    $resB3 = authenticateAndBindAdminAccount("qdaimmo", "Pass@123456", $settings, $devB, "2.2.2.2");
+                    if (!empty($resB3["ok"]) || ($resB3["code"] ?? "") !== "DEVICE_BANNED") { fwrite(STDERR, "Banned B not blocked\n"); exit(9); }
+                    echo "PHP_SINGLE_DEVICE_OK\n";
+                '''
+                proc = subprocess.run(
+                    [php_bin, "-r", php_code, str(data_dir), pw_script],
+                    capture_output=True,
+                    text=True,
+                )
+                self.assertEqual(proc.returncode, 0, f"PHP test failed: {proc.stderr} {proc.stdout}")
+                self.assertIn("PHP_SINGLE_DEVICE_OK", proc.stdout)
+
 
 def main():
     parser = argparse.ArgumentParser(description="Run 3105 5-Scenario Security Test Suite")

@@ -91,7 +91,6 @@ unsafe fn hash_text_section_from_header(hdr_ptr: *const c_void) -> Option<[u8; 3
     }
     let base = hdr_ptr as usize;
     let mut cmd_ptr = base + core::mem::size_of::<MachHeader64>();
-    let mut aslr_slide: usize = 0;
 
     for _ in 0..hdr.ncmds {
         let lc = &*(cmd_ptr as *const LoadCommand);
@@ -101,7 +100,7 @@ unsafe fn hash_text_section_from_header(hdr_ptr: *const c_void) -> Option<[u8; 3
                 .unwrap_or("")
                 .trim_end_matches('\0');
             if seg_name == obfstr!("__TEXT") {
-                aslr_slide = base.wrapping_sub(seg.vmaddr as usize);
+                let aslr_slide = base.wrapping_sub(seg.vmaddr as usize);
                 let sect_ptr = cmd_ptr + core::mem::size_of::<SegmentCommand64>();
                 for i in 0..seg.nsects as usize {
                     let sect = &*((sect_ptr + i * core::mem::size_of::<Section64>()) as *const Section64);

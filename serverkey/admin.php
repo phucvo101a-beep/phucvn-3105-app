@@ -46,8 +46,15 @@ function checkAdminLoginRateLimit(string $ip, bool $recordFailure = false): bool
     });
 }
 
+$clientDevInfo = resolveClientDeviceIdentity(isset($_POST['device_fp']) ? (string)$_POST['device_fp'] : null, true);
+
 // Đăng xuất
 if (isset($_GET['action']) && $_GET['action'] === 'logout') {
+    logoutAdminSession(
+        (string)($_SESSION['admin_current_user'] ?? ''),
+        !empty($_SESSION['admin_is_master']),
+        (string)($_SESSION['admin_session_token'] ?? '')
+    );
     $_SESSION = [];
     if (ini_get('session.use_cookies')) {
         $p = session_get_cookie_params();
@@ -58,7 +65,7 @@ if (isset($_GET['action']) && $_GET['action'] === 'logout') {
     exit;
 }
 
-// Đăng nhập Admin (CSRF + Rate-limit + Argon2/Bcrypt Hash)
+// Đăng nhập Admin (CSRF + Rate-limit + Argon2/Bcrypt Hash + 1 Tài khoản = 1 Thiết bị HWID)
 if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['action']) && $_POST['action'] === 'admin_login') {
     $clientIp = $_SERVER['REMOTE_ADDR'] ?? 'unknown';
     $adminUser = trim($_POST['username'] ?? '');
@@ -69,23 +76,48 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['action']) && $_POST['
     } elseif (!checkAdminLoginRateLimit($clientIp, false)) {
         $error = 'Quá nhiều lần đăng nhập sai. Vui lòng thử lại sau 15 phút!';
     } else {
-        $authRes = verifyAdminCredentials($adminUser, $adminPass, $settings);
+        $authRes = authenticateAndBindAdminAccount($adminUser, $adminPass, $settings, $clientDevInfo, $clientIp);
         if (!empty($authRes['ok'])) {
             @session_regenerate_id(true);
             $_SESSION['admin_logged_in'] = true;
             $_SESSION['admin_current_user'] = $authRes['username'];
+            $_SESSION['admin_is_master'] = !empty($authRes['is_master']);
+            $_SESSION['admin_session_token'] = $authRes['session_token'];
+            $_SESSION['admin_device_hwid'] = $authRes['hwid'];
+            $_SESSION['admin_device_fp_hash'] = $authRes['fp_hash'];
+            $_SESSION['admin_ua_hash'] = $authRes['ua_hash'];
             $_SESSION['csrf_token'] = bin2hex(random_bytes(32));
-            addLog('login_success', $authRes['username'], 'Đăng nhập trang quản trị Admin thành công', $clientIp);
+            $bindNote = !empty($authRes['bound_now'])
+                ? " (Gắn thiết bị đầu tiên HWID: {$authRes['hwid']} • {$authRes['device_label']})"
+                : " (HWID: {$authRes['hwid']})";
+            addLog('login_success', $authRes['username'], 'Đăng nhập trang quản trị Server Key thành công' . $bindNote, $clientIp, $authRes['hwid']);
             header('Location: admin.php');
             exit;
         }
         checkAdminLoginRateLimit($clientIp, true);
-        addLog('login_fail', $adminUser, 'Đăng nhập admin thất bại', $clientIp);
+        $failCode = (string)($authRes['code'] ?? '');
+        $logType = in_array($failCode, ['HWID_MISMATCH', 'DEVICE_BANNED', 'HWID_BLOCKED'], true) ? 'ACCOUNT_HWID_DENY' : 'login_fail';
+        addLog($logType, $adminUser, (string)($authRes['error'] ?? 'Đăng nhập admin thất bại'), $clientIp, $clientDevInfo['hwid']);
         $error = $authRes['error'] ?: 'Sai tài khoản hoặc mật khẩu quản trị!';
     }
 }
 
 $isLoggedIn = !empty($_SESSION['admin_logged_in']);
+if ($isLoggedIn) {
+    $sessCheck = verifyCurrentAdminSession($settings, $clientDevInfo);
+    if (empty($sessCheck['valid'])) {
+        $_SESSION = [];
+        if (ini_get('session.use_cookies')) {
+            $p = session_get_cookie_params();
+            setcookie(session_name(), '', time() - 42000, $p['path'], $p['domain'], $p['secure'], $p['httponly']);
+        }
+        @session_destroy();
+        $isLoggedIn = false;
+        if (!empty($sessCheck['reason'])) {
+            $error = $sessCheck['reason'];
+        }
+    }
+}
 
 // Xử lý các thao tác quản trị khi đã đăng nhập (Bắt buộc CSRF Token)
 if ($isLoggedIn && $_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['action'])) {
@@ -113,20 +145,25 @@ if ($isLoggedIn && $_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['action
             $expiry = calculateExpiryDate($uDuration);
 
             upsertUser([
-                'id' => time() . rand(100, 999),
+                'id' => time() . random_int(100, 999),
                 'username' => $uName,
                 'password' => hashUserPassword($uPass),
                 'role' => $uRole,
                 'hwid' => $uHwid,
+                'device_fp_hash' => '',
+                'device_label' => '',
+                'active_session_token' => '',
+                'active_ua_hash' => '',
                 'is_active' => true,
                 'expiry_date' => $expiry,
                 'created_at' => date('Y-m-d H:i:s'),
                 'api_key' => '',
                 'last_login' => null,
+                'last_ip' => '',
                 'is_hwid_blocked' => false
             ]);
             $durLabel = formatDurationLabel($uDuration);
-            addLog('admin', 'admin', "Thêm tài khoản mới: {$uName} ({$uRole}, Hạn: {$durLabel})");
+            addLog('admin', $actor, "Thêm tài khoản mới: {$uName} ({$uRole}, Hạn: {$durLabel})");
             $msg = "Đã thêm thành công tài khoản: {$uName} (Hạn: {$durLabel})";
         }
     }
@@ -134,46 +171,83 @@ if ($isLoggedIn && $_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['action
     // 2. Xóa tài khoản
     elseif ($act === 'delete_user') {
         $uName = strtolower(trim($_POST['username'] ?? ''));
-        $users = getUsers();
-        $newUsers = [];
-        foreach ($users as $u) {
-            if (strtolower($u['username']) !== $uName) {
-                $newUsers[] = $u;
+        withLockedJson(USERS_FILE, [], function (&$users, &$dirty) use ($uName) {
+            $newUsers = [];
+            foreach ($users as $u) {
+                if (strtolower(trim((string)($u['username'] ?? ''))) !== $uName) {
+                    $newUsers[] = $u;
+                } else {
+                    $dirty = true;
+                }
             }
-        }
-        saveUsers($newUsers);
-        addLog('admin', 'admin', "Đã xóa tài khoản: {$uName}");
+            $users = $newUsers;
+            return true;
+        });
+        addLog('admin', $actor, "Đã xóa tài khoản: {$uName}");
         $msg = "Đã xóa tài khoản: {$uName}";
     }
 
     // 3. Khóa / Mở khóa tài khoản
     elseif ($act === 'toggle_status') {
         $uName = strtolower(trim($_POST['username'] ?? ''));
-        $users = getUsers();
-        foreach ($users as $i => $u) {
-            if (strtolower($u['username']) === $uName) {
-                $users[$i]['is_active'] = empty($u['is_active']);
-                saveUsers($users);
-                $stText = $users[$i]['is_active'] ? 'Kích hoạt' : 'Khóa';
-                addLog('admin', 'admin', "Thay đổi trạng thái tài khoản {$uName}: {$stText}");
-                $msg = "Đã {$stText} tài khoản: {$uName}";
-                break;
+        $toggled = withLockedJson(USERS_FILE, [], function (&$users, &$dirty) use ($uName) {
+            foreach ($users as $i => $u) {
+                if (strtolower(trim((string)($u['username'] ?? ''))) === $uName) {
+                    $users[$i]['is_active'] = empty($u['is_active']);
+                    if (empty($users[$i]['is_active'])) {
+                        $users[$i]['active_session_token'] = '';
+                    }
+                    $dirty = true;
+                    return $users[$i]['is_active'] ? 'Kích hoạt' : 'Khóa';
+                }
             }
+            return null;
+        });
+        if ($toggled !== null) {
+            addLog('admin', $actor, "Thay đổi trạng thái tài khoản {$uName}: {$toggled}");
+            $msg = "Đã {$toggled} tài khoản: {$uName}";
         }
     }
 
-    // 4. Đặt lại HWID
+    // 4. Đặt lại HWID (mở slot liên kết 1 thiết bị mới & đăng xuất thiết bị cũ ngay lập tức)
     elseif ($act === 'reset_hwid') {
         $uName = strtolower(trim($_POST['username'] ?? ''));
-        $users = getUsers();
-        foreach ($users as $i => $u) {
-            if (strtolower($u['username']) === $uName) {
-                $users[$i]['hwid'] = '';
-                saveUsers($users);
-                addLog('admin', 'admin', "Reset HWID tài khoản: {$uName}");
-                $msg = "Đã reset HWID cho tài khoản: {$uName}. Thiết bị mới sẽ tự động liên kết khi đăng nhập.";
-                break;
+        $found = withLockedJson(USERS_FILE, [], function (&$users, &$dirty) use ($uName) {
+            foreach ($users as $i => $u) {
+                if (strtolower(trim((string)($u['username'] ?? ''))) === $uName) {
+                    $users[$i]['hwid'] = '';
+                    $users[$i]['device_fp_hash'] = '';
+                    $users[$i]['device_label'] = '';
+                    $users[$i]['active_session_token'] = '';
+                    $users[$i]['active_ua_hash'] = '';
+                    $dirty = true;
+                    return true;
+                }
             }
+            return false;
+        });
+        if ($found) {
+            addLog('admin', $actor, "Reset HWID tài khoản: {$uName}");
+            $msg = "Đã reset HWID & thu hồi phiên của tài khoản: {$uName}. Thiết bị mới sẽ tự động liên kết ở lần đăng nhập tiếp theo.";
+        }
+    }
+
+    // 4b. Đuổi phiên đăng nhập (Kick session nhưng vẫn giữ HWID máy đã gắn)
+    elseif ($act === 'kick_user_session') {
+        $uName = strtolower(trim($_POST['username'] ?? ''));
+        $kicked = withLockedJson(USERS_FILE, [], function (&$users, &$dirty) use ($uName) {
+            foreach ($users as $i => $u) {
+                if (strtolower(trim((string)($u['username'] ?? ''))) === $uName) {
+                    $users[$i]['active_session_token'] = '';
+                    $dirty = true;
+                    return true;
+                }
+            }
+            return false;
+        });
+        if ($kicked) {
+            addLog('admin', $actor, "Kick phiên đăng nhập tài khoản: {$uName}");
+            $msg = "Đã đăng xuất bắt buộc tài khoản {$uName} (vẫn giữ liên kết HWID thiết bị hiện tại).";
         }
     }
 
@@ -181,17 +255,21 @@ if ($isLoggedIn && $_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['action
     elseif ($act === 'extend_user') {
         $uName = strtolower(trim($_POST['username'] ?? ''));
         $addDuration = trim($_POST['add_duration'] ?? '30d');
-        $users = getUsers();
-        foreach ($users as $i => $u) {
-            if (strtolower($u['username']) === $uName) {
-                $currentExp = $users[$i]['expiry_date'] ?? 'permanent';
-                $users[$i]['expiry_date'] = calculateExpiryDate($addDuration, $currentExp);
-                saveUsers($users);
-                $label = formatDurationLabel($addDuration);
-                addLog('admin', 'admin', "Gia hạn tài khoản {$uName}: {$label}");
-                $msg = "Đã gia hạn tài khoản {$uName}: {$label}";
-                break;
+        $updated = withLockedJson(USERS_FILE, [], function (&$users, &$dirty) use ($uName, $addDuration) {
+            foreach ($users as $i => $u) {
+                if (strtolower(trim((string)($u['username'] ?? ''))) === $uName) {
+                    $currentExp = $users[$i]['expiry_date'] ?? 'permanent';
+                    $users[$i]['expiry_date'] = calculateExpiryDate($addDuration, $currentExp);
+                    $dirty = true;
+                    return true;
+                }
             }
+            return false;
+        });
+        if ($updated) {
+            $label = formatDurationLabel($addDuration);
+            addLog('admin', $actor, "Gia hạn tài khoản {$uName}: {$label}");
+            $msg = "Đã gia hạn tài khoản {$uName}: {$label}";
         }
     }
 
@@ -377,11 +455,24 @@ if ($isLoggedIn && $_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['action
         $settings['auto_activate'] = !empty($_POST['auto_activate']);
         $settings['default_duration'] = trim($_POST['default_duration'] ?? '30d');
         $settings['bind_hwid'] = !empty($_POST['bind_hwid']);
+        $settings['lock_master_hwid'] = !empty($_POST['lock_master_hwid']);
         $settings['telegram_support'] = trim($_POST['telegram_support'] ?? '');
 
         saveSettings($settings);
         addLog('admin', $actor, "Cập nhật cấu hình hệ thống");
         $msg = "Đã lưu cài đặt hệ thống thành công!";
+    }
+
+    elseif ($act === 'reset_master_hwid') {
+        withLockedJson(MASTER_SESSION_FILE, [], function (&$master, &$dirty) {
+            $master['hwid'] = '';
+            $master['device_fp_hash'] = '';
+            $master['device_label'] = '';
+            $dirty = true;
+            return true;
+        });
+        addLog('admin', $actor, "Reset liên kết HWID cho tài khoản Master Admin");
+        $msg = "Đã xóa liên kết HWID của Master Admin. Máy tiếp theo đăng nhập sẽ trở thành thiết bị chính thức.";
     }
 
     // 9. Công tắc Đóng/Mở Server & Ép Cập Nhật (Toàn hệ thống)
@@ -519,9 +610,9 @@ if ($isLoggedIn && $_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['action
     $returnTab = trim((string)($_POST['return_tab'] ?? ''));
     if (in_array($returnTab, ['keysTab', 'securityTab', 'usersTab', 'settingsTab', 'logsTab'], true)) {
         $tabParam = $returnTab;
-    } elseif (in_array($act, ['add_user', 'delete_user', 'toggle_status', 'reset_hwid', 'extend_user'])) {
+    } elseif (in_array($act, ['add_user', 'delete_user', 'toggle_status', 'reset_hwid', 'kick_user_session', 'extend_user'])) {
         $tabParam = 'usersTab';
-    } elseif ($act === 'update_settings') {
+    } elseif (in_array($act, ['update_settings', 'reset_master_hwid'])) {
         $tabParam = 'settingsTab';
     } elseif (in_array($act, ['update_security_policy', 'upsert_package_policy', 'delete_package_policy', 'add_build_manifest', 'toggle_manifest_revoke', 'delete_manifest', 'ban_device', 'unban_device'])) {
         $tabParam = 'securityTab';
@@ -662,9 +753,10 @@ foreach ($allKeys as $k) {
                 <div class="alert alert-error" style="text-align: left;"><?= htmlspecialchars($error) ?></div>
             <?php endif; ?>
 
-            <form method="POST" style="text-align: left;">
+            <form method="POST" id="adminLoginForm" style="text-align: left;">
                 <?= csrfField() ?>
                 <input type="hidden" name="action" value="admin_login">
+                <input type="hidden" name="device_fp" id="adminDeviceFp" value="">
                 <div class="form-group">
                     <label class="form-label"><i class="fa-solid fa-user-shield"></i> Tài khoản Quản Trị</label>
                     <input type="text" name="username" class="form-input" required autocomplete="username" placeholder="Nhập tài khoản admin">
@@ -677,13 +769,54 @@ foreach ($allKeys as $k) {
                     <i class="fa-solid fa-right-to-bracket"></i> ĐĂNG NHẬP HỆ THỐNG
                 </button>
             </form>
-            <div style="text-align: center; margin-top: 24px; border-top: 1px solid rgba(255,255,255,0.06); padding-top: 16px;">
+            <div style="margin-top: 14px; font-size: 11.5px; color: #94a3b8; background: rgba(6, 182, 212, 0.08); border: 1px solid rgba(6, 182, 212, 0.25); padding: 8px 10px; border-radius: 8px;">
+                <i class="fa-solid fa-laptop-code" style="color: #22d3ee;"></i> Bảo mật 1 Thiết Bị: Mỗi tài khoản chỉ được phép đăng nhập cố định trên 1 thiết bị (HWID).
+            </div>
+            <div style="text-align: center; margin-top: 18px; border-top: 1px solid rgba(255,255,255,0.06); padding-top: 16px;">
                 <a href="https://phuciosvn.com/" target="_blank" style="color: #22d3ee; text-decoration: none; font-size: 12.5px; font-weight: 600;">
                     <i class="fa-solid fa-cart-shopping"></i> Truy cập Shop: phuciosvn.com
                 </a>
             </div>
         </div>
     </div>
+    <script>
+        (function() {
+            function computeAdminDeviceFp() {
+                var lid = '';
+                try {
+                    lid = localStorage.getItem('phucvn_srv_local_id') || '';
+                    if (!lid) {
+                        if (window.crypto && window.crypto.getRandomValues) {
+                            var buf = new Uint8Array(16);
+                            window.crypto.getRandomValues(buf);
+                            lid = Array.from(buf, function(b) { return ('0' + b.toString(16)).slice(-2); }).join('');
+                        } else {
+                            lid = String(Date.now()) + '-' + Math.random().toString(36).slice(2) + '-' + Math.random().toString(36).slice(2);
+                        }
+                        localStorage.setItem('phucvn_srv_local_id', lid);
+                    }
+                } catch (e) {
+                    lid = 'nolocal';
+                }
+                var tz = '';
+                try { tz = Intl.DateTimeFormat().resolvedOptions().timeZone || ''; } catch (e) {}
+                var fp = [
+                    lid,
+                    navigator.platform || '',
+                    (screen && screen.width ? screen.width : 0) + 'x' + (screen && screen.height ? screen.height : 0),
+                    navigator.hardwareConcurrency || 0,
+                    tz
+                ].join('|');
+                var el = document.getElementById('adminDeviceFp');
+                if (el) el.value = fp;
+            }
+            computeAdminDeviceFp();
+            var form = document.getElementById('adminLoginForm');
+            if (form) {
+                form.addEventListener('submit', computeAdminDeviceFp);
+            }
+        })();
+    </script>
 
 <?php else: ?>
     <nav class="admin-nav">
@@ -1400,6 +1533,9 @@ foreach ($allKeys as $k) {
                         <button type="submit" class="btn btn-primary btn-sm"><i class="fa-solid fa-search"></i> Tìm</button>
                     </form>
                 </div>
+                <div style="font-size: 12px; color: #94a3b8; margin-bottom: 14px; background: rgba(6, 182, 212, 0.08); border: 1px solid rgba(6, 182, 212, 0.2); border-radius: 8px; padding: 9px 12px;">
+                    <i class="fa-solid fa-shield-halved" style="color: #22d3ee;"></i> <strong>Chế độ 1 Tài Khoản = 1 Thiết Bị:</strong> Khi tài khoản đăng nhập lần đầu sẽ tự động khóa chặt vào HWID thiết bị đó. Mọi máy khác đăng nhập cùng tài khoản sẽ bị chặn ngay lập tức cho đến khi bạn bấm nút <strong>Reset HWID</strong> (<i class="fa-solid fa-arrows-rotate"></i>).
+                </div>
 
                 <div class="table-responsive">
                     <table>
@@ -1451,9 +1587,14 @@ foreach ($allKeys as $k) {
                                         <?php if (!empty($u['hwid'])):
                                             $uHwid = trim((string)$u['hwid']);
                                             $uBanned = !empty($bannedHwidMap[strtolower($uHwid)]);
+                                            $uLabel = trim((string)($u['device_label'] ?? ''));
+                                            $uOnline = !empty($u['active_session_token']);
                                         ?>
                                             <div style="display:flex;align-items:center;gap:6px;flex-wrap:wrap;">
-                                                <span class="code-box" style="<?= $uBanned ? 'color:#f87171;border-color:rgba(239,68,68,0.45);' : '' ?>" title="<?= htmlspecialchars($uHwid) ?>"><?= htmlspecialchars(substr($uHwid, 0, 16)) ?>...</span>
+                                                <span class="code-box" style="<?= $uBanned ? 'color:#f87171;border-color:rgba(239,68,68,0.45);' : '' ?>" title="<?= htmlspecialchars($uHwid) ?>"><?= htmlspecialchars(substr($uHwid, 0, 18)) ?><?= strlen($uHwid) > 18 ? '...' : '' ?></span>
+                                                <?php if ($uOnline): ?>
+                                                    <span class="badge badge-active" style="font-size:10px;padding:2px 6px;">Đang online</span>
+                                                <?php endif; ?>
                                                 <?php if ($uBanned): ?>
                                                     <form method="POST" style="display:inline;">
                                                         <?= csrfField() ?>
@@ -1473,12 +1614,18 @@ foreach ($allKeys as $k) {
                                                     </form>
                                                 <?php endif; ?>
                                             </div>
+                                            <?php if ($uLabel !== ''): ?>
+                                                <div style="font-size: 11px; color: #94a3b8; margin-top: 3px;"><i class="fa-solid fa-desktop"></i> <?= htmlspecialchars($uLabel) ?></div>
+                                            <?php endif; ?>
                                         <?php else: ?>
                                             <span style="color: #64748b; font-size: 11.5px;">(Chưa liên kết)</span>
                                         <?php endif; ?>
                                     </td>
                                     <td style="font-size: 11.5px; color: var(--text-muted);">
                                         <?= htmlspecialchars($u['last_login'] ?? 'Chưa đăng nhập') ?>
+                                        <?php if (!empty($u['last_ip'])): ?>
+                                            <div style="font-size: 10.5px; color: #64748b; margin-top: 2px;">IP: <?= htmlspecialchars((string)$u['last_ip']) ?></div>
+                                        <?php endif; ?>
                                     </td>
                                     <td>
                                         <div style="display: flex; gap: 5px;">
@@ -1492,12 +1639,24 @@ foreach ($allKeys as $k) {
                                                 </button>
                                             </form>
 
+                                            <?php if (!empty($u['active_session_token'])): ?>
+                                            <!-- Kick phiên đang online (giữ nguyên HWID) -->
+                                            <form method="POST" style="display:inline;" onsubmit="return confirm('Đăng xuất phiên hiện tại của <?= htmlspecialchars($u['username']) ?>?');">
+                                                <?= csrfField() ?>
+                                                <input type="hidden" name="action" value="kick_user_session">
+                                                <input type="hidden" name="username" value="<?= htmlspecialchars($u['username']) ?>">
+                                                <button type="submit" class="btn btn-sm" style="background: rgba(245,158,11,0.18); color: #fbbf24;" title="Đăng xuất phiên hiện tại (giữ HWID)">
+                                                    <i class="fa-solid fa-right-from-bracket"></i>
+                                                </button>
+                                            </form>
+                                            <?php endif; ?>
+
                                             <!-- Reset HWID -->
-                                            <form method="POST" style="display:inline;" onsubmit="return confirm('Reset HWID tài khoản <?= htmlspecialchars($u['username']) ?> để liên kết máy mới?');">
+                                            <form method="POST" style="display:inline;" onsubmit="return confirm('Reset HWID tài khoản <?= htmlspecialchars($u['username']) ?> để liên kết 1 thiết bị mới?');">
                                                 <?= csrfField() ?>
                                                 <input type="hidden" name="action" value="reset_hwid">
                                                 <input type="hidden" name="username" value="<?= htmlspecialchars($u['username']) ?>">
-                                                <button type="submit" class="btn btn-sm" style="background: rgba(6,182,212,0.15); color: #22d3ee;" title="Reset HWID máy">
+                                                <button type="submit" class="btn btn-sm" style="background: rgba(6,182,212,0.15); color: #22d3ee;" title="Reset HWID (cho phép đổi sang 1 máy mới)">
                                                     <i class="fa-solid fa-arrows-rotate"></i>
                                                 </button>
                                             </form>
@@ -1574,13 +1733,32 @@ foreach ($allKeys as $k) {
                         </label>
 
                         <label style="display: flex; align-items: center; gap: 10px; margin-bottom: 12px; cursor: pointer;">
-                            <input type="checkbox" name="bind_hwid" value="1" <?= !empty($settings['bind_hwid']) ? 'checked' : '' ?>>
-                            <span><strong>Tự động khóa thiết bị (HWID) ở lần đăng nhập app đầu tiên:</strong> Chống chia sẻ tài khoản</span>
+                            <input type="checkbox" name="bind_hwid" value="1" <?= (!array_key_exists('bind_hwid', $settings) || !empty($settings['bind_hwid'])) ? 'checked' : '' ?>>
+                            <span><strong>Khóa 1 tài khoản = 1 thiết bị (HWID):</strong> Tự động gắn cứng HWID ở lần đăng nhập đầu tiên cho mọi tài khoản Server Key (Chống share tài khoản)</span>
+                        </label>
+
+                        <label style="display: flex; align-items: center; gap: 10px; margin-bottom: 12px; cursor: pointer;">
+                            <input type="checkbox" name="lock_master_hwid" value="1" <?= !empty($settings['lock_master_hwid']) ? 'checked' : '' ?>>
+                            <span><strong>Khóa cứng HWID cho tài khoản Master Admin gốc:</strong> Mặc định Master Admin luôn chỉ cho phép 1 phiên đăng nhập đồng thời; bật mục này để khóa cứng luôn vào 1 máy cố định</span>
                         </label>
                     </div>
 
                     <button type="submit" class="btn btn-primary"><i class="fa-solid fa-save"></i> Lưu Cài Đặt</button>
                 </form>
+                <?php $masterInfo = readJsonFile(MASTER_SESSION_FILE, []); if (!empty($masterInfo['hwid'])): ?>
+                <div style="margin-top: 16px; padding-top: 14px; border-top: 1px solid rgba(255,255,255,0.06); display:flex; align-items:center; justify-content:space-between; flex-wrap:wrap; gap:10px;">
+                    <div style="font-size: 12.5px; color: #cbd5e1;">
+                        <strong>Thiết bị Master Admin gần nhất:</strong>
+                        <span class="code-box"><?= htmlspecialchars((string)$masterInfo['hwid']) ?></span>
+                        <span style="color:var(--text-muted); margin-left:6px;"><?= htmlspecialchars((string)($masterInfo['device_label'] ?? '')) ?> • <?= htmlspecialchars((string)($masterInfo['last_login'] ?? '')) ?></span>
+                    </div>
+                    <form method="POST" style="display:inline;" onsubmit="return confirm('Xóa liên kết HWID của Master Admin gốc?');">
+                        <?= csrfField() ?>
+                        <input type="hidden" name="action" value="reset_master_hwid">
+                        <button type="submit" class="btn btn-sm" style="background: rgba(6,182,212,0.15); color: #22d3ee;"><i class="fa-solid fa-arrows-rotate"></i> Reset HWID Master</button>
+                    </form>
+                </div>
+                <?php endif; ?>
             </div>
         </div>
 

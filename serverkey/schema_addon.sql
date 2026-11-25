@@ -85,3 +85,21 @@ CREATE TABLE IF NOT EXISTS `banned_devices` (
     `active` TINYINT(1) NOT NULL DEFAULT 1,
     `banned_at` DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
+CREATE TABLE IF NOT EXISTS `server_users` (
+    `id` BIGINT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
+    `username` VARCHAR(64) NOT NULL UNIQUE,
+    `password_hash` VARCHAR(255) NOT NULL,
+    `role` VARCHAR(32) NOT NULL DEFAULT 'member',
+    `hwid` VARCHAR(128) NOT NULL DEFAULT '',
+    `device_fp_hash` CHAR(64) NOT NULL DEFAULT '',
+    `device_label` VARCHAR(128) NOT NULL DEFAULT '',
+    `active_session_token` CHAR(64) NOT NULL DEFAULT '',
+    `active_ua_hash` CHAR(64) NOT NULL DEFAULT '',
+    `is_active` TINYINT(1) NOT NULL DEFAULT 1,
+    `is_hwid_blocked` TINYINT(1) NOT NULL DEFAULT 0,
+    `expiry_date` VARCHAR(32) NOT NULL DEFAULT 'permanent',
+    `last_login` DATETIME NULL,
+    `last_ip` VARCHAR(64) NOT NULL DEFAULT '',
+    `created_at` DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
