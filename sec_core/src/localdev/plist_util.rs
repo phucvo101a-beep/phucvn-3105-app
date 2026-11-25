@@ -134,7 +134,8 @@ pub fn base64_encode(input: &[u8]) -> String {
 // ==============================================================================
 
 pub fn parse_plist(data: &[u8]) -> Result<PlistValue, String> {
-    if data.starts_with(obfstr::obfstr!("bplist00").as_bytes()) {
+    let bplist_magic = obfstr::obfstr!("bplist00").to_string();
+    if data.starts_with(bplist_magic.as_bytes()) {
         parse_binary_plist(data)
     } else {
         let s = std::str::from_utf8(data)
@@ -307,7 +308,8 @@ fn parse_xml_array(xml: &str, cursor: &mut usize) -> Result<PlistValue, String> 
 // ==============================================================================
 
 fn parse_binary_plist(data: &[u8]) -> Result<PlistValue, String> {
-    if data.len() < 32 || !data.starts_with(obfstr::obfstr!("bplist00").as_bytes()) {
+    let bplist_magic = obfstr::obfstr!("bplist00").to_string();
+    if data.len() < 32 || !data.starts_with(bplist_magic.as_bytes()) {
         return Err(obfstr::obfstr!("Invalid binary plist header").to_string());
     }
 

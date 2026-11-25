@@ -1,11 +1,11 @@
 use obfstr::obfstr;
 use sha2::{Digest, Sha256};
-use std::ffi::{c_void, CString};
+use std::ffi::{c_char, c_void, CString};
 
 #[cfg(target_vendor = "apple")]
 extern "C" {
     fn sysctlbyname(
-        name: *const i8,
+        name: *const c_char,
         oldp: *mut c_void,
         oldlenp: *mut usize,
         newp: *const c_void,
@@ -35,7 +35,7 @@ extern "C" {
     fn CFDictionaryAddValue(the_dict: *mut c_void, key: *const c_void, value: *const c_void);
     fn CFStringCreateWithCString(
         alloc: *const c_void,
-        c_str: *const i8,
+        c_str: *const c_char,
         encoding: u32,
     ) -> *const c_void;
     fn CFDataCreate(alloc: *const c_void, bytes: *const u8, length: isize) -> *const c_void;
@@ -183,8 +183,9 @@ pub fn get_device_fingerprint() -> String {
         }
     };
 
+    let hwid_tag = obfstr!("PHUCVN3105-HWID-V3|").to_string();
     let mut hasher = Sha256::new();
-    hasher.update(obfstr!("PHUCVN3105-HWID-V3|").as_bytes());
+    hasher.update(hwid_tag.as_bytes());
     hasher.update(hw.as_bytes());
     hasher.update(b"|");
     hasher.update(persistent_id.as_bytes());

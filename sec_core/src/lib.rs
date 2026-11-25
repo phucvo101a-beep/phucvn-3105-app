@@ -344,9 +344,8 @@ pub extern "C" fn sec_core_tamper_detected() -> bool {
 pub extern "C" fn sec_core_free_string(ptr: *mut c_char) {
     if !ptr.is_null() {
         unsafe {
-            let mut c = CString::from_raw(ptr);
-            let bytes = c.into_bytes();
-            let mut z = bytes;
+            let c = CString::from_raw(ptr);
+            let mut z = c.into_bytes();
             z.zeroize();
         }
     }
@@ -357,7 +356,7 @@ pub extern "C" fn sec_core_free_bytes(ptr: *mut u8, len: usize) {
     if !ptr.is_null() && len > 0 {
         unsafe {
             let mut slice = Box::from_raw(core::ptr::slice_from_raw_parts_mut(ptr, len));
-            slice.zeroize();
+            (&mut *slice).zeroize();
         }
     }
 }

@@ -1,11 +1,11 @@
 use crate::syscall_arm64;
 use obfstr::obfstr;
-use std::ffi::{c_void, CString};
+use std::ffi::{c_char, c_void, CString};
 
 #[cfg(target_vendor = "apple")]
 extern "C" {
     fn sysctlbyname(
-        name: *const i8,
+        name: *const c_char,
         oldp: *mut c_void,
         oldlenp: *mut usize,
         newp: *const c_void,

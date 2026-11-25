@@ -5,7 +5,6 @@ use chacha20poly1305::{
 };
 use ed25519_dalek::{Signer, SigningKey};
 use hkdf::Hkdf;
-use hmac::{Hmac, Mac};
 use rand::rngs::OsRng;
 use rand::RngCore;
 use sha2::{Digest, Sha256};
@@ -13,7 +12,38 @@ use subtle::ConstantTimeEq;
 use x25519_dalek::{PublicKey as X25519Public, StaticSecret as X25519Secret};
 use zeroize::{Zeroize, Zeroizing};
 
-type HmacSha256 = Hmac<Sha256>;
+/// Pure RFC 2104 HMAC-SHA256 helper (avoids hmac crate trait mismatch).
+pub fn hmac_sha256(key: &[u8], parts: &[&[u8]]) -> [u8; 32] {
+    let mut k_block = [0u8; 64];
+    if key.len() > 64 {
+        let h = Sha256::digest(key);
+        k_block[..32].copy_from_slice(&h);
+    } else {
+        k_block[..key.len()].copy_from_slice(key);
+    }
+    let mut ipad = [0x36u8; 64];
+    let mut opad = [0x5cu8; 64];
+    for i in 0..64 {
+        ipad[i] ^= k_block[i];
+        opad[i] ^= k_block[i];
+    }
+    let mut inner = Sha256::new();
+    inner.update(&ipad);
+    for p in parts {
+        inner.update(p);
+    }
+    let inner_hash = inner.finalize();
+    let mut outer = Sha256::new();
+    outer.update(&opad);
+    outer.update(&inner_hash);
+    let digest = outer.finalize();
+    k_block.zeroize();
+    ipad.zeroize();
+    opad.zeroize();
+    let mut out = [0u8; 32];
+    out.copy_from_slice(digest.as_slice());
+    out
+}
 
 /// Official 3105 bundled preset filenames mapped deterministically to V4 bundle IDs.
 pub const BUNDLED_PRESET_FILENAMES: &[&str] = &[
@@ -161,7 +191,8 @@ pub fn decrypt_request_v3(
     let ct = B64
         .decode(ct_b64.trim())
         .map_err(|_| "Malformed base64 ciphertext".to_string())?;
-    let cipher = XChaCha20Poly1305::new(key.into());
+    let cipher = XChaCha20Poly1305::new_from_slice(key)
+        .map_err(|_| "AEAD key length error".to_string())?;
     cipher
         .decrypt(
             XNonce::from_slice(nonce24),
@@ -183,14 +214,8 @@ pub fn verify_client_proof(
     let Ok(provided) = hex::decode(provided_hex.trim()) else {
         return false;
     };
-    let Ok(mut mac) = <HmacSha256 as Mac>::new_from_slice(pepper) else {
-        return false;
-    };
-    mac.update(req_aad.as_bytes());
-    mac.update(b"|");
-    mac.update(license_key.as_bytes());
-    let expected = mac.finalize().into_bytes();
-    provided.len() == expected.len() && bool::from(provided.as_slice().ct_eq(&expected))
+    let expected = hmac_sha256(pepper, &[req_aad.as_bytes(), b"|", license_key.as_bytes()]);
+    provided.len() == expected.len() && bool::from(provided.as_slice().ct_eq(&expected[..]))
 }
 
 /// Encrypts response JSON with caller-supplied s_nonce24 and signs RES_AAD || "|" || sha256(ct) with Ed25519.
@@ -207,7 +232,8 @@ pub fn seal_and_sign_response_v3(
     info.extend_from_slice(req_nonce24);
     let res_key = derive_v3_key(shared, &keys.pepper, &info)?;
 
-    let cipher = XChaCha20Poly1305::new(res_key.as_ref().into());
+    let cipher = XChaCha20Poly1305::new_from_slice(&*res_key)
+        .map_err(|_| "AEAD key length error".to_string())?;
     let ct = cipher
         .encrypt(
             XNonce::from_slice(s_nonce24),
@@ -283,12 +309,8 @@ pub fn verify_hmac_hex(secret: &[u8], payload: &[u8], sig_hex: &str) -> bool {
     let Ok(provided) = hex::decode(sig_hex.trim()) else {
         return false;
     };
-    let Ok(mut mac) = <HmacSha256 as Mac>::new_from_slice(secret) else {
-        return false;
-    };
-    mac.update(payload);
-    let expected = mac.finalize().into_bytes();
-    provided.len() == expected.len() && bool::from(provided.as_slice().ct_eq(&expected))
+    let expected = hmac_sha256(secret, &[payload]);
+    provided.len() == expected.len() && bool::from(provided.as_slice().ct_eq(&expected[..]))
 }
 
 /// Computes SHA-256 hex digest of UTF-8 input.

@@ -41,30 +41,24 @@ pub fn backup_spki_pin() -> [u8; 32] {
 pub fn api_host() -> Zeroizing<String> {
     let bytes: Vec<u8> = gen::API_HOST_ENC
         .iter()
-        .enumerate()
-        .map(|(i, &b)| b ^ gen::API_HOST_MASK.wrapping_add((i as u8).wrapping_mul(0)))
+        .map(|&b| b ^ gen::API_HOST_MASK)
         .collect();
-    // Keep exact single-byte XOR compatible with CI string encoder:
-    let mut decoded = Zeroizing::new(bytes);
+    let decoded = Zeroizing::new(bytes);
     if let Ok(s) = std::str::from_utf8(&decoded) {
-        let res = Zeroizing::new(s.to_string());
-        decoded.fill(0);
-        return res;
+        return Zeroizing::new(s.to_string());
     }
     Zeroizing::new(String::new())
 }
 
 pub fn api_path() -> Zeroizing<String> {
-    let mut decoded = Zeroizing::new(
+    let decoded = Zeroizing::new(
         gen::API_PATH_ENC
             .iter()
             .map(|&b| b ^ gen::API_PATH_MASK)
             .collect::<Vec<u8>>(),
     );
     if let Ok(s) = std::str::from_utf8(&decoded) {
-        let res = Zeroizing::new(s.to_string());
-        decoded.fill(0);
-        return res;
+        return Zeroizing::new(s.to_string());
     }
     Zeroizing::new(String::new())
 }

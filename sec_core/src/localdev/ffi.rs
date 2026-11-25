@@ -126,7 +126,7 @@ pub extern "C" fn localdev_list_dir(
             }
             HouseArrestClient::list_dir(&mgr.host, mgr.port, pairing, b_id, path_str)
         } else {
-            let (mut afc, source) = AfcClient::connect_device_afc(&mgr.host, mgr.port, pairing)?;
+            let (mut afc, _source) = AfcClient::connect_device_afc(&mgr.host, mgr.port, pairing)?;
             let entries = afc.list_dir(path_str)?;
             Ok(entries)
         }

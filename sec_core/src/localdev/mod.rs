@@ -86,7 +86,7 @@ impl LocalDevManager {
         if let Some(ref dir) = self.storage_dir {
             let _ = parsed.save_to_dir(dir);
         }
-        let udid = parsed.udid.clone();
+        let _udid = parsed.udid.clone();
         self.active_pairing = Some(parsed);
 
         // Check if tunnel is reachable and start heartbeat

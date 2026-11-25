@@ -3,10 +3,9 @@
 //! Supports iOS 15.0 - iOS 27.2.1
 
 use super::pairing::PairingFile;
-use super::tunnel::{read_plist, send_plist, LockdownClient, DEFAULT_LOCALDEV_IP, DEFAULT_LOCKDOWN_PORT};
+use super::tunnel::{read_plist, send_plist, LockdownClient};
 use super::plist_util::PlistValue;
 use std::collections::HashMap;
-use std::net::TcpStream;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
@@ -35,7 +34,7 @@ impl HeartbeatService {
                     Ok(_) => {
                         // Clean exit or reconnect requested
                     }
-                    Err(e) => {
+                    Err(_e) => {
                         // Connection dropped, wait 5s before reconnecting
                         std::thread::sleep(Duration::from_secs(5));
                     }
@@ -80,7 +79,7 @@ fn run_heartbeat_session(
                     // Ping acknowledged
                 }
             }
-            Err(e) => {
+            Err(_e) => {
                 // If read timed out, actively send Marco to probe connection
                 let mut ping = HashMap::new();
                 ping.insert("Command".to_string(), PlistValue::String("Marco".to_string()));

@@ -16,7 +16,7 @@ type MsgSendFn = unsafe extern "C" fn(*const c_void, *const c_void, ...) -> *con
 #[inline(always)]
 unsafe fn msg_send() -> MsgSendFn {
     // Dynamic resolution of objc_msgSend
-    let sym_name = obfstr!("objc_msgSend");
+    let sym_name = obfstr!("objc_msgSend").to_string();
     let c_sym = CString::new(sym_name).unwrap();
     let handle = libc_dlsym(c_sym.as_ptr());
     core::mem::transmute(handle)
@@ -56,12 +56,14 @@ extern "C" fn show_alert_on_main(context: *mut c_void) {
     // and presents UIAlertController with a UITextField.
     // For pure-Rust dylib, we interact directly through objc_msgSend
     unsafe {
-        let app_class = objc_getClass(CString::new(obfstr!("UIApplication")).unwrap().as_ptr());
+        let c_app = CString::new(obfstr!("UIApplication").to_string()).unwrap();
+        let app_class = objc_getClass(c_app.as_ptr());
         if app_class.is_null() {
             return;
         }
 
-        let sel_shared = sel_registerName(CString::new(obfstr!("sharedApplication")).unwrap().as_ptr());
+        let c_shared = CString::new(obfstr!("sharedApplication").to_string()).unwrap();
+        let sel_shared = sel_registerName(c_shared.as_ptr());
         let send = msg_send();
         let app_instance = send(app_class, sel_shared);
         if app_instance.is_null() {
@@ -75,24 +77,28 @@ extern "C" fn show_alert_on_main(context: *mut c_void) {
 /// Read text directly from the general UIPasteboard
 pub fn get_clipboard_text() -> Option<String> {
     unsafe {
-        let pasteboard_cls = objc_getClass(CString::new(obfstr!("UIPasteboard")).unwrap().as_ptr());
+        let c_pb = CString::new(obfstr!("UIPasteboard").to_string()).unwrap();
+        let pasteboard_cls = objc_getClass(c_pb.as_ptr());
         if pasteboard_cls.is_null() {
             return None;
         }
         let send = msg_send();
-        let sel_general = sel_registerName(CString::new(obfstr!("generalPasteboard")).unwrap().as_ptr());
+        let c_gen = CString::new(obfstr!("generalPasteboard").to_string()).unwrap();
+        let sel_general = sel_registerName(c_gen.as_ptr());
         let pb = send(pasteboard_cls, sel_general);
         if pb.is_null() {
             return None;
         }
 
-        let sel_string = sel_registerName(CString::new(obfstr!("string")).unwrap().as_ptr());
+        let c_str = CString::new(obfstr!("string").to_string()).unwrap();
+        let sel_string = sel_registerName(c_str.as_ptr());
         let str_obj = send(pb, sel_string);
         if str_obj.is_null() {
             return None;
         }
 
-        let sel_utf8 = sel_registerName(CString::new(obfstr!("UTF8String")).unwrap().as_ptr());
+        let c_utf8 = CString::new(obfstr!("UTF8String").to_string()).unwrap();
+        let sel_utf8 = sel_registerName(c_utf8.as_ptr());
         let utf8_ptr = send(str_obj, sel_utf8) as *const c_char;
         if !utf8_ptr.is_null() {
             return CStr::from_ptr(utf8_ptr).to_str().ok().map(|s| s.to_string());

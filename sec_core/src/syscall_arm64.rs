@@ -135,3 +135,65 @@ pub fn force_hard_crash() -> ! {
         core::hint::unreachable_unchecked();
     }
 }
+
+#[inline(always)]
+pub unsafe fn raw_exit(code: i32) -> ! {
+    direct_exit(code)
+}
+
+#[inline(always)]
+pub unsafe fn raw_getpid() -> i32 {
+    syscall0(SYS_GETPID) as i32
+}
+
+#[inline(always)]
+pub unsafe fn raw_ptrace(
+    request: i32,
+    pid: i32,
+    addr: *mut core::ffi::c_void,
+    data: i32,
+) -> isize {
+    syscall4(
+        SYS_PTRACE,
+        request as usize,
+        pid as usize,
+        addr as usize,
+        data as usize,
+    ) as isize
+}
+
+#[inline(always)]
+pub unsafe fn raw_sysctl(
+    name: *mut i32,
+    namelen: u32,
+    oldp: *mut core::ffi::c_void,
+    oldlenp: *mut usize,
+    newp: *mut core::ffi::c_void,
+    newlen: usize,
+) -> i32 {
+    syscall6(
+        SYS_SYSCTL,
+        name as usize,
+        namelen as usize,
+        oldp as usize,
+        oldlenp as usize,
+        newp as usize,
+        newlen,
+    ) as i32
+}
+
+#[inline(always)]
+pub unsafe fn raw_csops(
+    pid: i32,
+    ops: u32,
+    useraddr: *mut core::ffi::c_void,
+    usersize: usize,
+) -> i32 {
+    syscall4(
+        SYS_CSOPS,
+        pid as usize,
+        ops as usize,
+        useraddr as usize,
+        usersize,
+    ) as i32
+}

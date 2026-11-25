@@ -1,10 +1,10 @@
 //! Pure-Rust TLS Networking with SPKI Certificate Pinning & Chunked HTTP/1.1 Support
 
 use obfstr::obfstr;
-use ring::digest::{digest, SHA256};
 use rustls::client::danger::{HandshakeSignatureValid, ServerCertVerified, ServerCertVerifier};
 use rustls::pki_types::{CertificateDer, ServerName, UnixTime};
 use rustls::{ClientConfig, ClientConnection, DigitallySignedStruct, Error as RustlsError, SignatureScheme, Stream};
+use sha2::{Digest, Sha256};
 use std::io::{Read, Write};
 use std::net::{TcpStream, ToSocketAddrs};
 use std::sync::Arc;
@@ -43,19 +43,19 @@ impl ServerCertVerifier for SpkiPinningVerifier {
         let cert_der = end_entity.as_ref();
         let spki_bytes = extract_spki_der(cert_der)
             .ok_or_else(|| RustlsError::General(obfstr!("SPKI extraction failed").to_string()))?;
-        let spki_hash = digest(&SHA256, spki_bytes);
-        let cert_hash = digest(&SHA256, cert_der);
+        let spki_hash = Sha256::digest(spki_bytes);
+        let cert_hash = Sha256::digest(cert_der);
 
         let zero = [0u8; 32];
         let has_primary = !bool::from(self.primary_spki_pin.ct_eq(&zero));
         let has_backup = !bool::from(self.backup_spki_pin.ct_eq(&zero));
 
         let matches_primary = has_primary
-            && (bool::from(spki_hash.as_ref().ct_eq(&self.primary_spki_pin))
-                || bool::from(cert_hash.as_ref().ct_eq(&self.primary_spki_pin)));
+            && (bool::from(spki_hash.as_slice().ct_eq(&self.primary_spki_pin))
+                || bool::from(cert_hash.as_slice().ct_eq(&self.primary_spki_pin)));
         let matches_backup = has_backup
-            && (bool::from(spki_hash.as_ref().ct_eq(&self.backup_spki_pin))
-                || bool::from(cert_hash.as_ref().ct_eq(&self.backup_spki_pin)));
+            && (bool::from(spki_hash.as_slice().ct_eq(&self.backup_spki_pin))
+                || bool::from(cert_hash.as_slice().ct_eq(&self.backup_spki_pin)));
 
         if matches_primary || matches_backup {
             Ok(ServerCertVerified::assertion())

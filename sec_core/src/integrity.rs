@@ -14,8 +14,8 @@ extern "C" {
     fn CFBundleGetMainBundle() -> *const c_void;
     fn CFBundleGetIdentifier(bundle: *const c_void) -> *const c_void;
     fn CFBundleGetValueForInfoDictionaryKey(bundle: *const c_void, key: *const c_void) -> *const c_void;
-    fn CFStringCreateWithCString(alloc: *const c_void, c_str: *const i8, encoding: u32) -> *const c_void;
-    fn CFStringGetCString(the_string: *const c_void, buffer: *mut i8, buffer_size: isize, encoding: u32) -> bool;
+    fn CFStringCreateWithCString(alloc: *const c_void, c_str: *const c_char, encoding: u32) -> *const c_void;
+    fn CFStringGetCString(the_string: *const c_void, buffer: *mut c_char, buffer_size: isize, encoding: u32) -> bool;
     fn CFRelease(cf: *const c_void);
     static kCFAllocatorDefault: *const c_void;
     static kCFBundleVersionKey: *const c_void;
@@ -149,7 +149,7 @@ pub fn compute_sec_core_hash_bytes() -> Option<[u8; 32]> {
     #[cfg(target_vendor = "apple")]
     unsafe {
         let mut info = core::mem::zeroed::<DlInfo>();
-        let anchor = compute_sec_core_hash_bytes as *const c_void;
+        let anchor = compute_sec_core_hash_bytes as *const () as *const c_void;
         if dladdr(anchor, &mut info) != 0 && !info.dli_fbase.is_null() {
             return hash_text_section_from_header(info.dli_fbase);
         }
@@ -202,7 +202,7 @@ unsafe fn cfstring_to_rust(cf_str: *const c_void) -> Option<String> {
     if cf_str.is_null() {
         return None;
     }
-    let mut buf = [0i8; 256];
+    let mut buf: [c_char; 256] = [0; 256];
     if CFStringGetCString(cf_str, buf.as_mut_ptr(), 256, 0x0800_0100) {
         return CStr::from_ptr(buf.as_ptr()).to_str().ok().map(|s| s.to_string());
     }

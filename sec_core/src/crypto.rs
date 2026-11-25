@@ -6,7 +6,6 @@ use chacha20poly1305::{
 };
 use ed25519_dalek::{Signature, Verifier, VerifyingKey};
 use hkdf::Hkdf;
-use hmac::{Hmac, Mac};
 use obfstr::obfstr;
 use rand::rngs::OsRng;
 use rand::RngCore;
@@ -16,7 +15,36 @@ use std::collections::BTreeMap;
 use std::time::{SystemTime, UNIX_EPOCH};
 use zeroize::Zeroizing;
 
-type HmacSha256 = Hmac<Sha256>;
+/// Computes RFC 2104 HMAC-SHA256 cleanly without trait resolution ambiguity.
+pub fn hmac_sha256(key: &[u8], parts: &[&[u8]]) -> [u8; 32] {
+    let mut k_block = Zeroizing::new([0u8; 64]);
+    if key.len() > 64 {
+        let digest = Sha256::digest(key);
+        k_block[..32].copy_from_slice(&digest);
+    } else {
+        k_block[..key.len()].copy_from_slice(key);
+    }
+    let mut i_pad = Zeroizing::new([0x36u8; 64]);
+    let mut o_pad = Zeroizing::new([0x5Cu8; 64]);
+    for i in 0..64 {
+        i_pad[i] ^= k_block[i];
+        o_pad[i] ^= k_block[i];
+    }
+    let mut inner = Sha256::new();
+    inner.update(&*i_pad);
+    for p in parts {
+        inner.update(p);
+    }
+    let inner_hash = inner.finalize();
+
+    let mut outer = Sha256::new();
+    outer.update(&*o_pad);
+    outer.update(inner_hash);
+    let out_digest = outer.finalize();
+    let mut out = [0u8; 32];
+    out.copy_from_slice(&out_digest);
+    out
+}
 
 #[derive(Debug, Deserialize)]
 pub struct OuterV3Response {
@@ -124,17 +152,17 @@ pub fn build_v3_request(
     let req_aad = format!("V3REQ|3|{op}|{pkg}|{ver}|{bld}|{fp}|{nonce_hex}|{ts}");
     let pepper = secrets::pre_shared_pepper();
 
-    let hk = Hkdf::<Sha256>::new(Some(&pepper), shared.as_ref());
+    let hk = Hkdf::<Sha256>::new(Some(pepper.as_slice()), shared.as_ref());
     let mut req_key = Zeroizing::new([0u8; 32]);
-    hk.expand(obfstr!("3105-V3-REQ").as_bytes(), req_key.as_mut())
+    let info_req = obfstr!("3105-V3-REQ").to_string();
+    hk.expand(info_req.as_bytes(), req_key.as_mut())
         .map_err(|_| obfstr!("HKDF fail").to_string())?;
 
-    let mut mac = <HmacSha256 as Mac>::new_from_slice(&pepper)
-        .map_err(|_| obfstr!("HMAC init fail").to_string())?;
-    mac.update(req_aad.as_bytes());
-    mac.update(b"|");
-    mac.update(license_key.as_bytes());
-    let proof_hex = hex::encode(mac.finalize().into_bytes());
+    let proof_mac = hmac_sha256(
+        pepper.as_slice(),
+        &[req_aad.as_bytes(), b"|", license_key.as_bytes()],
+    );
+    let proof_hex = hex::encode(proof_mac);
 
     let inner = serde_json::json!({
         "op": op,
@@ -150,7 +178,8 @@ pub fn build_v3_request(
     });
     let pt_bytes = Zeroizing::new(serde_json::to_vec(&inner).map_err(|_| "Encode fail")?);
 
-    let cipher = XChaCha20Poly1305::new(req_key.as_ref().into());
+    let cipher = XChaCha20Poly1305::new_from_slice(&*req_key)
+        .map_err(|_| obfstr!("Key init fail").to_string())?;
     let ct = cipher
         .encrypt(
             chacha20poly1305::XNonce::from_slice(&req_nonce),
@@ -233,8 +262,9 @@ pub fn verify_and_decrypt_v3_response(
 
     // 1. Verify Ed25519 signature BEFORE touching plaintext
     let ct_hash = Sha256::digest(&ct);
-    let mut sig_msg = Vec::with_capacity(12 + res_aad.len() + 1 + 32);
-    sig_msg.extend_from_slice(obfstr!("3105-V3-SIG|").as_bytes());
+    let sig_pfx = obfstr!("3105-V3-SIG|").to_string();
+    let mut sig_msg = Vec::with_capacity(sig_pfx.len() + res_aad.len() + 1 + 32);
+    sig_msg.extend_from_slice(sig_pfx.as_bytes());
     sig_msg.extend_from_slice(res_aad.as_bytes());
     sig_msg.push(b'|');
     sig_msg.extend_from_slice(&ct_hash);
@@ -247,22 +277,24 @@ pub fn verify_and_decrypt_v3_response(
     let sig = Signature::from_bytes(&sig_arr);
 
     let ed_pub_bytes = secrets::server_ed25519_pub();
-    let vk = VerifyingKey::from_bytes(&ed_pub_bytes)
+    let vk = VerifyingKey::from_bytes(&*ed_pub_bytes)
         .map_err(|_| obfstr!("Invalid server Ed25519 key").to_string())?;
     vk.verify(&sig_msg, &sig)
         .map_err(|_| obfstr!("Server signature forgery detected!").to_string())?;
 
     // 2. Derive response key bound to request nonce and decrypt AEAD
     let pepper = secrets::pre_shared_pepper();
-    let hk = Hkdf::<Sha256>::new(Some(&pepper), pkt.shared_secret.as_ref());
-    let mut info = Vec::with_capacity(12 + 24);
-    info.extend_from_slice(obfstr!("3105-V3-RES|").as_bytes());
+    let hk = Hkdf::<Sha256>::new(Some(pepper.as_slice()), pkt.shared_secret.as_ref());
+    let res_pfx = obfstr!("3105-V3-RES|").to_string();
+    let mut info = Vec::with_capacity(res_pfx.len() + 24);
+    info.extend_from_slice(res_pfx.as_bytes());
     info.extend_from_slice(&pkt.req_nonce_bytes);
     let mut res_key = Zeroizing::new([0u8; 32]);
     hk.expand(&info, res_key.as_mut())
         .map_err(|_| obfstr!("Response HKDF fail").to_string())?;
 
-    let cipher = XChaCha20Poly1305::new(res_key.as_ref().into());
+    let cipher = XChaCha20Poly1305::new_from_slice(&*res_key)
+        .map_err(|_| obfstr!("Response cipher init fail").to_string())?;
     let pt = Zeroizing::new(
         cipher
             .decrypt(

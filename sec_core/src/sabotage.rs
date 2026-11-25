@@ -1,22 +1,18 @@
-use crate::crypto::{now_unix_secs, DecryptedV3Payload};
+use crate::crypto::{hmac_sha256, now_unix_secs, DecryptedV3Payload};
 use crate::secrets;
 use crate::syscall_arm64;
 use chacha20poly1305::{
     aead::{Aead, KeyInit, Payload},
     XChaCha20Poly1305, XNonce,
 };
-use hmac::{Hmac, Mac};
 use obfstr::obfstr;
 use rand::rngs::OsRng;
 use rand::RngCore;
-use sha2::Sha256;
 use std::collections::BTreeMap;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Mutex;
 use subtle::ConstantTimeEq;
 use zeroize::{Zeroize, Zeroizing};
-
-type HmacSha256 = Hmac<Sha256>;
 
 const TAMPER_CLEAN_MARKER: u64 = 0x55AA_3105_9911_0001;
 const TAMPER_COMPROMISED_MARKER: u64 = 0xDEAD_BEEF_BAD0_C0DE;
@@ -146,14 +142,12 @@ pub fn activate_vault_session(
     let nonce_hex = hex::encode(nonce_rnd);
     let now = now_unix_secs();
 
-    let mut mac = <HmacSha256 as Mac>::new_from_slice(&*ticket_secret)
-        .map_err(|_| obfstr!("Ticket MAC init fail").to_string())?;
     let ticket_msg = format!(
         "TKT|{}|{}|{}",
         now, payload.license.expiry_ts, nonce_hex
     );
-    mac.update(ticket_msg.as_bytes());
-    let mac_hex = hex::encode(mac.finalize().into_bytes());
+    let mac_bytes = hmac_sha256(&*ticket_secret, &[ticket_msg.as_bytes()]);
+    let mac_hex = hex::encode(mac_bytes);
     let full_ticket = format!("{ticket_msg}|{mac_hex}");
 
     let mut masked_bundles = BTreeMap::new();
@@ -229,12 +223,8 @@ pub fn verify_ticket_valid(ticket: &str) -> bool {
         for i in 0..32 {
             t_secret[i] = v.masked_ticket_secret[i] ^ v.ram_pad[i];
         }
-        let Ok(mut mac) = <HmacSha256 as Mac>::new_from_slice(&*t_secret) else {
-            return false;
-        };
-        mac.update(msg.as_bytes());
-        let expected = mac.finalize().into_bytes();
-        bool::from(provided_mac.as_slice().ct_eq(&expected))
+        let expected = hmac_sha256(&*t_secret, &[msg.as_bytes()]);
+        bool::from(provided_mac.as_slice().ct_eq(&expected[..]))
             && bool::from(ticket.as_bytes().ct_eq(v.current_ticket_hex.as_bytes()))
     })
 }
@@ -250,7 +240,7 @@ pub fn decrypt_v4_asset_in_ram(asset_bytes: &[u8], ticket: &str) -> Result<Zeroi
         return Err(obfstr!("Truncated V4 container").to_string());
     }
     let expected_tag = secrets::gen::V4_FORMAT_TAG;
-    if !bool::from(asset_bytes[0..4].ct_eq(&expected_tag)) {
+    if !bool::from(asset_bytes[0..4].ct_eq(&expected_tag[..])) {
         return Err(obfstr!("Invalid V4 asset format tag").to_string());
     }
 
@@ -283,7 +273,8 @@ pub fn decrypt_v4_asset_in_ram(asset_bytes: &[u8], ticket: &str) -> Result<Zeroi
         Ok(key)
     })?;
 
-    let cipher = XChaCha20Poly1305::new(unmasked_bundle_key.as_ref().into());
+    let cipher = XChaCha20Poly1305::new_from_slice(&*unmasked_bundle_key)
+        .map_err(|_| obfstr!("Cipher init fail").to_string())?;
     let bundle_id_hex = hex::encode(bundle_id);
     let tag_hex = hex::encode(expected_tag);
 
