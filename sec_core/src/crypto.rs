@@ -83,6 +83,20 @@ pub struct LicenseInfo {
     pub max_devices: u32,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct PresetStatusInfo {
+    #[serde(default)]
+    pub bundle_id: String,
+    #[serde(default)]
+    pub file_name: String,
+    #[serde(default)]
+    pub label: String,
+    #[serde(default)]
+    pub status: String,
+    #[serde(default)]
+    pub message: String,
+}
+
 #[derive(Debug, Deserialize)]
 pub struct DecryptedV3Payload {
     pub status: String,
@@ -101,6 +115,8 @@ pub struct DecryptedV3Payload {
     pub session_token: Option<String>,
     #[serde(default)]
     pub bundle_keys: BTreeMap<String, String>,
+    #[serde(default)]
+    pub preset_statuses: BTreeMap<String, PresetStatusInfo>,
     #[serde(default)]
     pub license: LicenseInfo,
 }

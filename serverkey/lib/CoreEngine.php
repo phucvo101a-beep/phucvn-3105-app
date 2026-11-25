@@ -15,6 +15,43 @@ final class CoreEngine {
         'DinhVi_Sung_PhucVN_FFVN.3105',
     ];
 
+    public const PRESET_LABELS = [
+        'AIM BODY FFVN (1).3105' => 'AIM BODY',
+        'Aim_Neck_PhucVN_FFVN.3105' => 'AIM NECK',
+        'AimDrag_85_Antena_PhucVN_FFVN.3105' => 'AIM DRAG ANTENA',
+        'AimDrag_85_PhucVN_FFVN.3105' => 'DRAG 85%',
+        'AimNeck_Antena_PhucVN_FFVN.3105' => 'AIM NECK ANTENA',
+        'Antena_PhucVN_FFVN.3105' => 'ANTENA',
+        'DinhVi_Chams_PhucVN_FFVN.3105' => 'CHAMS',
+        'DinhVi_Sung_PhucVN_FFVN.3105' => 'DINHVI SUNG KEO',
+    ];
+
+    public static function resolvePresetPolicies(array $settings): array {
+        $raw = (isset($settings['preset_policies']) && is_array($settings['preset_policies']))
+            ? $settings['preset_policies']
+            : [];
+        $out = [];
+        foreach (self::BUNDLED_PRESETS as $fname) {
+            $bidHex = bin2hex(substr(hash('sha256', 'BUNDLE|' . $fname, true), 0, 16));
+            $cfg = (isset($raw[$fname]) && is_array($raw[$fname])) ? $raw[$fname] : [];
+            $status = strtolower(trim((string)($cfg['status'] ?? 'stable'))) === 'maintenance'
+                ? 'maintenance'
+                : 'stable';
+            $msg = trim((string)($cfg['message'] ?? ''));
+            if ($status === 'maintenance' && $msg === '') {
+                $msg = 'File mod này đang được bảo trì để cập nhật. Vui lòng dùng tính năng khác hoặc quay lại sau.';
+            }
+            $out[$bidHex] = [
+                'bundle_id' => $bidHex,
+                'file_name' => $fname,
+                'label' => self::PRESET_LABELS[$fname] ?? $fname,
+                'status' => $status,
+                'message' => $msg,
+            ];
+        }
+        return $out;
+    }
+
     private const MAX_CLOCK_SKEW = 180;
 
     private string $x25519Priv;
@@ -120,11 +157,14 @@ final class CoreEngine {
         });
     }
 
-    private function deriveBundleKeys(): array {
+    private function deriveBundleKeys(array $presetStatuses = []): array {
         $out = [];
         foreach (self::BUNDLED_PRESETS as $fname) {
             $idBytes = substr(hash('sha256', 'BUNDLE|' . $fname, true), 0, 16);
             $idHex = bin2hex($idBytes);
+            if (($presetStatuses[$idHex]['status'] ?? 'stable') === 'maintenance') {
+                continue;
+            }
             $keyBytes = hash_hkdf('sha256', $this->bundleMasterKey, 32, $idBytes, '3105-V4-BUNDLE');
             $out[$idHex] = bin2hex($keyBytes);
         }
@@ -231,7 +271,8 @@ final class CoreEngine {
             ?string $ephKey = null,
             ?string $sessToken = null,
             array $bundleKeys = [],
-            ?array $license = null
+            ?array $license = null,
+            array $presetStatuses = []
         ) use ($op, $pkg, $ver, $fpHex, $nonceHex, $nonce24, &$shared): array {
             $sTs = time();
             $sNonce24 = random_bytes(24);
@@ -253,6 +294,7 @@ final class CoreEngine {
                 'ephemeral_session_key' => $ephKey,
                 'session_token' => $sessToken,
                 'bundle_keys' => (object)$bundleKeys,
+                'preset_statuses' => (object)$presetStatuses,
                 'license' => $license ?? [
                     'valid' => false,
                     'key_masked' => '',
@@ -296,6 +338,7 @@ final class CoreEngine {
 
         $settings = getSettings();
         $policy = resolvePackagePolicy($settings, $pkg);
+        $presetStatuses = self::resolvePresetPolicies($settings);
 
         // 1. Kill-Switch
         if (!$policy['server_open']) {
@@ -369,7 +412,7 @@ final class CoreEngine {
         }
 
         if ($op === 'preflight') {
-            return $sendV3('ok', 'OK', true, false, $policy, 'Máy chủ đang hoạt động. Sẵn sàng xác thực key.');
+            return $sendV3('ok', 'OK', true, false, $policy, 'Máy chủ đang hoạt động. Sẵn sàng xác thực key.', null, null, [], null, $presetStatuses);
         }
 
         // 4. License Validation & Atomic Device Binding
@@ -475,7 +518,7 @@ final class CoreEngine {
         }
 
         $ephKey = bin2hex(random_bytes(32));
-        $bundleKeys = $this->deriveBundleKeys();
+        $bundleKeys = $this->deriveBundleKeys($presetStatuses);
         $sessionToken = hash('sha256', "{$ephKey}|{$fpHex}|{$pkg}|{$now}");
         addLog('KEY_ACTIVATED', $outcome['summary']['key_masked'], "ver={$authVer}", $clientIp, $fpHex);
 
@@ -489,7 +532,8 @@ final class CoreEngine {
             $ephKey,
             $sessionToken,
             $bundleKeys,
-            $outcome['summary']
+            $outcome['summary'],
+            $presetStatuses
         );
     }
 

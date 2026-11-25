@@ -18,6 +18,7 @@
   "download_url": "",
   "update_message": "Phiên bản hiện tại đã cũ. Vui lòng tải bản cập nhật mới nhất để tiếp tục.",
   "enforce_binary_hash": false,
+  "preset_policies": {},
   "packages": {
     "com.apple.mobile.MobileHouseArrest": {
       "server_open": true,

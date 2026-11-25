@@ -54,6 +54,7 @@ SWIFT_INTERNAL_SECURITY_TYPES = [
     "SecCoreBridge",
     "RuntimeSessionTicket",
     "V3LicenseSummary",
+    "V3PresetStatus",
     "V3GateOutcome",
     "KeychainLicenseVault",
     "SecureBytes",

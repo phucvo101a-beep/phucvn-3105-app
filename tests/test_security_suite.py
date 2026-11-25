@@ -76,6 +76,7 @@ class InProcessV3Server:
             "download_url": "https://20-10.store/download/3105-latest.ipa",
             "update_message": "Vui lòng cập nhật phiên bản mới!",
             "enforce_binary_hash": True,
+            "preset_policies": {},
             "packages": {},
         }
         self.keys = []
@@ -160,7 +161,7 @@ class InProcessV3Server:
         dl_url = pkg_pol.get("download_url", self.settings["download_url"])
         force_up = pkg_pol.get("force_update", self.settings["force_update"])
 
-        def respond(status, code, open_flag, update_flag, msg, eph=None, bkeys=None, lic=None):
+        def respond(status, code, open_flag, update_flag, msg, eph=None, bkeys=None, lic=None, pstatuses=None):
             s_ts = int(time.time())
             s_nonce = os.urandom(24)
             s_nonce_hex = s_nonce.hex()
@@ -181,6 +182,7 @@ class InProcessV3Server:
                 "ephemeral_session_key": eph,
                 "session_token": hashlib.sha256(eph.encode()).hexdigest() if eph else None,
                 "bundle_keys": bkeys or {},
+                "preset_statuses": pstatuses or {},
                 "license": lic or {"valid": False},
             }
             res_key = v3_crypto.hkdf_sha256(shared, self.pepper, b"3105-V3-RES|" + req_nonce, 32)
@@ -236,8 +238,17 @@ class InProcessV3Server:
         if compare_semver(auth_ver, min_ver) < 0 or (force_up and compare_semver(auth_ver, latest_ver) < 0):
             return respond("force_update", "FORCE_UPDATE", True, True, self.settings["update_message"])
 
+        pstatuses = {}
+        ppol = self.settings.get("preset_policies", {})
+        for fn in self.BUNDLED:
+            bid_hex = v3_crypto.derive_bundle_id(fn).hex()
+            cfg = ppol.get(fn, {}) if isinstance(ppol, dict) else {}
+            st = "maintenance" if str(cfg.get("status", "stable")).lower() == "maintenance" else "stable"
+            msg = str(cfg.get("message", "")).strip()
+            pstatuses[bid_hex] = {"bundle_id": bid_hex, "file_name": fn, "label": fn, "status": st, "message": msg}
+
         if op == "preflight":
-            return respond("ok", "OK", True, False, "Ready")
+            return respond("ok", "OK", True, False, "Ready", pstatuses=pstatuses)
 
         # 4. License Validation
         rec = next((k for k in self.keys if k["key"].upper() == lic_key.strip().upper()), None)
@@ -260,6 +271,8 @@ class InProcessV3Server:
         bkeys = {}
         for fn in self.BUNDLED:
             bid = v3_crypto.derive_bundle_id(fn)
+            if pstatuses.get(bid.hex(), {}).get("status") == "maintenance":
+                continue
             bkeys[bid.hex()] = v3_crypto.derive_bundle_key(self.bundle_master, bid).hex()
 
         eph = os.urandom(32).hex()
@@ -272,6 +285,7 @@ class InProcessV3Server:
             eph=eph,
             bkeys=bkeys,
             lic={"valid": True, "expiry_ts": rec["expiry_ts"], "is_permanent": rec["duration"] == "permanent"},
+            pstatuses=pstatuses,
         )
 
 
@@ -1084,7 +1098,7 @@ class SecuritySuiteTests(unittest.TestCase):
         self.assertIn("checkingElapsedSeconds", gate_swift)
         self.assertIn("case connectionError(message: String)", gate_swift)
         bootstrap_block = gate_swift.split("func bootstrapCheck(", 1)[1].split("func activateKey(", 1)[0]
-        self.assertIn("case .preflightOpen:", bootstrap_block)
+        self.assertIn("case .preflightOpen(_, _, let presetStatuses):", bootstrap_block)
         self.assertNotIn("self.errorMessage = msg\n                        self.gatePhase = .requiresKey", bootstrap_block)
 
         sec_bridge = (REPO_ROOT / "ThreeOneOSFive" / "helpers" / "SecCoreBridge.swift").read_text(encoding="utf-8")
@@ -1165,6 +1179,68 @@ class SecuritySuiteTests(unittest.TestCase):
         verified_hash = macho_hash.verify_sec_core_seal(synth_path)
         self.assertEqual(sealed_hash, verified_hash)
         self.assertEqual(sealed_hash, hashlib.sha256(text_code).hexdigest())
+
+    # -----------------------------------------------------------------------
+    # SCENARIO 9: Per-Preset Stable / Maintenance Control (Server + Client)
+    # -----------------------------------------------------------------------
+    def test_09_preset_maintenance_and_stable_controls(self):
+        srv = self._new_server()
+        srv.keys.append(
+            {
+                "key": "PHUCVN-PRESET-0001",
+                "duration": "30d",
+                "status": "active",
+                "is_used": False,
+                "max_devices": 1,
+                "devices": [],
+            }
+        )
+        aim_bid = v3_crypto.derive_bundle_id("AIM BODY FFVN (1).3105").hex()
+        antena_bid = v3_crypto.derive_bundle_id("Antena_PhucVN_FFVN.3105").hex()
+
+        # Put AIM BODY into maintenance on Server Key while keeping Antena stable
+        srv.settings["preset_policies"] = {
+            "AIM BODY FFVN (1).3105": {
+                "status": "maintenance",
+                "message": "Đang cập nhật AIM BODY theo bản mới.",
+            },
+            "Antena_PhucVN_FFVN.3105": {"status": "stable", "message": ""},
+        }
+
+        st, _, dec_maint = client_build_and_decrypt(
+            self.x_pub, self.ed_pub, self.pepper.encode(),
+            "activate", self.pkg, "2.1.0", "9", self.fp_main,
+            self.app_hash_v21, self.sec_hash_v21, "PHUCVN-PRESET-0001", srv.process_v3,
+        )
+        self.assertEqual(st, 200)
+        self.assertEqual(dec_maint["preset_statuses"][aim_bid]["status"], "maintenance")
+        self.assertEqual(dec_maint["preset_statuses"][aim_bid]["message"], "Đang cập nhật AIM BODY theo bản mới.")
+        self.assertEqual(dec_maint["preset_statuses"][antena_bid]["status"], "stable")
+        self.assertNotIn(aim_bid, dec_maint["bundle_keys"])
+        self.assertIn(antena_bid, dec_maint["bundle_keys"])
+
+        # Restore AIM BODY to stable -> bundle key returns & V4 container decrypts cleanly
+        srv.settings["preset_policies"]["AIM BODY FFVN (1).3105"] = {"status": "stable", "message": ""}
+        st2, _, dec_stable = client_build_and_decrypt(
+            self.x_pub, self.ed_pub, self.pepper.encode(),
+            "heartbeat", self.pkg, "2.1.0", "9", self.fp_main,
+            self.app_hash_v21, self.sec_hash_v21, "PHUCVN-PRESET-0001", srv.process_v3,
+        )
+        self.assertEqual(st2, 200)
+        self.assertEqual(dec_stable["preset_statuses"][aim_bid]["status"], "stable")
+        self.assertIn(aim_bid, dec_stable["bundle_keys"])
+
+        # Cross-verify PHP/Swift/Rust parity markers
+        core_php = (REPO_ROOT / "serverkey" / "lib" / "CoreEngine.php").read_text("utf-8")
+        admin_php = (REPO_ROOT / "serverkey" / "admin.php").read_text("utf-8")
+        bridge_sw = (REPO_ROOT / "ThreeOneOSFive" / "helpers" / "SecCoreBridge.swift").read_text("utf-8")
+        proj_sw = (REPO_ROOT / "ThreeOneOSFive" / "views" / "PatchProjectsView.swift").read_text("utf-8")
+        self.assertIn("resolvePresetPolicies", core_php)
+        self.assertIn("'preset_statuses'", core_php)
+        self.assertIn("save_preset_policies", admin_php)
+        self.assertIn("V3PresetStatus", bridge_sw)
+        self.assertIn("ĐANG BẢO TRÌ", proj_sw)
+        self.assertIn("ĐANG ỔN ĐỊNH", proj_sw)
 
 
 def main():

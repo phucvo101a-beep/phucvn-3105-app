@@ -22,6 +22,7 @@ struct PatchProjectsView: View {
     @State private var showWallpaperImporter = false
     @State private var showCleaner = false
     @StateObject private var proxyManager = ProxyManager.shared
+    @ObservedObject private var keyAuth = KeyAuthManager.shared
     @State private var showProxyManager = false
     @State private var proxyModRefreshID = UUID()
     @State private var wallpaperPackages: [WallpaperStagedPackage] = []
@@ -427,26 +428,41 @@ struct PatchProjectsView: View {
 
     private func proxyModRow(_ mod: ProxyModPreset) -> some View {
         let isApplied = DevicePatchService.latestReceipt(projectID: mod.id) != nil
+        let runtimeStatus = keyAuth.presetStatus(for: mod.fileName)
+        let isMaintenance = runtimeStatus?.isMaintenance ?? false
+        let rowTint: Color = isMaintenance ? .orange : (isApplied ? AppTheme.success : AppTheme.accent)
         return HStack(spacing: 12) {
             AppRowIcon(
                 systemName: mod.iconName,
-                tint: isApplied ? AppTheme.success : AppTheme.accent
+                tint: rowTint
             )
             VStack(alignment: .leading, spacing: 3) {
                 HStack(spacing: 6) {
                     Text(mod.name)
                         .font(.body.weight(.bold))
-                        .foregroundStyle(.white)
-                    Text(isApplied ? "ĐÃ ÁP DỤNG" : "CHƯA ÁP DỤNG")
+                        .foregroundStyle(isMaintenance ? .secondary : .white)
+                    Text(isMaintenance ? "ĐANG BẢO TRÌ" : "ĐANG ỔN ĐỊNH")
                         .font(.system(size: 8.5, weight: .bold))
-                        .foregroundStyle(isApplied ? AppTheme.success : AppTheme.subduedText)
+                        .foregroundStyle(isMaintenance ? Color.orange : AppTheme.success)
                         .padding(.horizontal, 6)
                         .padding(.vertical, 2)
-                        .background((isApplied ? AppTheme.success : Color.white).opacity(0.12), in: Capsule())
+                        .background((isMaintenance ? Color.orange : AppTheme.success).opacity(0.14), in: Capsule())
+                    if isApplied {
+                        Text("ĐÃ ÁP DỤNG")
+                            .font(.system(size: 8.5, weight: .bold))
+                            .foregroundStyle(AppTheme.success)
+                            .padding(.horizontal, 6)
+                            .padding(.vertical, 2)
+                            .background(AppTheme.success.opacity(0.12), in: Capsule())
+                    }
                 }
-                Text(mod.subtitle)
+                Text(
+                    isMaintenance && !(runtimeStatus?.message.isEmpty ?? true)
+                        ? (runtimeStatus?.message ?? mod.subtitle)
+                        : mod.subtitle
+                )
                     .font(.caption)
-                    .foregroundStyle(.secondary)
+                    .foregroundStyle(isMaintenance ? Color.orange.opacity(0.9) : .secondary)
                     .lineLimit(1)
             }
             Spacer()
@@ -1901,6 +1917,7 @@ struct ProxyModPresetDetailView: View {
     let mod: ProxyModPreset
     var onModified: () -> Void = {}
 
+    @ObservedObject private var keyAuth = KeyAuthManager.shared
     @State private var isWorking = false
     @State private var alertTitle = ""
     @State private var alertMessage = ""
@@ -1917,13 +1934,28 @@ struct ProxyModPresetDetailView: View {
         receipt != nil
     }
 
+    private var modStatus: V3PresetStatus? {
+        keyAuth.presetStatus(for: mod.fileName)
+    }
+
+    private var isMaintenance: Bool {
+        modStatus?.isMaintenance ?? false
+    }
+
+    private var maintenanceMessage: String {
+        let msg = modStatus?.message.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        return msg.isEmpty
+            ? "File mod này hiện đang được Admin tạm bảo trì để cập nhật. Vui lòng chọn tính năng khác hoặc quay lại sau."
+            : msg
+    }
+
     var body: some View {
         List {
             Section {
                 VStack(spacing: 12) {
                     AppRowIcon(
                         systemName: mod.iconName,
-                        tint: isApplied ? AppTheme.success : AppTheme.accent,
+                        tint: isMaintenance ? .orange : (isApplied ? AppTheme.success : AppTheme.accent),
                         symbolSize: 28,
                         frameSize: 64
                     )
@@ -1931,17 +1963,40 @@ struct ProxyModPresetDetailView: View {
                         .font(.system(size: 24, weight: .bold, design: .rounded))
                         .foregroundStyle(.white)
 
-                    Text(isApplied ? "ĐÃ ÁP DỤNG MOD" : "FILE GỐC CHƯA MOD")
-                        .font(.system(size: 11, weight: .bold))
-                        .foregroundStyle(isApplied ? AppTheme.success : AppTheme.subduedText)
-                        .padding(.horizontal, 10)
-                        .padding(.vertical, 4)
-                        .background((isApplied ? AppTheme.success : Color.white).opacity(0.12), in: Capsule())
+                    HStack(spacing: 8) {
+                        Text(isMaintenance ? "ĐANG BẢO TRÌ" : "ĐANG ỔN ĐỊNH")
+                            .font(.system(size: 11, weight: .bold))
+                            .foregroundStyle(isMaintenance ? Color.orange : AppTheme.success)
+                            .padding(.horizontal, 10)
+                            .padding(.vertical, 4)
+                            .background((isMaintenance ? Color.orange : AppTheme.success).opacity(0.16), in: Capsule())
+
+                        Text(isApplied ? "ĐÃ ÁP DỤNG MOD" : "FILE GỐC CHƯA MOD")
+                            .font(.system(size: 11, weight: .bold))
+                            .foregroundStyle(isApplied ? AppTheme.success : AppTheme.subduedText)
+                            .padding(.horizontal, 10)
+                            .padding(.vertical, 4)
+                            .background((isApplied ? AppTheme.success : Color.white).opacity(0.12), in: Capsule())
+                    }
                 }
                 .frame(maxWidth: .infinity)
                 .padding(.vertical, 14)
                 .listRowBackground(Color.clear)
                 .listRowSeparator(.hidden)
+            }
+
+            if isMaintenance {
+                Section("THÔNG BÁO BẢO TRÌ") {
+                    HStack(alignment: .top, spacing: 10) {
+                        Image(systemName: "wrench.and.screwdriver.fill")
+                            .foregroundStyle(Color.orange)
+                            .padding(.top, 2)
+                        Text(maintenanceMessage)
+                            .font(.subheadline)
+                            .foregroundStyle(Color.orange)
+                            .lineSpacing(3)
+                    }
+                }
             }
 
             Section("THÔNG TIN BẢN MOD") {
@@ -1970,7 +2025,20 @@ struct ProxyModPresetDetailView: View {
                         .foregroundStyle(AppTheme.accent)
                 }
                 HStack {
-                    Text("Trạng thái")
+                    Text("Tình trạng file mod")
+                        .foregroundStyle(.secondary)
+                    Spacer()
+                    HStack(spacing: 6) {
+                        Circle()
+                            .fill(isMaintenance ? Color.orange : AppTheme.success)
+                            .frame(width: 8, height: 8)
+                        Text(isMaintenance ? "Đang bảo trì" : "Đang ổn định")
+                            .font(.subheadline.weight(.medium))
+                            .foregroundStyle(isMaintenance ? Color.orange : AppTheme.success)
+                    }
+                }
+                HStack {
+                    Text("Trạng thái cài đặt")
                         .foregroundStyle(.secondary)
                     Spacer()
                     HStack(spacing: 6) {
@@ -1996,7 +2064,7 @@ struct ProxyModPresetDetailView: View {
                     showApplyConfirm = true
                 } label: {
                     HStack {
-                        Label("Áp dụng", systemImage: "checkmark.shield.fill")
+                        Label(isMaintenance ? "Đang bảo trì (tạm khóa)" : "Áp dụng", systemImage: isMaintenance ? "wrench.and.screwdriver.fill" : "checkmark.shield.fill")
                             .font(.body.weight(.semibold))
                         Spacer()
                         if isWorking {
@@ -2004,9 +2072,9 @@ struct ProxyModPresetDetailView: View {
                                 .tint(AppTheme.accent)
                         }
                     }
-                    .foregroundStyle(isApplied ? Color.gray : AppTheme.accent)
+                    .foregroundStyle((isApplied || isMaintenance) ? Color.gray : AppTheme.accent)
                 }
-                .disabled(isWorking || isApplied)
+                .disabled(isWorking || isApplied || isMaintenance)
 
                 Button(role: .destructive) {
                     showRestoreConfirm = true
@@ -2074,6 +2142,12 @@ struct ProxyModPresetDetailView: View {
 
     private func applyMod() {
         guard !isWorking else { return }
+        if isMaintenance {
+            alertTitle = "File mod đang bảo trì"
+            alertMessage = maintenanceMessage
+            showAlert = true
+            return
+        }
         guard let ticket = KeyAuthManager.shared.activeVerifiedTicket else {
             alertTitle = "Yêu cầu xác thực"
             alertMessage = "Phiên bản quyền không hợp lệ hoặc đã hết hạn. Vui lòng xác thực lại Key."
@@ -2123,6 +2197,8 @@ struct ProxyModPresetDetailView: View {
                         alertMessage = "Bản mod \(mod.name) đã được áp dụng trước đó rồi."
                     case .targetOccupied(let target):
                         alertMessage = "Tệp đích đang bị chiếm bởi một bản mod khác: \(target)."
+                    case .invalidPasswordOrCorruptedPackage:
+                        alertMessage = "Không thể giải mã file mod từ máy chủ (có thể file vừa chuyển sang Bảo trì hoặc server chưa cập nhật khóa mới). Hãy thử đóng mở lại app."
                     default:
                         alertMessage = "Lỗi: \(error)"
                     }

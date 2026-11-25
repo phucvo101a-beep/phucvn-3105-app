@@ -131,6 +131,14 @@ fn write_json_atomic<T: Serialize>(path: &Path, value: &T) -> Result<(), String>
     fs::rename(&tmp_path, path).map_err(|e| format!("Atomic rename failed: {e}"))
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct PresetPolicy {
+    #[serde(default)]
+    pub status: String,
+    #[serde(default)]
+    pub message: String,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PackagePolicy {
     pub server_open: Option<bool>,
@@ -166,6 +174,8 @@ pub struct ServerSettings {
     #[serde(default)]
     pub enforce_binary_hash: bool,
     #[serde(default)]
+    pub preset_policies: BTreeMap<String, PresetPolicy>,
+    #[serde(default)]
     pub packages: BTreeMap<String, PackagePolicy>,
     #[serde(flatten)]
     pub extra: Map<String, Value>,
@@ -197,6 +207,7 @@ impl Default for ServerSettings {
             download_url: String::new(),
             update_message: default_update_msg(),
             enforce_binary_hash: false,
+            preset_policies: BTreeMap::new(),
             packages: BTreeMap::new(),
             extra: Map::new(),
         }

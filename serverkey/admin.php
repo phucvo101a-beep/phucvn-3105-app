@@ -532,6 +532,31 @@ if ($isLoggedIn && $_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['action
         }
     }
 
+    // 10b. Quản lý trạng thái Đang ổn định / Bảo trì cho từng file mod preset (.3105)
+    elseif ($act === 'save_preset_policies') {
+        $statusesIn = is_array($_POST['preset_status'] ?? null) ? $_POST['preset_status'] : [];
+        $messagesIn = is_array($_POST['preset_message'] ?? null) ? $_POST['preset_message'] : [];
+        $newPolicies = [];
+        $maintCount = 0;
+        foreach (CoreEngine::BUNDLED_PRESETS as $fname) {
+            $rawSt = strtolower(trim((string)($statusesIn[$fname] ?? 'stable')));
+            $st = ($rawSt === 'maintenance') ? 'maintenance' : 'stable';
+            if ($st === 'maintenance') {
+                $maintCount++;
+            }
+            $newPolicies[$fname] = [
+                'status' => $st,
+                'message' => trim((string)($messagesIn[$fname] ?? '')),
+            ];
+        }
+        $settings['preset_policies'] = $newPolicies;
+        saveSettings($settings);
+        addLog('PRESET_POLICY', $actor, 'Cập nhật trạng thái ' . count($newPolicies) . " file mod (Bảo trì: {$maintCount})");
+        $msg = $maintCount > 0
+            ? "Đã lưu trạng thái file mod ({$maintCount} file đang Bảo trì)."
+            : 'Đã lưu trạng thái: tất cả file mod đều Đang ổn định.';
+    }
+
     // 11. Quản lý Build Hash Manifests (Anti-Patch / Anti-Re-Sign)
     elseif ($act === 'add_build_manifest') {
         $pkgId = trim($_POST['package_id'] ?? '');
@@ -622,7 +647,7 @@ if ($isLoggedIn && $_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['action
         $tabParam = 'usersTab';
     } elseif (in_array($act, ['update_settings', 'reset_master_hwid'])) {
         $tabParam = 'settingsTab';
-    } elseif (in_array($act, ['update_security_policy', 'upsert_package_policy', 'delete_package_policy', 'add_build_manifest', 'toggle_manifest_revoke', 'delete_manifest', 'ban_device', 'unban_device'])) {
+    } elseif (in_array($act, ['update_security_policy', 'upsert_package_policy', 'delete_package_policy', 'save_preset_policies', 'add_build_manifest', 'toggle_manifest_revoke', 'delete_manifest', 'ban_device', 'unban_device'])) {
         $tabParam = 'securityTab';
     }
 
@@ -634,6 +659,7 @@ $allUsers = getUsers();
 $allKeys = getKeys();
 $allLogs = readJsonFile(LOGS_FILE, []);
 $allManifests = getBuildManifests();
+$presetPoliciesView = CoreEngine::resolvePresetPolicies($settings);
 $allBannedDevices = getBannedDevices();
 $bannedHwidMap = [];
 foreach ($allBannedDevices as $bd) {
@@ -1384,6 +1410,63 @@ foreach ($allKeys as $k) {
                         </table>
                     </div>
                 <?php endif; ?>
+            </div>
+
+            <div class="content-card">
+                <div class="card-header">
+                    <span class="card-title"><i class="fa-solid fa-sliders"></i> Trạng Thái File Mod (.3105) — Đang Ổn Định / Bảo Trì</span>
+                </div>
+                <p style="font-size:13px;color:var(--text-muted);margin:0 0 14px 0;">
+                    Chỉnh file nào còn dùng được để <strong>Đang ổn định</strong>, file nào lỗi/đang sửa chọn <strong>Bảo trì</strong>. File đặt Bảo trì sẽ tự khóa trên app iOS và không được cấp khóa giải mã từ server.
+                </p>
+                <form method="POST">
+                    <?= csrfField() ?>
+                    <input type="hidden" name="action" value="save_preset_policies">
+                    <div class="table-responsive">
+                        <table>
+                            <thead>
+                                <tr>
+                                    <th>TÊN MOD / FILE</th>
+                                    <th>TRẠNG THÁI</th>
+                                    <th>CHẾ ĐỘ HOẠT ĐỘNG</th>
+                                    <th>THÔNG BÁO BẢO TRÌ (HIỆN TRÊN APP)</th>
+                                </tr>
+                            </thead>
+                            <tbody>
+                                <?php foreach ($presetPoliciesView as $pItem):
+                                    $pFile = $pItem['file_name'];
+                                    $pLabel = $pItem['label'];
+                                    $isMaint = ($pItem['status'] === 'maintenance');
+                                    $rawMsg = trim((string)(($settings['preset_policies'][$pFile]['message'] ?? '')));
+                                ?>
+                                    <tr>
+                                        <td>
+                                            <strong><?= htmlspecialchars($pLabel) ?></strong>
+                                            <div style="font-size:11px;color:var(--text-muted);"><?= htmlspecialchars($pFile) ?></div>
+                                        </td>
+                                        <td>
+                                            <?= $isMaint
+                                                ? '<span class="badge badge-blocked">Đang bảo trì</span>'
+                                                : '<span class="badge badge-active">Đang ổn định</span>' ?>
+                                        </td>
+                                        <td>
+                                            <select name="preset_status[<?= htmlspecialchars($pFile) ?>]" class="form-input" style="min-width:165px;">
+                                                <option value="stable" <?= !$isMaint ? 'selected' : '' ?>>Đang ổn định</option>
+                                                <option value="maintenance" <?= $isMaint ? 'selected' : '' ?>>Bảo trì (Tạm khóa)</option>
+                                            </select>
+                                        </td>
+                                        <td>
+                                            <input type="text" name="preset_message[<?= htmlspecialchars($pFile) ?>]" class="form-input" value="<?= htmlspecialchars($rawMsg) ?>" placeholder="VD: Đang bảo trì cập nhật sau bản vá game...">
+                                        </td>
+                                    </tr>
+                                <?php endforeach; ?>
+                            </tbody>
+                        </table>
+                    </div>
+                    <div style="margin-top:14px;">
+                        <button type="submit" class="btn btn-primary btn-sm"><i class="fa-solid fa-floppy-disk"></i> Lưu Trạng Thái File Mod</button>
+                    </div>
+                </form>
             </div>
 
             <div class="content-card">

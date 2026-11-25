@@ -28,6 +28,20 @@ final class KeyAuthManager: ObservableObject {
     @Published var errorMessage: String? = nil
     @Published var deviceHWID: String = ""
     @Published var checkingElapsedSeconds: Int = 0
+    @Published var presetStatusesByFileName: [String: V3PresetStatus] = [:]
+
+    func presetStatus(for fileName: String) -> V3PresetStatus? {
+        if let direct = presetStatusesByFileName[fileName] {
+            return direct
+        }
+        let target = fileName.lowercased()
+        return presetStatusesByFileName.values.first { $0.fileName.lowercased() == target }
+    }
+
+    private func updatePresetStatuses(_ statuses: [String: V3PresetStatus]) {
+        guard !statuses.isEmpty else { return }
+        presetStatusesByFileName = statuses
+    }
 
     private var expirationDate: Date? = nil
     private var countdownTimer: Timer? = nil
@@ -155,7 +169,8 @@ final class KeyAuthManager: ObservableObject {
                         self.lockOut(to: .forceUpdate(minVersion: minV, latestVersion: latV, downloadURL: url, message: msg))
                     case .tampered(let msg):
                         self.lockOut(to: .tampered(message: msg))
-                    case .preflightOpen:
+                    case .preflightOpen(_, _, let presetStatuses):
+                        self.updatePresetStatuses(presetStatuses)
                         if !savedKey.isEmpty {
                             self.currentKey = savedKey
                             self.activateKey(savedKey, isSilent: true)
@@ -228,8 +243,9 @@ final class KeyAuthManager: ObservableObject {
                     self.stopCheckingTimer()
                     self.isVerifying = false
                     switch outcome {
-                    case .unlocked(let ticket, let summary):
+                    case .unlocked(let ticket, let summary, let presetStatuses):
                         KeychainLicenseVault.saveLicenseKey(trimmed)
+                        self.updatePresetStatuses(presetStatuses)
                         self.currentKey = trimmed
                         self.role = summary.role.isEmpty ? "VIP" : summary.role
                         self.isPermanent = summary.isPermanent
@@ -307,7 +323,8 @@ final class KeyAuthManager: ObservableObject {
             let outcome = SecCoreBridge.shared.heartbeat()
             DispatchQueue.main.async {
                 switch outcome {
-                case .unlocked(let ticket, _):
+                case .unlocked(let ticket, _, let presetStatuses):
+                    self.updatePresetStatuses(presetStatuses)
                     self.gatePhase = .unlocked(ticket)
                 case .serverClosed(let msg):
                     self.lockOut(to: .serverClosed(message: msg))

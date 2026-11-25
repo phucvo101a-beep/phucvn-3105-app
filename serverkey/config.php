@@ -176,10 +176,14 @@ function getSettings(): array {
         'download_url' => '',
         'update_message' => 'Phiên bản hiện tại đã cũ. Vui lòng cập nhật bản mới nhất để tiếp tục sử dụng.',
         'enforce_binary_hash' => false,
+        'preset_policies' => [],
         'packages' => [],
     ];
     $current = readJsonFile(SETTINGS_FILE, []);
     $merged = array_merge($defaults, $current);
+    if (!isset($merged['preset_policies']) || !is_array($merged['preset_policies'])) {
+        $merged['preset_policies'] = [];
+    }
     if (!isset($merged['packages']) || !is_array($merged['packages'])) {
         $merged['packages'] = [];
     }

@@ -282,17 +282,84 @@ pub fn derive_bundle_key_hex(
     Ok(hex::encode(&*out))
 }
 
-/// Derives map of all bundled V4 keys for authorized sessions.
-pub fn derive_all_bundle_keys(
+/// Derives map of allowed bundled V4 keys for authorized sessions (omitting maintenance presets).
+pub fn derive_allowed_bundle_keys(
     master_key: &[u8; 32],
+    preset_statuses: &std::collections::BTreeMap<String, PresetStatusPayload>,
 ) -> Result<std::collections::BTreeMap<String, String>, String> {
     let mut map = std::collections::BTreeMap::new();
     for &fname in BUNDLED_PRESET_FILENAMES {
         let bid = derive_bundle_id_hex(fname);
+        if preset_statuses
+            .get(&bid)
+            .map(|p| p.status == "maintenance")
+            .unwrap_or(false)
+        {
+            continue;
+        }
         let bkey = derive_bundle_key_hex(master_key, &bid)?;
         map.insert(bid, bkey);
     }
     Ok(map)
+}
+
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct PresetStatusPayload {
+    pub bundle_id: String,
+    pub file_name: String,
+    pub label: String,
+    pub status: String,
+    pub message: String,
+}
+
+fn preset_label(fname: &str) -> &'static str {
+    match fname {
+        "AIM BODY FFVN (1).3105" => "AIM BODY",
+        "Aim_Neck_PhucVN_FFVN.3105" => "AIM NECK",
+        "AimDrag_85_Antena_PhucVN_FFVN.3105" => "AIM DRAG ANTENA",
+        "AimDrag_85_PhucVN_FFVN.3105" => "DRAG 85%",
+        "AimNeck_Antena_PhucVN_FFVN.3105" => "AIM NECK ANTENA",
+        "Antena_PhucVN_FFVN.3105" => "ANTENA",
+        "DinhVi_Chams_PhucVN_FFVN.3105" => "CHAMS",
+        "DinhVi_Sung_PhucVN_FFVN.3105" => "DINHVI SUNG KEO",
+        _ => "MOD PRESET",
+    }
+}
+
+pub fn resolve_preset_statuses(
+    policies: &std::collections::BTreeMap<String, crate::storage::PresetPolicy>,
+) -> std::collections::BTreeMap<String, PresetStatusPayload> {
+    let mut out = std::collections::BTreeMap::new();
+    for &fname in BUNDLED_PRESET_FILENAMES {
+        let bid = derive_bundle_id_hex(fname);
+        let cfg = policies.get(fname);
+        let is_maint = cfg
+            .map(|c| c.status.trim().eq_ignore_ascii_case("maintenance"))
+            .unwrap_or(false);
+        let status = if is_maint { "maintenance" } else { "stable" }.to_string();
+        let mut msg = cfg.map(|c| c.message.trim().to_string()).unwrap_or_default();
+        if is_maint && msg.is_empty() {
+            msg = "File mod này đang được bảo trì để cập nhật. Vui lòng dùng tính năng khác hoặc quay lại sau.".to_string();
+        }
+        out.insert(
+            bid.clone(),
+            PresetStatusPayload {
+                bundle_id: bid,
+                file_name: fname.to_string(),
+                label: preset_label(fname).to_string(),
+                status,
+                message: msg,
+            },
+        );
+    }
+    out
+}
+
+/// Derives map of all bundled V4 keys for authorized sessions.
+pub fn derive_all_bundle_keys(
+    master_key: &[u8; 32],
+) -> Result<std::collections::BTreeMap<String, String>, String> {
+    derive_allowed_bundle_keys(master_key, &std::collections::BTreeMap::new())
 }
 
 /// Generates random 32-byte hex secret (e.g. ephemeral session key or nonce).

@@ -26,9 +26,21 @@ struct V3LicenseSummary: Equatable {
     let maxDevices: Int
 }
 
+struct V3PresetStatus: Equatable {
+    let bundleID: String
+    let fileName: String
+    let label: String
+    let status: String
+    let message: String
+
+    var isMaintenance: Bool {
+        status.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() == "maintenance"
+    }
+}
+
 enum V3GateOutcome: Equatable {
-    case unlocked(ticket: RuntimeSessionTicket, license: V3LicenseSummary)
-    case preflightOpen(minVersion: String, latestVersion: String)
+    case unlocked(ticket: RuntimeSessionTicket, license: V3LicenseSummary, presetStatuses: [String: V3PresetStatus])
+    case preflightOpen(minVersion: String, latestVersion: String, presetStatuses: [String: V3PresetStatus])
     case serverClosed(message: String)
     case deviceBanned(reason: String, hwid: String)
     case forceUpdate(minVersion: String, latestVersion: String, downloadURL: String, message: String)
@@ -313,8 +325,10 @@ final class SecCoreBridge {
             )
         }
 
+        let presetStatuses = Self.parsePresetStatuses(from: dict)
+
         if isPreflight && code == "OK" {
-            return .preflightOpen(minVersion: minVer, latestVersion: latestVer)
+            return .preflightOpen(minVersion: minVer, latestVersion: latestVer, presetStatuses: presetStatuses)
         }
 
         let licDict = (dict["license"] as? [String: Any]) ?? [:]
@@ -354,7 +368,29 @@ final class SecCoreBridge {
             wipeSession()
             return .denied(code: "TICKET_REJECTED", message: "Không thể xác nhận phiên bảo mật.")
         }
-        return .unlocked(ticket: ticket, license: summary)
+        return .unlocked(ticket: ticket, license: summary, presetStatuses: presetStatuses)
+    }
+
+    private static func parsePresetStatuses(from dict: [String: Any]) -> [String: V3PresetStatus] {
+        guard let rawMap = dict["preset_statuses"] as? [String: Any] else { return [:] }
+        var out: [String: V3PresetStatus] = [:]
+        for (bidKey, rawVal) in rawMap {
+            guard let item = rawVal as? [String: Any] else { continue }
+            let fileName = (item["file_name"] as? String) ?? ""
+            guard !fileName.isEmpty else { continue }
+            let label = (item["label"] as? String) ?? fileName
+            let status = (item["status"] as? String) ?? "stable"
+            let message = (item["message"] as? String) ?? ""
+            let bid = (item["bundle_id"] as? String) ?? bidKey
+            out[fileName] = V3PresetStatus(
+                bundleID: bid,
+                fileName: fileName,
+                label: label,
+                status: status,
+                message: message
+            )
+        }
+        return out
     }
 
     /// Swift CryptoKit independent Ed25519 signature verification over outer V3 server envelope.

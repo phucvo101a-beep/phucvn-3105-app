@@ -1,8 +1,8 @@
 use crate::crypto::{
     build_req_aad, build_res_aad, compute_shared_secret, decode_hex_24, decode_hex_32,
-    decrypt_request_v3, derive_all_bundle_keys, derive_v3_key, random_hex_32, random_nonce_24,
-    seal_and_sign_response_v3, sha256_hex, verify_client_proof, verify_hmac_hex,
-    ServerKeyMaterial,
+    decrypt_request_v3, derive_allowed_bundle_keys, derive_v3_key, random_hex_32,
+    random_nonce_24, resolve_preset_statuses, seal_and_sign_response_v3, sha256_hex,
+    verify_client_proof, verify_hmac_hex, PresetStatusPayload, ServerKeyMaterial,
 };
 use crate::storage::{format_vn_time, now_unix, BuildManifest, Storage};
 use serde::{Deserialize, Serialize};
@@ -327,6 +327,7 @@ pub fn handle_v3_request(
                    eph_key: Option<String>,
                    session_token: Option<String>,
                    bundle_keys: std::collections::BTreeMap<String, String>,
+                   preset_statuses: std::collections::BTreeMap<String, PresetStatusPayload>,
                    license: LicenseSummary|
      -> Result<Value, (u16, Value)> {
         let s_ts = now_unix();
@@ -357,6 +358,7 @@ pub fn handle_v3_request(
             "ephemeral_session_key": eph_key,
             "session_token": session_token,
             "bundle_keys": bundle_keys,
+            "preset_statuses": preset_statuses,
             "license": license,
         });
         let pt_bytes = Zeroizing::new(
@@ -392,6 +394,7 @@ pub fn handle_v3_request(
         .load_settings()
         .map_err(|_| (500, json!({"error": "Settings unavailable"})))?;
     let policy = settings.resolve_policy(&req.pkg);
+    let preset_statuses = resolve_preset_statuses(&settings.preset_policies);
 
     // 1. KILL-SWITCH CHECK FIRST (never issue keys when server is closed)
     if !policy.server_open {
@@ -413,6 +416,7 @@ pub fn handle_v3_request(
             &policy.closed_message,
             None,
             None,
+            Default::default(),
             Default::default(),
             LicenseSummary::default(),
         );
@@ -444,6 +448,7 @@ pub fn handle_v3_request(
             None,
             None,
             Default::default(),
+            Default::default(),
             LicenseSummary::default(),
         );
     }
@@ -468,6 +473,7 @@ pub fn handle_v3_request(
             "Phát hiện can thiệp môi trường thực thi. Phiên bị khóa.",
             None,
             None,
+            Default::default(),
             Default::default(),
             LicenseSummary::default(),
         );
@@ -504,6 +510,7 @@ pub fn handle_v3_request(
                 None,
                 None,
                 Default::default(),
+                Default::default(),
                 LicenseSummary::default(),
             );
         }
@@ -537,6 +544,7 @@ pub fn handle_v3_request(
             None,
             None,
             Default::default(),
+            Default::default(),
             LicenseSummary::default(),
         );
     }
@@ -555,6 +563,7 @@ pub fn handle_v3_request(
             None,
             None,
             Default::default(),
+            preset_statuses,
             LicenseSummary::default(),
         );
     }
@@ -585,6 +594,7 @@ pub fn handle_v3_request(
             "Vui lòng nhập mã Key hợp lệ.",
             None,
             None,
+            Default::default(),
             Default::default(),
             LicenseSummary::default(),
         );
@@ -779,12 +789,13 @@ pub fn handle_v3_request(
                 None,
                 None,
                 Default::default(),
+                Default::default(),
                 LicenseSummary::default(),
             )
         }
         KeyCheckOutcome::Ok(summary) => {
             let eph_key = random_hex_32();
-            let bundle_keys = derive_all_bundle_keys(&keys.bundle_master_key)
+            let bundle_keys = derive_allowed_bundle_keys(&keys.bundle_master_key, &preset_statuses)
                 .map_err(|_| (500, json!({"error": "Bundle key derivation failed"})))?;
             let session_token = sha256_hex(
                 format!("{eph_key}|{}|{}|{}", req.fp, req.pkg, now).as_bytes(),
@@ -808,6 +819,7 @@ pub fn handle_v3_request(
                 Some(eph_key),
                 Some(session_token),
                 bundle_keys,
+                preset_statuses,
                 summary,
             )
         }
