@@ -12,75 +12,90 @@ $newlyCreatedKeys = $_SESSION['newly_created_keys'] ?? [];
 $newlyCreatedMeta = $_SESSION['newly_created_meta'] ?? null;
 unset($_SESSION['flash_msg'], $_SESSION['flash_error'], $_SESSION['newly_created_keys'], $_SESSION['newly_created_meta']);
 
+function csrfField(): string {
+    return '<input type="hidden" name="csrf_token" value="' . htmlspecialchars(getCsrfToken(), ENT_QUOTES, 'UTF-8') . '">';
+}
+
+function checkAdminLoginRateLimit(string $ip, bool $recordFailure = false): bool {
+    return withLockedJson(LOGIN_LIMITS_FILE, [], function (&$map, &$dirty) use ($ip, $recordFailure) {
+        $now = time();
+        foreach ($map as $k => $v) {
+            if (($v['blocked_until'] ?? 0) <= $now && ($v['window_start'] ?? 0) + 600 <= $now) {
+                unset($map[$k]);
+                $dirty = true;
+            }
+        }
+        $entry = $map[$ip] ?? ['window_start' => $now, 'count' => 0, 'blocked_until' => 0];
+        if (($entry['blocked_until'] ?? 0) > $now) {
+            return false;
+        }
+        if ($recordFailure) {
+            if (($now - ($entry['window_start'] ?? 0)) >= 600) {
+                $entry['window_start'] = $now;
+                $entry['count'] = 1;
+            } else {
+                $entry['count'] = intval($entry['count']) + 1;
+                if ($entry['count'] >= 6) {
+                    $entry['blocked_until'] = $now + 900;
+                }
+            }
+            $map[$ip] = $entry;
+            $dirty = true;
+        }
+        return true;
+    });
+}
+
 // Đăng xuất
 if (isset($_GET['action']) && $_GET['action'] === 'logout') {
-    unset($_SESSION['admin_logged_in'], $_SESSION['admin_current_user']);
+    $_SESSION = [];
+    if (ini_get('session.use_cookies')) {
+        $p = session_get_cookie_params();
+        setcookie(session_name(), '', time() - 42000, $p['path'], $p['domain'], $p['secure'], $p['httponly']);
+    }
+    @session_destroy();
     header('Location: admin.php');
     exit;
 }
 
-// Đăng nhập Admin (Hỗ trợ cả Master Admin trong Cài đặt và Tài khoản có quyền ADMIN trong Quản lý tài khoản)
+// Đăng nhập Admin (CSRF + Rate-limit + Argon2/Bcrypt Hash)
 if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['action']) && $_POST['action'] === 'admin_login') {
+    $clientIp = $_SERVER['REMOTE_ADDR'] ?? 'unknown';
     $adminUser = trim($_POST['username'] ?? '');
     $adminPass = trim($_POST['password'] ?? '');
 
-    $loginOk = false;
-    $loggedUsername = $adminUser;
-
-    // 1. Kiểm tra tài khoản Master Admin cấu hình trong settings
-    if ($adminUser === $settings['admin_user'] && $adminPass === $settings['admin_pass']) {
-        $loginOk = true;
-        $loggedUsername = $settings['admin_user'];
-    } 
-    // 2. Kiểm tra danh sách tài khoản được cấp quyền Admin trong hệ thống (users.json)
-    else {
-        $foundUser = findUserByUsername($adminUser);
-        if ($foundUser) {
-            if (empty($foundUser['is_active'])) {
-                $error = 'Tài khoản này đã bị khóa!';
-            } elseif (verifyUserPassword($adminPass, $foundUser['password'] ?? '')) {
-                if (strtolower($foundUser['role'] ?? '') === 'admin') {
-                    // Kiểm tra hạn sử dụng của tài khoản admin (nếu có hạn)
-                    if (!empty($foundUser['expiry_date']) && $foundUser['expiry_date'] !== 'permanent') {
-                        $now = new DateTime();
-                        $exp = new DateTime($foundUser['expiry_date']);
-                        if ($now > $exp) {
-                            $error = 'Tài khoản Quản trị này đã hết hạn sử dụng (' . $exp->format('d/m/Y H:i') . ')!';
-                        } else {
-                            $loginOk = true;
-                            $loggedUsername = $foundUser['username'];
-                        }
-                    } else {
-                        $loginOk = true;
-                        $loggedUsername = $foundUser['username'];
-                    }
-                } else {
-                    $error = 'Tài khoản "' . htmlspecialchars($foundUser['username']) . '" có vai trò ' . strtoupper($foundUser['role'] ?? 'MEMBER') . ', không có quyền truy cập trang Quản Trị Admin!';
-                }
-            } else {
-                $error = 'Sai tài khoản hoặc mật khẩu quản trị!';
-            }
-        } else {
-            $error = 'Sai tài khoản hoặc mật khẩu quản trị!';
+    if (!verifyCsrfToken($_POST['csrf_token'] ?? '')) {
+        $error = 'Phiên bảo mật CSRF không hợp lệ. Vui lòng tải lại trang!';
+    } elseif (!checkAdminLoginRateLimit($clientIp, false)) {
+        $error = 'Quá nhiều lần đăng nhập sai. Vui lòng thử lại sau 15 phút!';
+    } else {
+        $authRes = verifyAdminCredentials($adminUser, $adminPass, $settings);
+        if (!empty($authRes['ok'])) {
+            @session_regenerate_id(true);
+            $_SESSION['admin_logged_in'] = true;
+            $_SESSION['admin_current_user'] = $authRes['username'];
+            $_SESSION['csrf_token'] = bin2hex(random_bytes(32));
+            addLog('login_success', $authRes['username'], 'Đăng nhập trang quản trị Admin thành công', $clientIp);
+            header('Location: admin.php');
+            exit;
         }
-    }
-
-    if ($loginOk) {
-        $_SESSION['admin_logged_in'] = true;
-        $_SESSION['admin_current_user'] = $loggedUsername;
-        addLog('login_success', $loggedUsername, "Đăng nhập trang quản trị Admin thành công", null, $_SERVER['REMOTE_ADDR'] ?? null);
-        header('Location: admin.php');
-        exit;
-    } elseif (empty($error)) {
-        $error = 'Sai tài khoản hoặc mật khẩu quản trị!';
+        checkAdminLoginRateLimit($clientIp, true);
+        addLog('login_fail', $adminUser, 'Đăng nhập admin thất bại', $clientIp);
+        $error = $authRes['error'] ?: 'Sai tài khoản hoặc mật khẩu quản trị!';
     }
 }
 
 $isLoggedIn = !empty($_SESSION['admin_logged_in']);
 
-// Xử lý các thao tác quản trị khi đã đăng nhập
+// Xử lý các thao tác quản trị khi đã đăng nhập (Bắt buộc CSRF Token)
 if ($isLoggedIn && $_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['action'])) {
     $act = $_POST['action'];
+    $actor = $_SESSION['admin_current_user'] ?? 'admin';
+    if (!verifyCsrfToken($_POST['csrf_token'] ?? '')) {
+        $_SESSION['flash_error'] = 'Lỗi xác thực CSRF Token! Vui lòng thao tác lại.';
+        header('Location: admin.php');
+        exit;
+    }
 
     // 1. Thêm tài khoản thủ công (5 loại thời hạn: 1h, 1d, 7d, 30d, permanent)
     if ($act === 'add_user') {
@@ -203,8 +218,11 @@ if ($isLoggedIn && $_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['action
                 'key' => $keyCode,
                 'duration' => $duration, // 1h, 1d, 7d, 30d, permanent
                 'role' => $role,
+                'status' => 'active',
                 'max_devices' => $maxDevices,
                 'devices' => [],
+                'expiry_date' => null,
+                'expiry_ts' => 0,
                 'is_used' => false,
                 'used_by' => null,
                 'used_at' => null,
@@ -215,7 +233,7 @@ if ($isLoggedIn && $_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['action
         saveKeys($keys);
         $durName = formatDurationLabel($duration);
         $devName = ($maxDevices === 0) ? 'Không giới hạn thiết bị' : "{$maxDevices} thiết bị";
-        addLog('admin', 'admin', "Tạo {$qty} Key bản quyền mới loại {$durName} (Giới hạn: {$devName})");
+        addLog('admin', $actor, "Tạo {$qty} Key bản quyền mới loại {$durName} (Giới hạn: {$devName})");
         $msg = "Đã tạo thành công {$qty} Key bản quyền loại {$durName} (Giới hạn: {$devName})!";
         $_SESSION['newly_created_keys'] = $createdKeys;
         $_SESSION['newly_created_meta'] = [
@@ -240,6 +258,24 @@ if ($isLoggedIn && $_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['action
         $msg = "Đã xóa Key: {$keyCode}";
     }
 
+    // 7a. Khóa / Mở khóa Key
+    elseif ($act === 'toggle_key_status') {
+        $keyCode = strtoupper(trim($_POST['key'] ?? ''));
+        $keys = getKeys();
+        foreach ($keys as &$k) {
+            if (strtoupper($k['key']) === $keyCode) {
+                $cur = strtolower((string)($k['status'] ?? 'active'));
+                $next = ($cur === 'revoked' || $cur === 'banned') ? 'active' : 'revoked';
+                $k['status'] = $next;
+                addLog('admin', $actor, "Đổi trạng thái Key {$keyCode} -> {$next}");
+                $msg = "Đã chuyển trạng thái Key {$keyCode} sang: " . ($next === 'active' ? 'HOẠT ĐỘNG' : 'ĐÃ KHÓA');
+                break;
+            }
+        }
+        unset($k);
+        saveKeys($keys);
+    }
+
     // 7b. Reset toàn bộ Key (xóa thiết bị, làm mới thời hạn, cho phép đổi máy)
     elseif ($act === 'reset_key' || $act === 'reset_key_hwid') {
         $keyCode = strtoupper(trim($_POST['key'] ?? ''));
@@ -251,11 +287,12 @@ if ($isLoggedIn && $_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['action
                 $k['is_used'] = false;
                 $k['used_at'] = null;
                 $k['activated_at'] = null;
-                if (!empty($k['duration']) && $k['duration'] !== 'permanent') {
-                    $k['expires_at'] = null;
-                }
+                $k['expiry_date'] = null;
+                $k['expiry_ts'] = 0;
+                $k['expires_at'] = null;
+                $k['status'] = 'active';
                 $k['is_banned'] = false;
-                addLog('admin', 'admin', "Reset toàn bộ Key {$keyCode} về trạng thái ban đầu");
+                addLog('admin', $actor, "Reset toàn bộ Key {$keyCode} về trạng thái ban đầu");
                 $msg = "Đã Reset thành công Key: {$keyCode}! Key đã trở về trạng thái mới (chưa sử dụng, xóa toàn bộ thiết bị).";
                 break;
             }
@@ -331,9 +368,9 @@ if ($isLoggedIn && $_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['action
     // 8. Cập nhật Cài đặt hệ thống
     elseif ($act === 'update_settings') {
         $settings['app_name'] = trim($_POST['app_name'] ?? 'PHUCVN STUDIO');
-        $settings['admin_user'] = trim($_POST['admin_user'] ?? 'admin');
+        $settings['admin_user'] = trim($_POST['admin_user'] ?? 'phucvn_admin');
         if (!empty($_POST['admin_pass'])) {
-            $settings['admin_pass'] = trim($_POST['admin_pass']);
+            $settings['admin_pass_hash'] = hashUserPassword(trim($_POST['admin_pass']));
         }
         $settings['allow_register'] = !empty($_POST['allow_register']);
         $settings['require_key'] = !empty($_POST['require_key']);
@@ -343,8 +380,131 @@ if ($isLoggedIn && $_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['action
         $settings['telegram_support'] = trim($_POST['telegram_support'] ?? '');
 
         saveSettings($settings);
-        addLog('admin', 'admin', "Cập nhật cấu hình hệ thống");
+        addLog('admin', $actor, "Cập nhật cấu hình hệ thống");
         $msg = "Đã lưu cài đặt hệ thống thành công!";
+    }
+
+    // 9. Công tắc Đóng/Mở Server & Ép Cập Nhật (Toàn hệ thống)
+    elseif ($act === 'update_security_policy') {
+        $isOpen = !empty($_POST['server_open']);
+        $settings['server_open'] = $isOpen;
+        $settings['system_paused'] = !$isOpen;
+        $settings['server_closed_message'] = trim($_POST['server_closed_message'] ?? '');
+        $settings['force_update'] = !empty($_POST['force_update']);
+        $settings['min_required_version'] = trim($_POST['min_required_version'] ?? '2.1.0');
+        $settings['latest_version'] = trim($_POST['latest_version'] ?? '2.1.0');
+        $settings['download_url'] = trim($_POST['download_url'] ?? '');
+        $settings['update_message'] = trim($_POST['update_message'] ?? '');
+        $settings['enforce_binary_hash'] = !empty($_POST['enforce_binary_hash']);
+        saveSettings($settings);
+        addLog('SECURITY_POLICY', $actor, 'Cập nhật Kill-Switch (' . ($isOpen ? 'OPEN' : 'CLOSED') . '), min_ver=' . $settings['min_required_version']);
+        $msg = $isOpen ? 'Đã MỞ Server & lưu chính sách cập nhật thành công!' : 'CẢNH BÁO: Đã ĐÓNG Server toàn hệ thống! App sẽ khóa mọi truy cập ngay lập tức.';
+    }
+
+    // 10. Cấu hình Kill-Switch / Force Update theo từng Gói App (Bundle ID)
+    elseif ($act === 'upsert_package_policy') {
+        $pkgId = trim($_POST['package_id'] ?? '');
+        if ($pkgId !== '') {
+            if (!isset($settings['packages']) || !is_array($settings['packages'])) {
+                $settings['packages'] = [];
+            }
+            $settings['packages'][$pkgId] = [
+                'server_open' => !empty($_POST['pkg_server_open']),
+                'server_closed_message' => trim($_POST['pkg_closed_message'] ?? ''),
+                'force_update' => !empty($_POST['pkg_force_update']),
+                'min_required_version' => trim($_POST['pkg_min_version'] ?? ''),
+                'latest_version' => trim($_POST['pkg_latest_version'] ?? ''),
+                'download_url' => trim($_POST['pkg_download_url'] ?? ''),
+                'update_message' => trim($_POST['pkg_update_message'] ?? ''),
+                'enforce_binary_hash' => !empty($_POST['pkg_enforce_hash']),
+            ];
+            saveSettings($settings);
+            addLog('PKG_POLICY', $actor, "Cập nhật chính sách gói {$pkgId}");
+            $msg = "Đã cập nhật chính sách cho gói {$pkgId}!";
+        }
+    }
+
+    elseif ($act === 'delete_package_policy') {
+        $pkgId = trim($_POST['package_id'] ?? '');
+        if (isset($settings['packages'][$pkgId])) {
+            unset($settings['packages'][$pkgId]);
+            saveSettings($settings);
+            $msg = "Đã xóa cấu hình riêng của gói {$pkgId}.";
+        }
+    }
+
+    // 11. Quản lý Build Hash Manifests (Anti-Patch / Anti-Re-Sign)
+    elseif ($act === 'add_build_manifest') {
+        $pkgId = trim($_POST['package_id'] ?? '');
+        $ver = trim($_POST['version'] ?? '');
+        $bld = trim($_POST['build'] ?? '');
+        $appHash = strtolower(trim($_POST['app_hash'] ?? ''));
+        $secHash = strtolower(trim($_POST['sec_hash'] ?? ''));
+        $note = trim($_POST['note'] ?? 'Manual entry');
+        if ($pkgId === '' || $ver === '' || !preg_match('/^[0-9a-f]{64}$/', $appHash) || !preg_match('/^[0-9a-f]{64}$/', $secHash)) {
+            $error = 'Vui lòng nhập đúng Package ID, Version và đủ 64 ký tự hex SHA-256 cho App & Dylib.';
+        } else {
+            $manifests = getBuildManifests();
+            $manifests[] = [
+                'package_id' => $pkgId,
+                'version' => $ver,
+                'build' => $bld,
+                'app_hash' => $appHash,
+                'sec_hash' => $secHash,
+                'active' => true,
+                'revoked' => false,
+                'registered_at' => date('Y-m-d H:i:s'),
+                'note' => $note,
+            ];
+            saveBuildManifests($manifests);
+            addLog('MANIFEST_ADD', $actor, "Thêm Build Hash {$pkgId} v{$ver}");
+            $msg = "Đã đăng ký Build Hash hợp lệ cho {$pkgId} v{$ver}.";
+        }
+    }
+
+    elseif ($act === 'toggle_manifest_revoke') {
+        $idx = intval($_POST['manifest_idx'] ?? -1);
+        $manifests = getBuildManifests();
+        if (isset($manifests[$idx])) {
+            $rev = !empty($manifests[$idx]['revoked']);
+            $manifests[$idx]['revoked'] = !$rev;
+            $manifests[$idx]['active'] = $rev;
+            saveBuildManifests($manifests);
+            addLog('MANIFEST_TOGGLE', $actor, ($rev ? 'Khôi phục' : 'Thu hồi') . ' build ' . ($manifests[$idx]['version'] ?? ''));
+            $msg = $rev ? 'Đã khôi phục bản build.' : 'Đã thu hồi bản build!';
+        }
+    }
+
+    elseif ($act === 'delete_manifest') {
+        $idx = intval($_POST['manifest_idx'] ?? -1);
+        $manifests = getBuildManifests();
+        if (isset($manifests[$idx])) {
+            array_splice($manifests, $idx, 1);
+            saveBuildManifests($manifests);
+            $msg = 'Đã xóa bản ghi Build Hash.';
+        }
+    }
+
+    // 12. Ban / Gỡ Ban thiết bị vĩnh viễn theo HWID máy
+    elseif ($act === 'ban_device') {
+        $hwidToBan = trim((string)($_POST['hwid'] ?? ''));
+        $reason = trim((string)($_POST['reason'] ?? 'Vi phạm điều khoản sử dụng / Can thiệp hệ thống'));
+        $sourceKey = trim((string)($_POST['source_key'] ?? ''));
+        if ($hwidToBan === '') {
+            $error = 'Vui lòng nhập mã HWID thiết bị cần Ban!';
+        } else {
+            banDeviceHwid($hwidToBan, $reason, $actor, $sourceKey);
+            addLog('BAN_HWID', $actor, "Đã BAN thiết bị HWID {$hwidToBan} (Lý do: {$reason})", null, $hwidToBan);
+            $msg = "Đã BAN vĩnh viễn thiết bị HWID: {$hwidToBan}!";
+        }
+    }
+
+    elseif ($act === 'unban_device') {
+        $hwidToUnban = trim((string)($_POST['hwid'] ?? ''));
+        if ($hwidToUnban !== '' && unbanDeviceHwid($hwidToUnban)) {
+            addLog('UNBAN_HWID', $actor, "Đã gỡ Ban thiết bị HWID {$hwidToUnban}", null, $hwidToUnban);
+            $msg = "Đã gỡ Ban cho thiết bị HWID: {$hwidToUnban}!";
+        }
     }
 
     // PRG Pattern (Post/Redirect/Get): Chuyển hướng trình duyệt sang GET để F5 không bao giờ bị tạo key lặp lại
@@ -356,10 +516,15 @@ if ($isLoggedIn && $_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['action
     }
 
     $tabParam = 'keysTab';
-    if (in_array($act, ['add_user', 'delete_user', 'toggle_status', 'reset_hwid', 'extend_user'])) {
+    $returnTab = trim((string)($_POST['return_tab'] ?? ''));
+    if (in_array($returnTab, ['keysTab', 'securityTab', 'usersTab', 'settingsTab', 'logsTab'], true)) {
+        $tabParam = $returnTab;
+    } elseif (in_array($act, ['add_user', 'delete_user', 'toggle_status', 'reset_hwid', 'extend_user'])) {
         $tabParam = 'usersTab';
     } elseif ($act === 'update_settings') {
         $tabParam = 'settingsTab';
+    } elseif (in_array($act, ['update_security_policy', 'upsert_package_policy', 'delete_package_policy', 'add_build_manifest', 'toggle_manifest_revoke', 'delete_manifest', 'ban_device', 'unban_device'])) {
+        $tabParam = 'securityTab';
     }
 
     header('Location: admin.php?tab=' . $tabParam);
@@ -369,6 +534,15 @@ if ($isLoggedIn && $_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['action
 $allUsers = getUsers();
 $allKeys = getKeys();
 $allLogs = readJsonFile(LOGS_FILE, []);
+$allManifests = getBuildManifests();
+$allBannedDevices = getBannedDevices();
+$bannedHwidMap = [];
+foreach ($allBannedDevices as $bd) {
+    if (!empty($bd['active']) && !empty($bd['hwid'])) {
+        $bannedHwidMap[strtolower(trim((string)$bd['hwid']))] = $bd;
+    }
+}
+$isServerOpenGlobal = !empty($settings['server_open']) && empty($settings['system_paused']);
 
 $search = strtolower(trim($_GET['q'] ?? ''));
 $keySearch = strtolower(trim($_GET['key_q'] ?? ''));
@@ -489,6 +663,7 @@ foreach ($allKeys as $k) {
             <?php endif; ?>
 
             <form method="POST" style="text-align: left;">
+                <?= csrfField() ?>
                 <input type="hidden" name="action" value="admin_login">
                 <div class="form-group">
                     <label class="form-label"><i class="fa-solid fa-user-shield"></i> Tài khoản Quản Trị</label>
@@ -562,9 +737,17 @@ foreach ($allKeys as $k) {
         <!-- Navigation Tabs -->
         <div class="tabs">
             <button class="tab-btn active" onclick="switchTab('keysTab', this)"><i class="fa-solid fa-key"></i> Tạo & Quản Lý 5 Loại Key</button>
+            <button class="tab-btn" onclick="switchTab('securityTab', this)">
+                <i class="fa-solid fa-shield-halved"></i> Server & Cập Nhật
+                <?php if (!$isServerOpenGlobal): ?>
+                    <span class="badge badge-blocked" style="margin-left:4px;">CLOSED</span>
+                <?php elseif (!empty($settings['force_update'])): ?>
+                    <span class="badge" style="background:rgba(245,158,11,0.2);color:#fbbf24;margin-left:4px;">UPDATE</span>
+                <?php endif; ?>
+            </button>
             <button class="tab-btn" onclick="switchTab('usersTab', this)"><i class="fa-solid fa-users-gear"></i> Quản Lý Tài Khoản</button>
             <button class="tab-btn" onclick="switchTab('settingsTab', this)"><i class="fa-solid fa-sliders"></i> Cài Đặt Hệ Thống</button>
-            <button class="tab-btn" onclick="switchTab('logsTab', this)"><i class="fa-solid fa-clock-rotate-left"></i> Nhật Ký Hoạt Động</button>
+            <button class="tab-btn" onclick="switchTab('logsTab', this)"><i class="fa-solid fa-clock-rotate-left"></i> Nhật Ký Bảo Mật</button>
         </div>
 
         <!-- TAB 1: 5 LOẠI KEY -->
@@ -574,6 +757,7 @@ foreach ($allKeys as $k) {
                     <span class="card-title"><i class="fa-solid fa-plus-circle"></i> Tạo Mã Key Bản Quyền (Tùy Chỉnh Giới Hạn Thiết Bị)</span>
                 </div>
                 <form method="POST">
+                    <?= csrfField() ?>
                     <input type="hidden" name="action" value="create_key">
                     <div class="form-row">
                         <div>
@@ -699,6 +883,7 @@ foreach ($allKeys as $k) {
                         </span>
                     </span>
                     <form method="POST" style="display:inline;" onsubmit="return confirm('CẢNH BÁO: Reset toàn bộ thiết bị của TẤT CẢ các key trong hệ thống? Khách hàng sẽ được phép kích hoạt lại trên máy mới.');">
+                        <?= csrfField() ?>
                         <input type="hidden" name="action" value="reset_all_keys">
                         <button type="submit" class="btn btn-warning btn-sm" title="Reset tất cả thiết bị của mọi key">
                             <i class="fa-solid fa-arrows-rotate"></i> Reset Tất Cả Thiết Bị
@@ -815,6 +1000,7 @@ foreach ($allKeys as $k) {
                                         <!-- Điều chỉnh số thiết bị tối đa trực tiếp -->
                                         <div style="margin-top: 8px;">
                                             <form method="POST" style="display:inline-flex; align-items:center; gap: 4px;" title="Đổi giới hạn thiết bị cho key này">
+                                                <?= csrfField() ?>
                                                 <input type="hidden" name="action" value="update_key_max_devices">
                                                 <input type="hidden" name="key" value="<?= htmlspecialchars($k['key']) ?>">
                                                 <select name="max_devices" class="form-select" style="padding: 3px 6px; font-size: 11px; width: auto; height: 26px;">
@@ -833,23 +1019,54 @@ foreach ($allKeys as $k) {
                                         <?php if (empty($k['devices'])): ?>
                                             <span style="color:#64748b; font-size: 12px;"><i class="fa-solid fa-circle-minus"></i> Chưa có máy nào</span>
                                         <?php else: ?>
-                                            <div style="display: flex; flex-direction: column; gap: 6px; max-width: 340px;">
-                                                <?php foreach ($k['devices'] as $d): ?>
-                                                    <div style="background: rgba(255,255,255,0.03); border: 1px solid rgba(255,255,255,0.08); border-radius: 6px; padding: 6px 8px; display: flex; justify-content: space-between; align-items: center; gap: 8px;">
-                                                        <div style="overflow: hidden;">
-                                                            <div style="font-family: monospace; font-size: 11px; color: #38bdf8; text-overflow: ellipsis; overflow: hidden; white-space: nowrap;" title="<?= htmlspecialchars($d['hwid']) ?>">
-                                                                <i class="fa-solid fa-mobile-screen-button"></i> <?= htmlspecialchars($d['hwid']) ?>
+                                            <div style="display: flex; flex-direction: column; gap: 6px; max-width: 390px;">
+                                                <?php foreach ($k['devices'] as $d):
+                                                    $devHwid = trim((string)($d['hwid'] ?? ''));
+                                                    $banInfo = $bannedHwidMap[strtolower($devHwid)] ?? null;
+                                                ?>
+                                                    <div style="background: <?= $banInfo ? 'rgba(239,68,68,0.1)' : 'rgba(255,255,255,0.03)' ?>; border: 1px solid <?= $banInfo ? 'rgba(239,68,68,0.45)' : 'rgba(255,255,255,0.08)' ?>; border-radius: 6px; padding: 6px 8px; display: flex; justify-content: space-between; align-items: center; gap: 6px;">
+                                                        <div style="overflow: hidden; flex: 1;">
+                                                            <div style="font-family: monospace; font-size: 11px; color: <?= $banInfo ? '#f87171' : '#38bdf8' ?>; text-overflow: ellipsis; overflow: hidden; white-space: nowrap;" title="<?= htmlspecialchars($devHwid) ?>">
+                                                                <i class="fa-solid fa-mobile-screen-button"></i> <?= htmlspecialchars($devHwid) ?>
+                                                                <?php if ($banInfo): ?>
+                                                                    <span class="badge badge-blocked" style="font-size:9px;padding:2px 6px;margin-left:4px;">ĐÃ BAN</span>
+                                                                <?php endif; ?>
                                                             </div>
                                                             <div style="font-size: 10px; color: var(--text-muted); margin-top: 2px;">
                                                                 Kích hoạt: <?= htmlspecialchars($d['activated_at'] ?? 'N/A') ?>
+                                                                <?php if ($banInfo && !empty($banInfo['reason'])): ?>
+                                                                    · Lý do: <?= htmlspecialchars($banInfo['reason']) ?>
+                                                                <?php endif; ?>
                                                             </div>
                                                         </div>
-                                                        <form method="POST" style="margin: 0; flex-shrink: 0;" onsubmit="return confirm('Ngắt kết nối thiết bị này? Máy này sẽ không còn quyền dùng key.');">
-                                                            <input type="hidden" name="action" value="remove_key_device">
-                                                            <input type="hidden" name="key" value="<?= htmlspecialchars($k['key']) ?>">
-                                                            <input type="hidden" name="hwid" value="<?= htmlspecialchars($d['hwid']) ?>">
-                                                            <button type="submit" class="btn btn-danger btn-sm" style="padding: 3px 6px; font-size: 10px;" title="Xóa thiết bị này (Kick máy)"><i class="fa-solid fa-xmark"></i> Xóa</button>
-                                                        </form>
+                                                        <div style="display:flex;gap:4px;flex-shrink:0;align-items:center;">
+                                                            <?php if ($banInfo): ?>
+                                                                <form method="POST" style="margin: 0;" onsubmit="return confirm('Gỡ Ban cho thiết bị HWID này?');">
+                                                                    <?= csrfField() ?>
+                                                                    <input type="hidden" name="action" value="unban_device">
+                                                                    <input type="hidden" name="return_tab" value="keysTab">
+                                                                    <input type="hidden" name="hwid" value="<?= htmlspecialchars($devHwid) ?>">
+                                                                    <button type="submit" class="btn btn-primary btn-sm" style="padding: 3px 6px; font-size: 10px;" title="Gỡ Ban HWID này"><i class="fa-solid fa-unlock"></i> Gỡ Ban</button>
+                                                                </form>
+                                                            <?php else: ?>
+                                                                <form method="POST" style="margin: 0;" onsubmit="return promptBanReason(this, '<?= htmlspecialchars($devHwid, ENT_QUOTES) ?>');">
+                                                                    <?= csrfField() ?>
+                                                                    <input type="hidden" name="action" value="ban_device">
+                                                                    <input type="hidden" name="return_tab" value="keysTab">
+                                                                    <input type="hidden" name="hwid" value="<?= htmlspecialchars($devHwid) ?>">
+                                                                    <input type="hidden" name="source_key" value="<?= htmlspecialchars($k['key']) ?>">
+                                                                    <input type="hidden" name="reason" value="">
+                                                                    <button type="submit" class="btn btn-sm" style="padding: 3px 6px; font-size: 10px; background: rgba(245,158,11,0.18); color: #fbbf24; border: 1px solid rgba(245,158,11,0.35);" title="Ban vĩnh viễn thiết bị theo HWID này"><i class="fa-solid fa-ban"></i> Ban</button>
+                                                                </form>
+                                                            <?php endif; ?>
+                                                            <form method="POST" style="margin: 0;" onsubmit="return confirm('Ngắt kết nối thiết bị này? Máy này sẽ không còn quyền dùng key.');">
+                                                                <?= csrfField() ?>
+                                                                <input type="hidden" name="action" value="remove_key_device">
+                                                                <input type="hidden" name="key" value="<?= htmlspecialchars($k['key']) ?>">
+                                                                <input type="hidden" name="hwid" value="<?= htmlspecialchars($devHwid) ?>">
+                                                                <button type="submit" class="btn btn-danger btn-sm" style="padding: 3px 6px; font-size: 10px;" title="Xóa thiết bị này (Kick máy)"><i class="fa-solid fa-xmark"></i> Xóa</button>
+                                                            </form>
+                                                        </div>
                                                     </div>
                                                 <?php endforeach; ?>
                                             </div>
@@ -857,12 +1074,23 @@ foreach ($allKeys as $k) {
                                     </td>
                                     <td style="font-size: 11.5px; color: var(--text-muted);"><?= htmlspecialchars($k['created_at'] ?? 'N/A') ?></td>
                                     <td style="white-space: nowrap;">
+                                        <?php $isKeyRevoked = in_array(strtolower((string)($k['status'] ?? 'active')), ['revoked', 'banned', 'disabled'], true); ?>
+                                        <form method="POST" style="display:inline-block; margin-right: 4px;">
+                                            <?= csrfField() ?>
+                                            <input type="hidden" name="action" value="toggle_key_status">
+                                            <input type="hidden" name="key" value="<?= htmlspecialchars($k['key']) ?>">
+                                            <button type="submit" class="btn btn-sm <?= $isKeyRevoked ? 'btn-primary' : 'btn-danger' ?>" title="<?= $isKeyRevoked ? 'Mở khóa Key' : 'Khóa/Thu hồi Key' ?>">
+                                                <i class="fa-solid <?= $isKeyRevoked ? 'fa-unlock' : 'fa-ban' ?>"></i>
+                                            </button>
+                                        </form>
                                         <form method="POST" style="display:inline-block; margin-right: 4px;" onsubmit="return confirm('Reset mã key <?= htmlspecialchars($k['key']) ?>? Toàn bộ thiết bị đã liên kết sẽ bị xóa và thời hạn sẽ được làm mới.');">
+                                            <?= csrfField() ?>
                                             <input type="hidden" name="action" value="reset_key">
                                             <input type="hidden" name="key" value="<?= htmlspecialchars($k['key']) ?>">
                                             <button type="submit" class="btn btn-warning btn-sm" title="Reset Key (xóa máy & làm mới)"><i class="fa-solid fa-arrows-rotate"></i> Reset</button>
                                         </form>
                                         <form method="POST" style="display:inline-block;" onsubmit="return confirm('Xóa vĩnh viễn key này?');">
+                                            <?= csrfField() ?>
                                             <input type="hidden" name="action" value="delete_key">
                                             <input type="hidden" name="key" value="<?= htmlspecialchars($k['key']) ?>">
                                             <button type="submit" class="btn btn-danger btn-sm" title="Xóa key"><i class="fa-solid fa-trash"></i></button>
@@ -882,6 +1110,247 @@ foreach ($allKeys as $k) {
             </div>
         </div>
 
+        <!-- TAB SECURITY: KILL-SWITCH, FORCE UPDATE & BUILD MANIFESTS -->
+        <div id="securityTab" class="tab-pane" style="display: none;">
+            <div class="content-card" style="border: 1px solid <?= $isServerOpenGlobal ? 'rgba(16,185,129,0.35)' : 'rgba(239,68,68,0.55)' ?>;">
+                <div class="card-header">
+                    <span class="card-title"><i class="fa-solid fa-power-off"></i> Công Tắc Đóng/Mở Server & Ép Cập Nhật (Toàn Hệ Thống)</span>
+                    <span class="badge <?= $isServerOpenGlobal ? 'badge-active' : 'badge-blocked' ?>">
+                        <?= $isServerOpenGlobal ? 'SERVER ĐANG MỞ' : 'SERVER ĐANG ĐÓNG KHẨN CẤP' ?>
+                    </span>
+                </div>
+                <form method="POST">
+                    <?= csrfField() ?>
+                    <input type="hidden" name="action" value="update_security_policy">
+                    <div class="form-row">
+                        <div>
+                            <label class="form-label">Trạng Thái Server (Kill-Switch)</label>
+                            <label style="display:flex;align-items:center;gap:10px;padding:10px 14px;background:var(--bg-input);border-radius:var(--radius-md);border:1px solid rgba(255,255,255,0.1);cursor:pointer;">
+                                <input type="checkbox" name="server_open" value="1" <?= $isServerOpenGlobal ? 'checked' : '' ?>>
+                                <strong>Mở Server cho phép xác thực & cấp khóa phiên</strong>
+                            </label>
+                        </div>
+                        <div>
+                            <label class="form-label">Ép Cập Nhật (Force Update)</label>
+                            <label style="display:flex;align-items:center;gap:10px;padding:10px 14px;background:var(--bg-input);border-radius:var(--radius-md);border:1px solid rgba(255,255,255,0.1);cursor:pointer;">
+                                <input type="checkbox" name="force_update" value="1" <?= !empty($settings['force_update']) ? 'checked' : '' ?>>
+                                <strong>Chặn các bản cũ hơn bản mới nhất (Latest Version)</strong>
+                            </label>
+                        </div>
+                        <div>
+                            <label class="form-label">Kiểm Tra Chữ Ký Binary</label>
+                            <label style="display:flex;align-items:center;gap:10px;padding:10px 14px;background:var(--bg-input);border-radius:var(--radius-md);border:1px solid rgba(255,255,255,0.1);cursor:pointer;">
+                                <input type="checkbox" name="enforce_binary_hash" value="1" <?= !empty($settings['enforce_binary_hash']) ? 'checked' : '' ?>>
+                                <strong>Từ chối App nếu sai SHA-256 __TEXT (Anti-Patch)</strong>
+                            </label>
+                        </div>
+                    </div>
+
+                    <div class="form-row">
+                        <div>
+                            <label class="form-label">Phiên bản Tối Thiểu (min_required_version)</label>
+                            <input type="text" name="min_required_version" class="form-input" value="<?= htmlspecialchars($settings['min_required_version'] ?? '2.1.0') ?>" placeholder="2.1.0">
+                        </div>
+                        <div>
+                            <label class="form-label">Phiên bản Mới Nhất (latest_version)</label>
+                            <input type="text" name="latest_version" class="form-input" value="<?= htmlspecialchars($settings['latest_version'] ?? '2.1.0') ?>" placeholder="2.1.0">
+                        </div>
+                        <div>
+                            <label class="form-label">Link Tải Bản Mới (download_url)</label>
+                            <input type="url" name="download_url" class="form-input" value="<?= htmlspecialchars($settings['download_url'] ?? '') ?>" placeholder="https://20-10.store/download">
+                        </div>
+                    </div>
+
+                    <div class="form-row">
+                        <div>
+                            <label class="form-label">Thông báo khi ĐÓNG Server</label>
+                            <input type="text" name="server_closed_message" class="form-input" value="<?= htmlspecialchars($settings['server_closed_message'] ?? '') ?>">
+                        </div>
+                        <div>
+                            <label class="form-label">Thông báo khi ÉP CẬP NHẬT</label>
+                            <input type="text" name="update_message" class="form-input" value="<?= htmlspecialchars($settings['update_message'] ?? '') ?>">
+                        </div>
+                    </div>
+                    <button type="submit" class="btn btn-primary"><i class="fa-solid fa-shield-check"></i> Lưu Chính Sách Kill-Switch & Update</button>
+                </form>
+            </div>
+
+            <div class="content-card">
+                <div class="card-header">
+                    <span class="card-title"><i class="fa-solid fa-cubes"></i> Chính Sách Riêng Theo Từng Gói App (Package ID)</span>
+                </div>
+                <form method="POST" style="margin-bottom: 18px;">
+                    <?= csrfField() ?>
+                    <input type="hidden" name="action" value="upsert_package_policy">
+                    <div class="form-row">
+                        <div>
+                            <label class="form-label">Package / Bundle ID</label>
+                            <input type="text" name="package_id" class="form-input" value="com.apple.mobile.MobileHouseArrest" required>
+                        </div>
+                        <div>
+                            <label class="form-label">Min Version</label>
+                            <input type="text" name="pkg_min_version" class="form-input" placeholder="2.1.0">
+                        </div>
+                        <div>
+                            <label class="form-label">Latest Version</label>
+                            <input type="text" name="pkg_latest_version" class="form-input" placeholder="2.1.0">
+                        </div>
+                        <div>
+                            <label class="form-label">Download URL</label>
+                            <input type="url" name="pkg_download_url" class="form-input" placeholder="https://...">
+                        </div>
+                    </div>
+                    <div class="form-row">
+                        <div>
+                            <label class="form-label">Thông báo đóng gói riêng</label>
+                            <input type="text" name="pkg_closed_message" class="form-input" placeholder="Gói này đang tạm đóng...">
+                        </div>
+                        <div>
+                            <label class="form-label">Thông báo cập nhật gói</label>
+                            <input type="text" name="pkg_update_message" class="form-input" placeholder="Vui lòng cập nhật gói...">
+                        </div>
+                        <div style="display:flex;flex-direction:column;justify-content:center;gap:6px;">
+                            <label><input type="checkbox" name="pkg_server_open" value="1" checked> Mở gói này</label>
+                            <label><input type="checkbox" name="pkg_force_update" value="1"> Ép update gói</label>
+                            <label><input type="checkbox" name="pkg_enforce_hash" value="1"> Siết Binary Hash</label>
+                        </div>
+                    </div>
+                    <button type="submit" class="btn btn-primary btn-sm"><i class="fa-solid fa-floppy-disk"></i> Lưu Chính Sách Gói</button>
+                </form>
+
+                <?php if (!empty($settings['packages'])): ?>
+                    <div class="table-responsive">
+                        <table>
+                            <thead><tr><th>PACKAGE ID</th><th>SERVER</th><th>MIN / LATEST</th><th>HASH</th><th>THAO TÁC</th></tr></thead>
+                            <tbody>
+                                <?php foreach ($settings['packages'] as $pkgKey => $pkgCfg): ?>
+                                    <tr>
+                                        <td><span class="code-box"><?= htmlspecialchars($pkgKey) ?></span></td>
+                                        <td><?= !empty($pkgCfg['server_open']) ? '<span class="badge badge-active">MỞ</span>' : '<span class="badge badge-blocked">ĐÓNG</span>' ?></td>
+                                        <td><?= htmlspecialchars(($pkgCfg['min_required_version'] ?: '-') . ' / ' . ($pkgCfg['latest_version'] ?: '-')) ?></td>
+                                        <td><?= !empty($pkgCfg['enforce_binary_hash']) ? 'Strict' : 'Auto' ?></td>
+                                        <td>
+                                            <form method="POST" style="display:inline;">
+                                                <?= csrfField() ?>
+                                                <input type="hidden" name="action" value="delete_package_policy">
+                                                <input type="hidden" name="package_id" value="<?= htmlspecialchars($pkgKey) ?>">
+                                                <button type="submit" class="btn btn-danger btn-sm"><i class="fa-solid fa-trash"></i></button>
+                                            </form>
+                                        </td>
+                                    </tr>
+                                <?php endforeach; ?>
+                            </tbody>
+                        </table>
+                    </div>
+                <?php endif; ?>
+            </div>
+
+            <div class="content-card">
+                <div class="card-header">
+                    <span class="card-title"><i class="fa-solid fa-fingerprint"></i> Build Hash Manifests (SHA-256 __TEXT từ CI/GitHub Actions)</span>
+                </div>
+                <form method="POST" style="margin-bottom: 18px;">
+                    <?= csrfField() ?>
+                    <input type="hidden" name="action" value="add_build_manifest">
+                    <div class="form-row">
+                        <div><label class="form-label">Package ID</label><input type="text" name="package_id" class="form-input" value="com.apple.mobile.MobileHouseArrest" required></div>
+                        <div><label class="form-label">Version</label><input type="text" name="version" class="form-input" placeholder="2.1.0" required></div>
+                        <div><label class="form-label">Build</label><input type="text" name="build" class="form-input" placeholder="9"></div>
+                    </div>
+                    <div class="form-row">
+                        <div><label class="form-label">App __TEXT SHA-256 (64 hex)</label><input type="text" name="app_hash" class="form-input" required></div>
+                        <div><label class="form-label">libsec_core __TEXT SHA-256 (64 hex)</label><input type="text" name="sec_hash" class="form-input" required></div>
+                        <div><label class="form-label">Ghi chú</label><input type="text" name="note" class="form-input" placeholder="CI Release"></div>
+                    </div>
+                    <button type="submit" class="btn btn-primary btn-sm"><i class="fa-solid fa-plus"></i> Đăng Ký Build Hash</button>
+                </form>
+
+                <div class="table-responsive">
+                    <table>
+                        <thead><tr><th>PACKAGE / VER</th><th>APP HASH</th><th>SEC DYLIB HASH</th><th>TRẠNG THÁI</th><th>THAO TÁC</th></tr></thead>
+                        <tbody>
+                            <?php if (empty($allManifests)): ?>
+                                <tr><td colspan="5" style="text-align:center;color:var(--text-muted);padding:20px;">Chưa có bản build CI nào được đăng ký.</td></tr>
+                            <?php else: foreach ($allManifests as $mIdx => $m): ?>
+                                <tr>
+                                    <td>
+                                        <strong><?= htmlspecialchars($m['version']) ?></strong> (<?= htmlspecialchars($m['build'] ?? '') ?>)
+                                        <div style="font-size:11px;color:var(--text-muted);"><?= htmlspecialchars($m['package_id']) ?> · <?= htmlspecialchars($m['registered_at'] ?? '') ?></div>
+                                    </td>
+                                    <td><span class="code-box"><?= htmlspecialchars(substr($m['app_hash'], 0, 16)) ?>...</span></td>
+                                    <td><span class="code-box"><?= htmlspecialchars(substr($m['sec_hash'], 0, 16)) ?>...</span></td>
+                                    <td><?= empty($m['revoked']) ? '<span class="badge badge-active">Hợp lệ</span>' : '<span class="badge badge-blocked">Đã thu hồi</span>' ?></td>
+                                    <td>
+                                        <form method="POST" style="display:inline;">
+                                            <?= csrfField() ?>
+                                            <input type="hidden" name="action" value="toggle_manifest_revoke">
+                                            <input type="hidden" name="manifest_idx" value="<?= $mIdx ?>">
+                                            <button type="submit" class="btn btn-sm <?= empty($m['revoked']) ? 'btn-danger' : 'btn-primary' ?>"><?= empty($m['revoked']) ? 'Thu hồi' : 'Khôi phục' ?></button>
+                                        </form>
+                                        <form method="POST" style="display:inline;">
+                                            <?= csrfField() ?>
+                                            <input type="hidden" name="action" value="delete_manifest">
+                                            <input type="hidden" name="manifest_idx" value="<?= $mIdx ?>">
+                                            <button type="submit" class="btn btn-danger btn-sm"><i class="fa-solid fa-trash"></i></button>
+                                        </form>
+                                    </td>
+                                </tr>
+                            <?php endforeach; endif; ?>
+                        </tbody>
+                    </table>
+                </div>
+            </div>
+
+            <div class="content-card" style="border: 1px solid rgba(239,68,68,0.35);">
+                <div class="card-header">
+                    <span class="card-title"><i class="fa-solid fa-ban"></i> Danh Sách Thiết Bị Bị Ban Theo HWID (<?= count($bannedHwidMap) ?>)</span>
+                </div>
+                <form method="POST" style="margin-bottom: 18px;">
+                    <?= csrfField() ?>
+                    <input type="hidden" name="action" value="ban_device">
+                    <input type="hidden" name="return_tab" value="securityTab">
+                    <div class="form-row">
+                        <div>
+                            <label class="form-label">Mã HWID / Device Fingerprint cần Ban</label>
+                            <input type="text" name="hwid" class="form-input" required placeholder="Nhập UUID hoặc SHA-256 HWID của máy...">
+                        </div>
+                        <div>
+                            <label class="form-label">Lý do khóa (Hiển thị trên App)</label>
+                            <input type="text" name="reason" class="form-input" placeholder="Ví dụ: Crack / Can thiệp hệ thống / Share Key">
+                        </div>
+                    </div>
+                    <button type="submit" class="btn btn-danger btn-sm"><i class="fa-solid fa-ban"></i> Ban Thiết Bị Này</button>
+                </form>
+
+                <div class="table-responsive">
+                    <table>
+                        <thead><tr><th>HWID THIẾT BỊ</th><th>LÝ DO KHÓA</th><th>KEY LIÊN QUAN</th><th>NGƯỜI BAN / THỜI GIAN</th><th>THAO TÁC</th></tr></thead>
+                        <tbody>
+                            <?php if (empty($bannedHwidMap)): ?>
+                                <tr><td colspan="5" style="text-align:center;color:var(--text-muted);padding:20px;">Chưa có thiết bị nào bị Ban.</td></tr>
+                            <?php else: foreach ($bannedHwidMap as $bd): ?>
+                                <tr>
+                                    <td><span class="code-box" style="color:#f87171;border-color:rgba(239,68,68,0.4);"><?= htmlspecialchars((string)$bd['hwid']) ?></span></td>
+                                    <td><?= htmlspecialchars((string)($bd['reason'] ?: 'Không ghi rõ')) ?></td>
+                                    <td><?= !empty($bd['source_key']) ? '<span class="code-box">' . htmlspecialchars((string)$bd['source_key']) . '</span>' : '-' ?></td>
+                                    <td style="font-size:11.5px;color:var(--text-muted);"><?= htmlspecialchars((string)($bd['banned_by'] ?? 'admin')) ?> · <?= htmlspecialchars((string)($bd['banned_at'] ?? '')) ?></td>
+                                    <td>
+                                        <form method="POST" style="display:inline;" onsubmit="return confirm('Gỡ Ban cho thiết bị này?');">
+                                            <?= csrfField() ?>
+                                            <input type="hidden" name="action" value="unban_device">
+                                            <input type="hidden" name="return_tab" value="securityTab">
+                                            <input type="hidden" name="hwid" value="<?= htmlspecialchars((string)$bd['hwid']) ?>">
+                                            <button type="submit" class="btn btn-primary btn-sm"><i class="fa-solid fa-unlock"></i> Gỡ Ban</button>
+                                        </form>
+                                    </td>
+                                </tr>
+                            <?php endforeach; endif; ?>
+                        </tbody>
+                    </table>
+                </div>
+            </div>
+        </div>
+
         <!-- TAB 2: USERS -->
         <div id="usersTab" class="tab-pane" style="display: none;">
             <div class="content-card">
@@ -889,6 +1358,7 @@ foreach ($allKeys as $k) {
                     <span class="card-title"><i class="fa-solid fa-user-plus"></i> Thêm Tài Khoản Mới Trực Tiếp</span>
                 </div>
                 <form method="POST">
+                    <?= csrfField() ?>
                     <input type="hidden" name="action" value="add_user">
                     <div class="form-row">
                         <div>
@@ -978,8 +1448,31 @@ foreach ($allKeys as $k) {
                                         </div>
                                     </td>
                                     <td>
-                                        <?php if (!empty($u['hwid'])): ?>
-                                            <span class="code-box" title="<?= htmlspecialchars($u['hwid']) ?>"><?= htmlspecialchars(substr($u['hwid'], 0, 16)) ?>...</span>
+                                        <?php if (!empty($u['hwid'])):
+                                            $uHwid = trim((string)$u['hwid']);
+                                            $uBanned = !empty($bannedHwidMap[strtolower($uHwid)]);
+                                        ?>
+                                            <div style="display:flex;align-items:center;gap:6px;flex-wrap:wrap;">
+                                                <span class="code-box" style="<?= $uBanned ? 'color:#f87171;border-color:rgba(239,68,68,0.45);' : '' ?>" title="<?= htmlspecialchars($uHwid) ?>"><?= htmlspecialchars(substr($uHwid, 0, 16)) ?>...</span>
+                                                <?php if ($uBanned): ?>
+                                                    <form method="POST" style="display:inline;">
+                                                        <?= csrfField() ?>
+                                                        <input type="hidden" name="action" value="unban_device">
+                                                        <input type="hidden" name="return_tab" value="usersTab">
+                                                        <input type="hidden" name="hwid" value="<?= htmlspecialchars($uHwid) ?>">
+                                                        <button type="submit" class="btn btn-primary btn-sm" style="padding:2px 6px;font-size:10px;">Gỡ Ban</button>
+                                                    </form>
+                                                <?php else: ?>
+                                                    <form method="POST" style="display:inline;" onsubmit="return promptBanReason(this, '<?= htmlspecialchars($uHwid, ENT_QUOTES) ?>');">
+                                                        <?= csrfField() ?>
+                                                        <input type="hidden" name="action" value="ban_device">
+                                                        <input type="hidden" name="return_tab" value="usersTab">
+                                                        <input type="hidden" name="hwid" value="<?= htmlspecialchars($uHwid) ?>">
+                                                        <input type="hidden" name="reason" value="">
+                                                        <button type="submit" class="btn btn-danger btn-sm" style="padding:2px 6px;font-size:10px;"><i class="fa-solid fa-ban"></i> Ban</button>
+                                                    </form>
+                                                <?php endif; ?>
+                                            </div>
                                         <?php else: ?>
                                             <span style="color: #64748b; font-size: 11.5px;">(Chưa liên kết)</span>
                                         <?php endif; ?>
@@ -991,6 +1484,7 @@ foreach ($allKeys as $k) {
                                         <div style="display: flex; gap: 5px;">
                                             <!-- Khóa / Mở -->
                                             <form method="POST" style="display:inline;">
+                                                <?= csrfField() ?>
                                                 <input type="hidden" name="action" value="toggle_status">
                                                 <input type="hidden" name="username" value="<?= htmlspecialchars($u['username']) ?>">
                                                 <button type="submit" class="btn btn-sm <?= empty($u['is_active']) ? 'btn-primary' : 'btn-danger' ?>" title="Đổi trạng thái Khóa/Mở">
@@ -1000,6 +1494,7 @@ foreach ($allKeys as $k) {
 
                                             <!-- Reset HWID -->
                                             <form method="POST" style="display:inline;" onsubmit="return confirm('Reset HWID tài khoản <?= htmlspecialchars($u['username']) ?> để liên kết máy mới?');">
+                                                <?= csrfField() ?>
                                                 <input type="hidden" name="action" value="reset_hwid">
                                                 <input type="hidden" name="username" value="<?= htmlspecialchars($u['username']) ?>">
                                                 <button type="submit" class="btn btn-sm" style="background: rgba(6,182,212,0.15); color: #22d3ee;" title="Reset HWID máy">
@@ -1009,6 +1504,7 @@ foreach ($allKeys as $k) {
 
                                             <!-- Xóa User -->
                                             <form method="POST" style="display:inline;" onsubmit="return confirm('Xóa vĩnh viễn tài khoản <?= htmlspecialchars($u['username']) ?>?');">
+                                                <?= csrfField() ?>
                                                 <input type="hidden" name="action" value="delete_user">
                                                 <input type="hidden" name="username" value="<?= htmlspecialchars($u['username']) ?>">
                                                 <button type="submit" class="btn btn-sm btn-danger" title="Xóa tài khoản">
@@ -1032,6 +1528,7 @@ foreach ($allKeys as $k) {
                     <span class="card-title"><i class="fa-solid fa-gears"></i> Cấu Hình Cổng Đăng Ký & Bảo Mật</span>
                 </div>
                 <form method="POST">
+                    <?= csrfField() ?>
                     <input type="hidden" name="action" value="update_settings">
                     <div class="form-row">
                         <div>
@@ -1107,23 +1604,25 @@ foreach ($allKeys as $k) {
                         <tbody>
                             <?php if (empty($allLogs)): ?>
                                 <tr><td colspan="5" style="text-align: center; color: var(--text-muted); padding: 30px;">Chưa có nhật ký nào.</td></tr>
-                            <?php else: foreach (array_slice($allLogs, 0, 50) as $l): ?>
+                            <?php else: foreach (array_slice(array_reverse($allLogs), 0, 80) as $l):
+                                $logType = (string)($l['type'] ?? ($l['action'] ?? 'event'));
+                                $logUser = (string)($l['username'] ?? ($l['key'] ?? ''));
+                                $logMsg = (string)($l['message'] ?? ($l['details'] ?? ''));
+                            ?>
                                 <tr>
-                                    <td style="font-size: 11.5px; color: var(--text-muted);"><?= htmlspecialchars($l['time']) ?></td>
+                                    <td style="font-size: 11.5px; color: var(--text-muted);"><?= htmlspecialchars((string)($l['time'] ?? '')) ?></td>
                                     <td>
-                                        <?php if ($l['type'] === 'login_success'): ?>
-                                            <span class="badge badge-active">Login OK</span>
-                                        <?php elseif ($l['type'] === 'login_fail'): ?>
-                                            <span class="badge badge-blocked">Login Fail</span>
-                                        <?php elseif ($l['type'] === 'register'): ?>
-                                            <span class="badge badge-vip">Register</span>
+                                        <?php if ($logType === 'login_success' || $logType === 'KEY_ACTIVATED'): ?>
+                                            <span class="badge badge-active"><?= htmlspecialchars($logType) ?></span>
+                                        <?php elseif (str_contains($logType, 'FAIL') || str_contains($logType, 'DENY') || str_contains($logType, 'TAMPER') || str_contains($logType, 'REPLAY')): ?>
+                                            <span class="badge badge-blocked"><?= htmlspecialchars($logType) ?></span>
                                         <?php else: ?>
-                                            <span class="badge badge-member"><?= htmlspecialchars($l['type']) ?></span>
+                                            <span class="badge badge-member"><?= htmlspecialchars($logType) ?></span>
                                         <?php endif; ?>
                                     </td>
-                                    <td><strong><?= htmlspecialchars($l['username']) ?></strong></td>
-                                    <td><?= htmlspecialchars($l['message']) ?></td>
-                                    <td><span class="code-box"><?= htmlspecialchars($l['ip'] ?? 'Unknown') ?></span></td>
+                                    <td><strong><?= htmlspecialchars($logUser) ?></strong></td>
+                                    <td><?= htmlspecialchars($logMsg) ?></td>
+                                    <td><span class="code-box"><?= htmlspecialchars((string)($l['ip'] ?? 'Unknown')) ?></span></td>
                                 </tr>
                             <?php endforeach; endif; ?>
                         </tbody>
@@ -1238,6 +1737,18 @@ foreach ($allKeys as $k) {
             if (statusSelect) statusSelect.value = 'all';
             if (durationSelect) durationSelect.value = 'all';
             filterKeys();
+        }
+
+        function promptBanReason(form, hwid) {
+            var reason = prompt('BAN vĩnh viễn thiết bị HWID:\\n' + hwid + '\\n\\nNhập lý do khóa (để trống sẽ dùng mặc định):', 'Vi phạm điều khoản sử dụng');
+            if (reason === null) {
+                return false;
+            }
+            var input = form.querySelector('input[name="reason"]');
+            if (input) {
+                input.value = reason.trim();
+            }
+            return true;
         }
 
         function switchTab(tabId, btn) {

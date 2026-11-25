@@ -15,6 +15,11 @@ name: Build 3105 x PHUCVN IPA
         options:
           - macos-15-intel
           - macos-latest
+      allow_ephemeral_test_keys:
+        description: 'Sinh key test tạm nếu chưa cấu hình GitHub Secrets'
+        required: false
+        default: false
+        type: boolean
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
@@ -25,7 +30,7 @@ permissions:
 
 jobs:
   build:
-    name: Build 3105 x PHUCVN iOS IPA
+    name: Build 3105 x PHUCVN iOS IPA (Hardened)
     runs-on: ${{ inputs.runner || 'macos-15-intel' }}
     timeout-minutes: 45
 
@@ -33,153 +38,134 @@ jobs:
       - name: Checkout source
         uses: actions/checkout@v4
 
-      - name: Check Xcode
+      - name: Verify source structure & Asset Catalog
         shell: bash
         run: |
           set -euo pipefail
           xcodebuild -version
-          xcodebuild -showsdks
-
-      - name: Verify source structure
-        shell: bash
-        run: |
-          set -euo pipefail
-
-          PROJECT="$GITHUB_WORKSPACE/ThreeOneOSFive.xcodeproj"
-          SOURCE="$GITHUB_WORKSPACE/ThreeOneOSFive"
-
-          if [ ! -d "$PROJECT" ]; then
-            echo "::error::ThreeOneOSFive.xcodeproj missing"
-            exit 1
-          fi
-
-          if [ ! -f "$PROJECT/project.pbxproj" ]; then
-            echo "::error::project.pbxproj missing"
-            exit 1
-          fi
-
-          if [ ! -d "$SOURCE" ]; then
-            echo "::error::Source folder missing"
-            exit 1
-          fi
-
-          if [ ! -f "$SOURCE/Info.plist" ]; then
-            echo "::error::Info.plist missing"
-            exit 1
-          fi
-
-          plutil -lint "$SOURCE/Info.plist"
-          plutil -lint "$PROJECT/project.pbxproj"
-
-          echo "Source structure verified."
-
-      - name: Validate Asset Catalog JSON
-        shell: bash
-        run: |
-          set -euo pipefail
-
+          plutil -lint ThreeOneOSFive/Info.plist
+          plutil -lint ThreeOneOSFive.xcodeproj/project.pbxproj
           python3 - <<'PY'
-          import json
-          import sys
+          import json, sys
           from pathlib import Path
-
           root = Path("ThreeOneOSFive/Assets.xcassets")
-
-          if not root.is_dir():
-              sys.exit("ERROR: Assets.xcassets missing")
-
-          files = sorted(root.rglob("Contents.json"))
-
-          if not files:
-              sys.exit("ERROR: No Contents.json found")
-
-          failed = False
-
-          for path in files:
-              print(f"Checking: {path}")
-
-              try:
-                  data = json.loads(
-                      path.read_text(encoding="utf-8-sig")
-                  )
-
-                  if not isinstance(data, dict):
-                      raise ValueError("Invalid JSON structure")
-
-                  for item in data.get("images", []):
-                      filename = item.get("filename")
-
-                      if filename:
-                          image_path = path.parent / filename
-
-                          if not image_path.is_file():
-                              raise FileNotFoundError(
-                                  f"Missing image: {image_path}"
-                              )
-
-                  print("OK")
-
-              except Exception as error:
-                  print(f"INVALID: {path}: {error}")
-                  failed = True
-
-          if failed:
-              sys.exit("Asset Catalog validation failed")
-
-          print("All asset JSON files are valid.")
+          for path in sorted(root.rglob("Contents.json")):
+              data = json.loads(path.read_text(encoding="utf-8-sig"))
+              for item in data.get("images", []):
+                  fn = item.get("filename")
+                  if fn and not (path.parent / fn).is_file():
+                      sys.exit(f"Missing image asset: {path.parent / fn}")
+          print("Assets verified.")
           PY
 
-      - name: Locate Xcode project
-        id: locate
-        shell: bash
-        run: |
-          set -euo pipefail
-
-          PROJECT="$GITHUB_WORKSPACE/ThreeOneOSFive.xcodeproj"
-
-          echo "project=$PROJECT" >> "$GITHUB_OUTPUT"
-
-      - name: List build targets
+      - name: Prepare Staging Copy & Inject Obfuscated Security Build Pass
+        id: stage
         env:
-          PROJECT: ${{ steps.locate.outputs.project }}
+          SEC_SERVER_X25519_PUB: ${{ secrets.SEC_SERVER_X25519_PUB }}
+          SEC_SERVER_ED25519_PUB: ${{ secrets.SEC_SERVER_ED25519_PUB }}
+          SEC_PEPPER: ${{ secrets.SEC_PEPPER }}
+          SEC_BUNDLE_MASTER_KEY: ${{ secrets.SEC_BUNDLE_MASTER_KEY }}
+          SEC_SPKI_PIN_PRIMARY: ${{ secrets.SEC_SPKI_PIN_PRIMARY }}
+          SEC_SPKI_PIN_BACKUP: ${{ secrets.SEC_SPKI_PIN_BACKUP }}
+          SEC_API_HOST: ${{ secrets.SEC_API_HOST }}
+          SEC_API_PATH: ${{ secrets.SEC_API_PATH }}
+          ALLOW_EPHEMERAL: ${{ inputs.allow_ephemeral_test_keys || 'false' }}
         shell: bash
         run: |
           set -euo pipefail
-          xcodebuild -list -project "$PROJECT"
+          STAGE="$RUNNER_TEMP/obf-stage"
+          rm -rf "$STAGE"
+          mkdir -p "$STAGE"
+          /usr/bin/ditto "$GITHUB_WORKSPACE" "$STAGE"
+          rm -rf "$STAGE/.git" "$STAGE/serverkey" "$STAGE/serverkey_core" "$STAGE/dist"
 
-      - name: Build libsec_core.dylib (ARM64 iOS)
-        shell: bash
-        run: |
-          set -uo pipefail
-          echo "Building libsec_core.dylib for iOS ARM64..."
-          rustup target add aarch64-apple-ios 2>/dev/null || true
-          if [ -d "sec_core" ]; then
-            cd sec_core
-            export IPHONEOS_DEPLOYMENT_TARGET=16.0
-            cargo build --release --target aarch64-apple-ios || true
-            cd ..
-            find target -name "libsec_core.dylib" 2>/dev/null || true
+          API_HOST="${SEC_API_HOST:-20-10.store}"
+          API_PATH="${SEC_API_PATH:-/api/v3}"
+
+          # Resolve SPKI pin from live server if secret is unset
+          SPKI1="${SEC_SPKI_PIN_PRIMARY:-}"
+          if [ -z "$SPKI1" ]; then
+            SPKI1=$(echo | openssl s_client -servername "$API_HOST" -connect "$API_HOST:443" 2>/dev/null \
+              | openssl x509 -pubkey -noout 2>/dev/null \
+              | openssl pkey -pubin -outform der 2>/dev/null \
+              | openssl dgst -sha256 -binary | xxd -p -c 256 || true)
+          fi
+          SPKI1="${SPKI1:-0000000000000000000000000000000000000000000000000000000000000000}"
+          SPKI2="${SEC_SPKI_PIN_BACKUP:-0000000000000000000000000000000000000000000000000000000000000000}"
+
+          NON_STRICT=""
+          if [ -z "$SEC_SERVER_X25519_PUB" ] || [ -z "$SEC_SERVER_ED25519_PUB" ] || [ -z "$SEC_PEPPER" ] || [ -z "$SEC_BUNDLE_MASTER_KEY" ]; then
+            if [ "$ALLOW_EPHEMERAL" = "true" ]; then
+              echo "::warning::Missing GitHub Secrets -> generating ephemeral CI test keys (non-production build!)"
+              SEC_SERVER_X25519_PUB=$(openssl rand -hex 32)
+              SEC_SERVER_ED25519_PUB=$(openssl rand -hex 32)
+              SEC_PEPPER=$(openssl rand -hex 32)
+              SEC_BUNDLE_MASTER_KEY=$(openssl rand -hex 32)
+              NON_STRICT="--non-strict"
+            else
+              echo "::error::Missing SEC_SERVER_X25519_PUB / SEC_SERVER_ED25519_PUB / SEC_PEPPER / SEC_BUNDLE_MASTER_KEY GitHub Secrets!"
+              exit 1
+            fi
           fi
 
-      - name: Build 3105
-        id: build
+          MARKER_FILE="$RUNNER_TEMP/sec_seal_marker.hex"
+          python3 "$STAGE/scripts/obfuscate_build.py" \
+            --workspace "$STAGE" \
+            --x25519-pub "$SEC_SERVER_X25519_PUB" \
+            --ed25519-pub "$SEC_SERVER_ED25519_PUB" \
+            --pepper "$SEC_PEPPER" \
+            --bundle-master "$SEC_BUNDLE_MASTER_KEY" \
+            --spki-primary "$SPKI1" \
+            --spki-backup "$SPKI2" \
+            --api-host "$API_HOST" \
+            --api-path "$API_PATH" \
+            $NON_STRICT \
+            --marker-out "$MARKER_FILE"
+
+          echo "stage=$STAGE" >> "$GITHUB_OUTPUT"
+          echo "marker_file=$MARKER_FILE" >> "$GITHUB_OUTPUT"
+
+      - name: Build, Strip & Self-Seal libsec_core.dylib (ARM64 iOS)
+        id: secdylib
         env:
-          PROJECT: ${{ steps.locate.outputs.project }}
+          STAGE: ${{ steps.stage.outputs.stage }}
+          MARKER_FILE: ${{ steps.stage.outputs.marker_file }}
         shell: bash
         run: |
-          set -uo pipefail
+          set -euo pipefail
+          rustup target add aarch64-apple-ios
+          export IPHONEOS_DEPLOYMENT_TARGET=16.0
+          cd "$STAGE/sec_core"
+          cargo build --release --target aarch64-apple-ios
+          DYLIB="$STAGE/sec_core/target/aarch64-apple-ios/release/libsec_core.dylib"
+          if [ ! -s "$DYLIB" ]; then
+            echo "::error::libsec_core.dylib build failed!"
+            exit 1
+          fi
+          install_name_tool -id "@executable_path/Frameworks/libsec_core.dylib" "$DYLIB"
+          strip -x -S "$DYLIB"
+          MARKER_HEX=$(cat "$MARKER_FILE")
+          SEC_HASH=$(python3 "$STAGE/scripts/macho_hash.py" seal "$DYLIB" --marker-hex "$MARKER_HEX")
+          rm -f "$MARKER_FILE"
+          echo "Libsec_core __TEXT SHA-256 (sealed): $SEC_HASH"
+          echo "dylib=$DYLIB" >> "$GITHUB_OUTPUT"
+          echo "sec_hash=$SEC_HASH" >> "$GITHUB_OUTPUT"
 
+      - name: Build & Hard-Strip 3105 (Linked against libsec_core.dylib)
+        id: build
+        env:
+          STAGE: ${{ steps.stage.outputs.stage }}
+          DYLIB: ${{ steps.secdylib.outputs.dylib }}
+        shell: bash
+        run: |
+          set -euo pipefail
           BUILD_OUTPUT="$RUNNER_TEMP/3105-products"
           LOG_FILE="$RUNNER_TEMP/3105-build.log"
-
           rm -rf "$BUILD_OUTPUT"
-
-          echo "Starting Xcode build..."
-
-          set +e
+          DYLIB_DIR=$(dirname "$DYLIB")
 
           xcodebuild \
-            -project "$PROJECT" \
+            -project "$STAGE/ThreeOneOSFive.xcodeproj" \
             -target "3105" \
             -configuration Release \
             -sdk iphoneos \
@@ -190,135 +176,112 @@ jobs:
             CODE_SIGNING_ALLOWED=NO \
             CODE_SIGNING_REQUIRED=NO \
             CODE_SIGN_IDENTITY="" \
+            COPY_PHASE_STRIP=YES \
+            STRIP_INSTALLED_PRODUCT=YES \
+            STRIP_STYLE=all \
+            DEAD_CODE_STRIPPING=YES \
+            SWIFT_REFLECTION_METADATA_LEVEL=none \
+            OTHER_LDFLAGS="-lz -Wl,-needed_library,$DYLIB" \
             2>&1 | tee "$LOG_FILE"
 
-          BUILD_STATUS=${PIPESTATUS[0]}
-
-          set -e
-
           APP="$BUILD_OUTPUT/3105.app"
-
-          if [ "$BUILD_STATUS" -ne 0 ]; then
-            echo "::error::Xcode build failed: $BUILD_STATUS"
-            echo "=== LAST LOG LINES ==="
-            tail -n 60 "$LOG_FILE"
-            echo "=== SUMMARY OF ERRORS ==="
-            grep -C 3 -E "\.swift:[0-9]+:[0-9]+: error:" "$LOG_FILE" || grep -E "error:|fatal error:" "$LOG_FILE" || true
-            exit 1
-          fi
-
           if [ ! -d "$APP" ]; then
-            echo "::error::3105.app was not generated"
-            find "$BUILD_OUTPUT" -maxdepth 5 -print
+            echo "::error::3105.app was not produced"
             exit 1
           fi
 
-          # Embed libsec_core.dylib into app Frameworks
+          EXECUTABLE=$(/usr/libexec/PlistBuddy -c "Print :CFBundleExecutable" "$APP/Info.plist")
+          BUNDLE_ID=$(/usr/libexec/PlistBuddy -c "Print :CFBundleIdentifier" "$APP/Info.plist")
+          APP_VERSION=$(/usr/libexec/PlistBuddy -c "Print :CFBundleShortVersionString" "$APP/Info.plist")
+          APP_BUILD=$(/usr/libexec/PlistBuddy -c "Print :CFBundleVersion" "$APP/Info.plist")
+
           mkdir -p "$APP/Frameworks"
-          find "$GITHUB_WORKSPACE" -name "libsec_core.dylib" -exec cp -f {} "$APP/Frameworks/" \; 2>/dev/null || true
+          cp -f "$DYLIB" "$APP/Frameworks/libsec_core.dylib"
+          strip -x -S "$APP/$EXECUTABLE"
 
-          echo "BUILD SUCCESSFUL"
-          ls -lah "$APP"
+          # Replace any Xcode-copied .3105 files with V4 encrypted versions from staging
+          cp -f "$STAGE"/*.3105 "$APP/" 2>/dev/null || true
 
-      - name: Verify application
-        id: app
-        shell: bash
-        run: |
-          set -euo pipefail
-
-          APP="$RUNNER_TEMP/3105-products/3105.app"
-
-          if [ ! -d "$APP" ]; then
-            echo "::error::3105.app not found"
+          # Verify LC_LOAD_DYLIB injection & anti-string/symbol leaks
+          echo "Checking otool -L..."
+          otool -L "$APP/$EXECUTABLE"
+          if ! otool -L "$APP/$EXECUTABLE" | grep -q "@executable_path/Frameworks/libsec_core.dylib"; then
+            echo "::error::LC_LOAD_DYLIB missing for @executable_path/Frameworks/libsec_core.dylib!"
             exit 1
           fi
 
-          if [ ! -s "$APP/Info.plist" ]; then
-            echo "::error::Info.plist missing or empty"
-            exit 1
-          fi
+          for bin in "$APP/$EXECUTABLE" "$APP/Frameworks/libsec_core.dylib"; do
+            for forbidden in "3105PATCH" "bplist00" "PHUCVN-VIP-9999" "api.php" "KeyAuthManager" "SecCoreBridge" "20-10.store"; do
+              if strings "$bin" | grep -Fqi "$forbidden"; then
+                echo "::error::Sensitive string '$forbidden' leaked inside $bin!"
+                exit 1
+              fi
+            done
+          done
 
-          plutil -lint "$APP/Info.plist"
+          for pfile in "$APP"/*.3105; do
+            if grep -qaE "3105PATCH|bplist00|publicContentKey" "$pfile"; then
+              echo "::error::Plaintext header leaked inside V4 asset $pfile!"
+              exit 1
+            fi
+          done
 
-          EXECUTABLE=$(
-            /usr/libexec/PlistBuddy \
-              -c "Print :CFBundleExecutable" "$APP/Info.plist"
-          )
-
-          BUNDLE_ID=$(
-            /usr/libexec/PlistBuddy \
-              -c "Print :CFBundleIdentifier" "$APP/Info.plist"
-          )
-
-          if [ ! -s "$APP/$EXECUTABLE" ]; then
-            echo "::error::Executable missing: $EXECUTABLE"
-            exit 1
-          fi
-
-          echo "Bundle ID: $BUNDLE_ID"
-          echo "Executable: $EXECUTABLE"
-
-          file "$APP/$EXECUTABLE"
+          APP_HASH=$(python3 "$STAGE/scripts/macho_hash.py" hash "$APP/$EXECUTABLE")
+          echo "3105 __TEXT SHA-256: $APP_HASH"
 
           echo "app=$APP" >> "$GITHUB_OUTPUT"
+          echo "bundle_id=$BUNDLE_ID" >> "$GITHUB_OUTPUT"
+          echo "app_version=$APP_VERSION" >> "$GITHUB_OUTPUT"
+          echo "app_build=$APP_BUILD" >> "$GITHUB_OUTPUT"
+          echo "app_hash=$APP_HASH" >> "$GITHUB_OUTPUT"
 
-      - name: Create IPA
+      - name: Create & Verify IPA
+        id: ipa
         env:
-          APP: ${{ steps.app.outputs.app }}
+          APP: ${{ steps.build.outputs.app }}
         shell: bash
         run: |
           set -euo pipefail
-
           PACKAGE="$RUNNER_TEMP/3105-package"
           OUTPUT="$GITHUB_WORKSPACE/3105-x-phucvn-unsigned.ipa"
-
-          rm -rf "$PACKAGE"
+          rm -rf "$PACKAGE" "$OUTPUT"
           mkdir -p "$PACKAGE/Payload"
-
-          /usr/bin/ditto \
-            "$APP" \
-            "$PACKAGE/Payload/3105.app"
-
-          # Include .3105 preset mod files in the app bundle
-          cp -f "$GITHUB_WORKSPACE"/AimDrag_85_PhucVN_FFVN.3105 "$PACKAGE/Payload/3105.app/" 2>/dev/null || true
-          cp -f "$GITHUB_WORKSPACE"/Antena_PhucVN_FFVN.3105 "$PACKAGE/Payload/3105.app/" 2>/dev/null || true
-          cp -f "$GITHUB_WORKSPACE"/DinhVi_Chams_PhucVN_FFVN.3105 "$PACKAGE/Payload/3105.app/" 2>/dev/null || true
-          cp -f "$GITHUB_WORKSPACE"/DinhVi_Sung_PhucVN_FFVN.3105 "$PACKAGE/Payload/3105.app/" 2>/dev/null || true
-          cp -f "$GITHUB_WORKSPACE"/Aim_Neck_PhucVN_FFVN.3105 "$PACKAGE/Payload/3105.app/" 2>/dev/null || true
-          cp -f "$GITHUB_WORKSPACE"/AimNeck_Antena_PhucVN_FFVN.3105 "$PACKAGE/Payload/3105.app/" 2>/dev/null || true
-          cp -f "$GITHUB_WORKSPACE"/AimDrag_85_Antena_PhucVN_FFVN.3105 "$PACKAGE/Payload/3105.app/" 2>/dev/null || true
-          cp -f "$GITHUB_WORKSPACE"/*.3105 "$PACKAGE/Payload/3105.app/" 2>/dev/null || true
-
-          # Include libsec_core.dylib in Frameworks
-          mkdir -p "$PACKAGE/Payload/3105.app/Frameworks"
-          find "$GITHUB_WORKSPACE" -name "libsec_core.dylib" -exec cp -f {} "$PACKAGE/Payload/3105.app/Frameworks/" \; 2>/dev/null || true
-          ls -lh "$PACKAGE/Payload/3105.app/Frameworks" 2>/dev/null || true
-
+          /usr/bin/ditto "$APP" "$PACKAGE/Payload/3105.app"
           cd "$PACKAGE"
-
           /usr/bin/zip -qry "$OUTPUT" Payload
-
           /usr/bin/unzip -tq "$OUTPUT"
-
-          echo "IPA CREATED SUCCESSFULLY"
+          /usr/bin/unzip -l "$OUTPUT" | grep -q 'Payload/3105.app/Frameworks/libsec_core.dylib'
           ls -lh "$OUTPUT"
 
-      - name: Verify IPA package
+      - name: Register Build Hashes with Server Key
+        if: env.SEC_CI_SYNC_URL != '' && env.SEC_CI_SYNC_SECRET != ''
+        env:
+          STAGE: ${{ steps.stage.outputs.stage }}
+          SEC_CI_SYNC_URL: ${{ secrets.SEC_CI_SYNC_URL }}
+          SEC_CI_SYNC_SECRET: ${{ secrets.SEC_CI_SYNC_SECRET }}
+          BUNDLE_ID: ${{ steps.build.outputs.bundle_id }}
+          APP_VERSION: ${{ steps.build.outputs.app_version }}
+          APP_BUILD: ${{ steps.build.outputs.app_build }}
+          APP_HASH: ${{ steps.build.outputs.app_hash }}
+          SEC_HASH: ${{ steps.secdylib.outputs.sec_hash }}
         shell: bash
         run: |
           set -euo pipefail
+          python3 "$STAGE/scripts/ci_sync.py" \
+            --url "$SEC_CI_SYNC_URL" \
+            --secret "$SEC_CI_SYNC_SECRET" \
+            --package-id "$BUNDLE_ID" \
+            --version "$APP_VERSION" \
+            --build "$APP_BUILD" \
+            --app-hash "$APP_HASH" \
+            --sec-hash "$SEC_HASH" \
+            --note "GH Actions #${{ github.run_number }}"
 
-          IPA="$GITHUB_WORKSPACE/3105-x-phucvn-unsigned.ipa"
-
-          if [ ! -s "$IPA" ]; then
-            echo "::error::IPA file missing or empty"
-            exit 1
-          fi
-
-          /usr/bin/unzip -l "$IPA" | grep -E \
-            'Payload/3105.app/(Info.plist|3105)$'
-
-          echo "IPA verification successful."
+      - name: Clean Ephemeral Staging Secrets
+        if: always()
+        shell: bash
+        run: |
+          rm -rf "$RUNNER_TEMP/obf-stage" "$RUNNER_TEMP/sec_seal_marker.hex"
 
       - name: Upload IPA artifact
         uses: actions/upload-artifact@v4
@@ -342,9 +305,8 @@ jobs:
         if: success()
         with:
           tag_name: "latest"
-          name: "3105 x PHUCVN Latest IPA"
-          body: "Bản build IPA mới nhất tự động từ GitHub Actions cho 3105 x PHUCVN."
+          name: "3105 x PHUCVN Latest IPA (Hardened V3/V4)"
+          body: "Bản build IPA bảo mật V3/V4 tự động từ GitHub Actions."
           files: 3105-x-phucvn-unsigned.ipa
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-

@@ -2066,6 +2066,12 @@ struct ProxyModPresetDetailView: View {
 
     private func applyMod() {
         guard !isWorking else { return }
+        guard let ticket = KeyAuthManager.shared.activeVerifiedTicket else {
+            alertTitle = "Yêu cầu xác thực"
+            alertMessage = "Phiên bản quyền không hợp lệ hoặc đã hết hạn. Vui lòng xác thực lại Key."
+            showAlert = true
+            return
+        }
         isWorking = true
         Task.detached(priority: .userInitiated) {
             do {
@@ -2079,8 +2085,17 @@ struct ProxyModPresetDetailView: View {
                     return
                 }
 
-                let decoded = try PatchPackageCodec.decode(data, password: nil)
-                _ = try DevicePatchService.apply(project: decoded.project)
+                var decoded = try PatchPackageCodec.isV4(data)
+                    ? PatchPackageCodec.decodeV4(data, ticket: ticket)
+                    : PatchPackageCodec.decode(data, password: nil)
+                var secureProject = decoded.project
+                secureProject.isPrivate = true
+                _ = try DevicePatchService.apply(project: secureProject)
+                for idx in secureProject.rules.indices {
+                    secureWipeData(&secureProject.rules[idx].replacementData)
+                }
+                var ck = decoded.contentKey
+                secureWipeData(&ck)
                 await MainActor.run {
                     isWorking = false
                     statusToggle.toggle()

@@ -1,0 +1,54 @@
+name: Build & Verify Server Key Package
+
+on:
+  push:
+    paths:
+      - 'serverkey/**'
+      - 'serverkey_core/**'
+      - 'scripts/build_serverkey.py'
+      - 'tests/**'
+      - '.github/workflows/build_serverkey.yml'
+  workflow_dispatch:
+
+jobs:
+  build_and_test:
+    name: Build serverkey_core + PHP Lint + Security Test Suite
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust & PHP
+        run: |
+          sudo apt-get update && sudo apt-get install -y php-cli php-curl
+          php -m | grep -i sodium
+
+      - name: Build serverkey_core (Release)
+        run: |
+          cd serverkey_core
+          cargo test --release
+          cargo build --release
+
+      - name: PHP Syntax & Security Audit Checks
+        run: |
+          for f in serverkey/*.php serverkey/lib/*.php serverkey/api/*.php; do
+            php -l "$f"
+          done
+
+      - name: Run 5-Scenario Zero-Trust Security Test Suite
+        run: |
+          python3 scripts/v3_crypto.py
+          python3 tests/test_security_suite.py --rust-bin serverkey_core/target/release/serverkey_core
+
+      - name: Package Hardened serverkey Deployment Artifact
+        run: |
+          python3 scripts/build_serverkey.py --src serverkey --out dist/serverkey --rust-bin serverkey_core/target/release/serverkey_core
+
+      - name: Upload Hardened Server Key Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: serverkey-hardened-dist
+          path: dist/serverkey
+          if-no-files-found: error
+          retention-days: 14

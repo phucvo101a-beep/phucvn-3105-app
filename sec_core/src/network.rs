@@ -1,28 +1,21 @@
-//! Pure-Rust TLS Networking with SPKI Certificate Pinning
-//! Completely bypasses iOS CFNetwork / NSURLSession and system proxy configurations
-//! 100% compatible with LocalDevVPN (`utun*` interfaces)
+//! Pure-Rust TLS Networking with SPKI Certificate Pinning & Chunked HTTP/1.1 Support
 
-use std::io::{Read, Write};
-use std::net::TcpStream;
-use std::sync::Arc;
-use std::time::Duration;
 use obfstr::obfstr;
 use ring::digest::{digest, SHA256};
 use rustls::client::danger::{HandshakeSignatureValid, ServerCertVerified, ServerCertVerifier};
 use rustls::pki_types::{CertificateDer, ServerName, UnixTime};
 use rustls::{ClientConfig, ClientConnection, DigitallySignedStruct, Error as RustlsError, SignatureScheme, Stream};
+use std::io::{Read, Write};
+use std::net::{TcpStream, ToSocketAddrs};
+use std::sync::Arc;
+use std::time::Duration;
+use subtle::ConstantTimeEq;
 
-/// LocalDevVPN Compatibility:
-/// LocalDevVPN establishes an in-process `utun*` interface.
-/// `post_encrypted_json` uses pure-Rust TcpStream connecting directly over DNS/IP
-/// without relying on CFNetwork or system proxy settings (.no_proxy()), ensuring
-/// 100% compatibility with LocalDevVPN while blocking Proxyman/Reqable/SSL Kill Switch.
 #[inline(always)]
 pub fn is_localdev_vpn_allowed() -> bool {
     true
 }
 
-/// Certificate Pinning Verifier: Pins Subject Public Key Info (SPKI) SHA-256 Hash
 #[derive(Debug)]
 pub struct SpkiPinningVerifier {
     pub primary_spki_pin: [u8; 32],
@@ -39,37 +32,35 @@ impl ServerCertVerifier for SpkiPinningVerifier {
         _ocsp_response: &[u8],
         _now: UnixTime,
     ) -> Result<ServerCertVerified, RustlsError> {
-        // 1. Verify hostname matches
         let name_str = match server_name {
             ServerName::DnsName(dns) => dns.as_ref(),
             _ => return Err(RustlsError::General(obfstr!("Non-DNS name rejected").to_string())),
         };
-
         if name_str != self.expected_domain {
             return Err(RustlsError::General(obfstr!("Hostname mismatch").to_string()));
         }
 
-        // 2. Extract SPKI from X.509 DER Certificate
         let cert_der = end_entity.as_ref();
         let spki_bytes = extract_spki_der(cert_der)
             .ok_or_else(|| RustlsError::General(obfstr!("SPKI extraction failed").to_string()))?;
-
-        // 3. Compute SHA-256 of SPKI
         let spki_hash = digest(&SHA256, spki_bytes);
+        let cert_hash = digest(&SHA256, cert_der);
 
-        // 4. Compare against Primary and Backup pins
-        if spki_hash.as_ref() == self.primary_spki_pin || spki_hash.as_ref() == self.backup_spki_pin {
+        let zero = [0u8; 32];
+        let has_primary = !bool::from(self.primary_spki_pin.ct_eq(&zero));
+        let has_backup = !bool::from(self.backup_spki_pin.ct_eq(&zero));
+
+        let matches_primary = has_primary
+            && (bool::from(spki_hash.as_ref().ct_eq(&self.primary_spki_pin))
+                || bool::from(cert_hash.as_ref().ct_eq(&self.primary_spki_pin)));
+        let matches_backup = has_backup
+            && (bool::from(spki_hash.as_ref().ct_eq(&self.backup_spki_pin))
+                || bool::from(cert_hash.as_ref().ct_eq(&self.backup_spki_pin)));
+
+        if matches_primary || matches_backup {
             Ok(ServerCertVerified::assertion())
         } else {
-            // Also allow leaf certificate full hash match if pin was configured as leaf cert pin
-            let cert_hash = digest(&SHA256, cert_der);
-            if cert_hash.as_ref() == self.primary_spki_pin || cert_hash.as_ref() == self.backup_spki_pin {
-                Ok(ServerCertVerified::assertion())
-            } else {
-                Err(RustlsError::General(
-                    obfstr!("Certificate Pinning Violation: SPKI hash mismatch").to_string(),
-                ))
-            }
+            Err(RustlsError::General(obfstr!("SPKI pin mismatch").to_string()))
         }
     }
 
@@ -102,45 +93,27 @@ impl ServerCertVerifier for SpkiPinningVerifier {
     }
 }
 
-/// Helper to parse X.509 ASN.1 DER to locate the `SubjectPublicKeyInfo` sequence
 fn extract_spki_der(cert_der: &[u8]) -> Option<&[u8]> {
     if cert_der.len() < 30 || cert_der[0] != 0x30 {
         return None;
     }
-
     let mut idx = 1;
     let _cert_len = parse_der_length(cert_der, &mut idx)?;
-
-    // Enter tbsCertificate
     if idx >= cert_der.len() || cert_der[idx] != 0x30 {
         return None;
     }
     idx += 1;
     let _tbs_len = parse_der_length(cert_der, &mut idx)?;
-
-    // Optional [0] EXPLICIT version
     if idx < cert_der.len() && cert_der[idx] == 0xA0 {
         idx += 1;
         let vlen = parse_der_length(cert_der, &mut idx)?;
         idx += vlen;
     }
-
-    // Skip serialNumber (INTEGER 0x02)
     skip_der_tlv(cert_der, &mut idx, 0x02)?;
-
-    // Skip signature (SEQUENCE 0x30)
     skip_der_tlv(cert_der, &mut idx, 0x30)?;
-
-    // Skip issuer (SEQUENCE 0x30)
     skip_der_tlv(cert_der, &mut idx, 0x30)?;
-
-    // Skip validity (SEQUENCE 0x30)
     skip_der_tlv(cert_der, &mut idx, 0x30)?;
-
-    // Skip subject (SEQUENCE 0x30)
     skip_der_tlv(cert_der, &mut idx, 0x30)?;
-
-    // Now at SubjectPublicKeyInfo (SEQUENCE 0x30)
     let spki_start = idx;
     if idx >= cert_der.len() || cert_der[idx] != 0x30 {
         return None;
@@ -148,7 +121,6 @@ fn extract_spki_der(cert_der: &[u8]) -> Option<&[u8]> {
     idx += 1;
     let spki_content_len = parse_der_length(cert_der, &mut idx)?;
     let spki_end = idx + spki_content_len;
-
     if spki_end <= cert_der.len() {
         Some(&cert_der[spki_start..spki_end])
     } else {
@@ -192,28 +164,63 @@ fn skip_der_tlv(der: &[u8], idx: &mut usize, expected_tag: u8) -> Option<()> {
     }
 }
 
-/// Send an encrypted HTTP POST request to `https://<domain><path>` directly over pinned TLS
+fn decode_chunked_body(raw: &[u8]) -> Result<Vec<u8>, String> {
+    let mut out = Vec::with_capacity(raw.len());
+    let mut pos = 0usize;
+    while pos < raw.len() {
+        let Some(rel_crlf) = raw[pos..].windows(2).position(|w| w == b"\r\n") else {
+            break;
+        };
+        let size_line = std::str::from_utf8(&raw[pos..pos + rel_crlf])
+            .map_err(|_| "Chunk header UTF8 error".to_string())?;
+        let hex_part = size_line.split(';').next().unwrap_or("").trim();
+        let chunk_len = usize::from_str_radix(hex_part, 16)
+            .map_err(|_| "Chunk size parse error".to_string())?;
+        pos += rel_crlf + 2;
+        if chunk_len == 0 {
+            break;
+        }
+        if pos + chunk_len > raw.len() {
+            return Err("Truncated HTTP chunk".to_string());
+        }
+        out.extend_from_slice(&raw[pos..pos + chunk_len]);
+        pos += chunk_len;
+        if pos + 2 <= raw.len() && &raw[pos..pos + 2] == b"\r\n" {
+            pos += 2;
+        }
+    }
+    Ok(out)
+}
+
+fn connect_tcp_any(domain: &str, port: u16) -> Result<TcpStream, String> {
+    let host_port = format!("{domain}:{port}");
+    let addrs = host_port
+        .to_socket_addrs()
+        .map_err(|_| obfstr!("DNS resolution failed").to_string())?;
+    let mut last_err = String::from("No socket address");
+    for addr in addrs {
+        match TcpStream::connect_timeout(&addr, Duration::from_secs(8)) {
+            Ok(s) => return Ok(s),
+            Err(e) => last_err = e.to_string(),
+        }
+    }
+    Err(format!("TCP connect error: {last_err}"))
+}
+
+/// Sends an encrypted HTTP/1.1 POST request over pinned TLS to `https://<domain><path>`.
 pub fn post_encrypted_json(
     domain: &str,
     path: &str,
     json_body: &str,
     primary_pin: [u8; 32],
     backup_pin: [u8; 32],
+    require_pin: bool,
 ) -> Result<String, String> {
-    // 1. Establish raw TCP connection
-    let addr = format!("{}:443", domain);
-    let tcp_stream = TcpStream::connect_timeout(
-        &addr
-            .parse()
-            .or_else(|_| {
-                use std::net::ToSocketAddrs;
-                addr.to_socket_addrs().map(|mut it| it.next().unwrap())
-            })
-            .map_err(|e| format!("DNS/TCP connect error: {:?}", e))?,
-        Duration::from_secs(8),
-    )
-    .map_err(|e| format!("TCP connection timeout: {:?}", e))?;
+    if require_pin && primary_pin == [0u8; 32] && backup_pin == [0u8; 32] {
+        return Err(obfstr!("SPKI pin missing in pinned release build").to_string());
+    }
 
+    let tcp_stream = connect_tcp_any(domain, 443)?;
     tcp_stream
         .set_read_timeout(Some(Duration::from_secs(12)))
         .map_err(|e| e.to_string())?;
@@ -221,7 +228,6 @@ pub fn post_encrypted_json(
         .set_write_timeout(Some(Duration::from_secs(12)))
         .map_err(|e| e.to_string())?;
 
-    // 2. Setup TLS with Custom SPKI Pinning Verifier
     let verifier = Arc::new(SpkiPinningVerifier {
         primary_spki_pin: primary_pin,
         backup_spki_pin: backup_pin,
@@ -238,44 +244,56 @@ pub fn post_encrypted_json(
     .with_no_client_auth();
 
     let server_name = ServerName::try_from(domain.to_string())
-        .map_err(|e| format!("Invalid DNS name: {:?}", e))?;
+        .map_err(|_| obfstr!("Invalid TLS server name").to_string())?;
 
     let mut conn = ClientConnection::new(Arc::new(client_config), server_name)
-        .map_err(|e| format!("TLS connection error: {:?}", e))?;
+        .map_err(|_| obfstr!("TLS handshake setup error").to_string())?;
 
-    let mut sock = Stream::new(&mut conn, &mut (tcp_stream));
+    let mut stream_owner = tcp_stream;
+    let mut sock = Stream::new(&mut conn, &mut stream_owner);
 
-    // 3. Format HTTP/1.1 POST Request
-    let request = format!(
-        "POST {} HTTP/1.1\r\n\
-         Host: {}\r\n\
-         User-Agent: 3105SecCore/2.0\r\n\
-         Content-Type: application/json\r\n\
-         Content-Length: {}\r\n\
-         Connection: close\r\n\
-         \r\n\
-         {}",
+    let req = format!(
+        "POST {} HTTP/1.1\r\nHost: {}\r\nUser-Agent: 3105SecCore/3.0\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
         path,
         domain,
         json_body.len(),
         json_body
     );
 
-    sock.write_all(request.as_bytes())
-        .map_err(|e| format!("Socket write error: {:?}", e))?;
-    sock.flush().map_err(|e| format!("Socket flush error: {:?}", e))?;
+    sock.write_all(req.as_bytes())
+        .map_err(|_| obfstr!("TLS write failed").to_string())?;
+    sock.flush()
+        .map_err(|_| obfstr!("TLS flush failed").to_string())?;
 
-    // 4. Read HTTP Response
     let mut response_bytes = Vec::new();
-    sock.read_to_end(&mut response_bytes)
-        .map_err(|e| format!("Socket read error: {:?}", e))?;
-
-    let response_str = String::from_utf8_lossy(&response_bytes);
-
-    // Extract body after \r\n\r\n
-    if let Some(pos) = response_str.find("\r\n\r\n") {
-        Ok(response_str[pos + 4..].to_string())
-    } else {
-        Err(obfstr!("Malformed HTTP response").to_string())
+    let _ = sock.read_to_end(&mut response_bytes);
+    if response_bytes.is_empty() {
+        return Err(obfstr!("Empty TLS response").to_string());
     }
+
+    let Some(hdr_end) = response_bytes.windows(4).position(|w| w == b"\r\n\r\n") else {
+        return Err(obfstr!("Malformed HTTP response").to_string());
+    };
+    let hdr_str = String::from_utf8_lossy(&response_bytes[..hdr_end]);
+    let body_slice = &response_bytes[hdr_end + 4..];
+    let lower_hdr = hdr_str.to_ascii_lowercase();
+
+    let status_code = hdr_str
+        .lines()
+        .next()
+        .and_then(|line| line.split_whitespace().nth(1))
+        .and_then(|s| s.parse::<u16>().ok())
+        .unwrap_or(0);
+
+    let decoded_body = if lower_hdr.contains(obfstr!("transfer-encoding: chunked")) {
+        decode_chunked_body(body_slice)?
+    } else {
+        body_slice.to_vec()
+    };
+
+    let body_text = String::from_utf8_lossy(&decoded_body).to_string();
+    if status_code >= 400 || status_code == 0 {
+        return Err(format!("HTTP {status_code}: {body_text}"));
+    }
+    Ok(body_text)
 }

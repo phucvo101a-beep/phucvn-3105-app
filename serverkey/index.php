@@ -1,7 +1,4 @@
 <?php
-/**
- * PHUCVN STUDIO - Server Key Management Control Center
- * Chuyển thẳng vào Cổng Quản Trị Viên (Admin Gatekeeper)
- * Đã đóng và xóa bỏ hoàn toàn cổng đăng ký công khai.
- */
-require_once __DIR__ . '/admin.php';
+http_response_code(403);
+header('Content-Type: text/plain; charset=utf-8');
+echo "PHUCVN 3105 Zero-Trust License Gateway V3";

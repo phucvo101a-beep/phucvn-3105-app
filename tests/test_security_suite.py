@@ -1,0 +1,871 @@
+#!/usr/bin/env python3
+"""
+Comprehensive 5-Scenario Zero-Trust Security Verification Suite for PHUCVN 3105.
+Runs natively on Python 3.12 stdlib AND optionally cross-tests live compiled
+`serverkey_core` (--rust-bin) or `php` (--php-bin) engines when present.
+"""
+
+import argparse
+import base64
+import hashlib
+import hmac
+import json
+import os
+import shutil
+import struct
+import subprocess
+import sys
+import tempfile
+import time
+import unittest
+from pathlib import Path
+from typing import Dict, Optional, Tuple
+
+REPO_ROOT = Path(__file__).resolve().parent.parent
+SCRIPTS_DIR = REPO_ROOT / "scripts"
+sys.path.insert(0, str(SCRIPTS_DIR))
+
+import build_serverkey
+import macho_hash
+import obfuscate_build
+import pack_3105
+import v3_crypto
+
+
+def compare_semver(a: str, b: str) -> int:
+    def parse(s: str):
+        clean = s.strip().lstrip("vV").split("-")[0].split("+")[0]
+        parts = [int("".join(c for c in p if c.isdigit()) or "0") for p in clean.split(".")]
+        while len(parts) < 3:
+            parts.append(0)
+        return parts
+
+    pa, pb = parse(a), parse(b)
+    return -1 if pa < pb else (1 if pa > pb else 0)
+
+
+class InProcessV3Server:
+    """Exact Python reference mirror of serverkey_core & CoreEngine.php V3 semantics."""
+
+    BUNDLED = [
+        "Aim_Neck_PhucVN_FFVN.3105",
+        "AimDrag_85_Antena_PhucVN_FFVN.3105",
+        "AimDrag_85_PhucVN_FFVN.3105",
+        "AimNeck_Antena_PhucVN_FFVN.3105",
+        "Antena_PhucVN_FFVN.3105",
+        "DinhVi_Chams_PhucVN_FFVN.3105",
+        "DinhVi_Sung_PhucVN_FFVN.3105",
+    ]
+
+    def __init__(self, data_dir: Path, secrets_map: Dict[str, str]):
+        self.data_dir = data_dir
+        self.x_priv = bytes.fromhex(secrets_map["SERVER_X25519_PRIV_HEX"])
+        self.ed_seed = bytes.fromhex(secrets_map["SERVER_ED25519_PRIV_HEX"])
+        self.pepper = secrets_map["PRE_SHARED_PEPPER"].encode("utf-8")
+        self.bundle_master = bytes.fromhex(secrets_map["BUNDLE_PATCH_MASTER_KEY_HEX"])
+        self.ci_secret = secrets_map["CI_SYNC_SECRET"].encode("utf-8")
+
+        self.settings = {
+            "server_open": True,
+            "system_paused": False,
+            "server_closed_message": "Server tạm đóng bảo trì.",
+            "force_update": False,
+            "min_required_version": "2.1.0",
+            "latest_version": "2.1.0",
+            "download_url": "https://20-10.store/download/3105-latest.ipa",
+            "update_message": "Vui lòng cập nhật phiên bản mới!",
+            "enforce_binary_hash": True,
+            "packages": {},
+        }
+        self.keys = []
+        self.manifests = []
+        self.nonces = {}
+        self.rate_buckets = {}
+
+    def ci_register(self, pkg: str, ver: str, bld: str, app_hash: str, sec_hash: str) -> dict:
+        self.manifests.append(
+            {
+                "package_id": pkg,
+                "version": ver,
+                "build": bld,
+                "app_hash": app_hash.lower(),
+                "sec_hash": sec_hash.lower(),
+                "active": True,
+                "revoked": False,
+            }
+        )
+        return {"ok": True}
+
+    def process_v3(self, req: dict, now: Optional[int] = None) -> Tuple[int, dict]:
+        now = now if now is not None else int(time.time())
+        op = req.get("op", "")
+        pkg = req.get("pkg", "")
+        ver = req.get("ver", "")
+        bld = req.get("bld", "")
+        nonce_hex = req.get("nonce", "")
+        ts = int(req.get("ts", 0))
+        c_pub_hex = req.get("c_pub", "")
+        fp = req.get("fp", "")
+        ct_b64 = req.get("ct", "")
+        ip = req.get("client_ip", "127.0.0.1")
+
+        if req.get("v") != 3 or op not in ("preflight", "activate", "heartbeat"):
+            return 400, {"error": "Unsupported op"}
+        if abs(now - ts) > 180:
+            return 403, {"error": "Timestamp skew"}
+
+        # Rate limit check per device fp (35 / 60s)
+        b = self.rate_buckets.setdefault(fp, {"start": now, "count": 0})
+        if now - b["start"] >= 60:
+            b["start"], b["count"] = now, 1
+        else:
+            b["count"] += 1
+            if b["count"] > 35:
+                return 429, {"error": "Rate limit exceeded"}
+
+        if nonce_hex in self.nonces:
+            return 403, {"error": "Replay nonce rejected"}
+        self.nonces[nonce_hex] = now + 600
+
+        req_nonce = bytes.fromhex(nonce_hex)
+        c_pub = bytes.fromhex(c_pub_hex)
+        shared = v3_crypto.x25519_shared(self.x_priv, c_pub)
+        req_key = v3_crypto.hkdf_sha256(shared, self.pepper, b"3105-V3-REQ", 32)
+        req_aad = f"V3REQ|3|{op}|{pkg}|{ver}|{bld}|{fp}|{nonce_hex}|{ts}".encode("utf-8")
+
+        try:
+            pt = v3_crypto.xchacha20_poly1305_decrypt(req_key, req_nonce, base64.b64decode(ct_b64), req_aad)
+        except Exception:
+            return 403, {"error": "AEAD decrypt failed"}
+
+        inner = json.loads(pt.decode("utf-8"))
+        if inner["op"] != op or inner["pkg"] != pkg or inner["ver"] != ver or int(inner["ts"]) != ts:
+            return 403, {"error": "Envelope mismatch"}
+        lic_key = inner.get("key", "")
+        exp_proof = hmac.new(self.pepper, req_aad + b"|" + lic_key.encode("utf-8"), hashlib.sha256).hexdigest()
+        if not hmac.compare_digest(exp_proof, inner.get("client_proof", "")):
+            return 403, {"error": "Client proof invalid"}
+
+        pkg_pol = self.settings["packages"].get(pkg, {})
+        global_open = self.settings["server_open"] and not self.settings["system_paused"]
+        server_open = global_open and pkg_pol.get("server_open", True)
+        closed_msg = (
+            self.settings["server_closed_message"]
+            if not global_open
+            else pkg_pol.get("server_closed_message", self.settings["server_closed_message"])
+        )
+        min_ver = pkg_pol.get("min_required_version", self.settings["min_required_version"])
+        latest_ver = pkg_pol.get("latest_version", self.settings["latest_version"])
+        dl_url = pkg_pol.get("download_url", self.settings["download_url"])
+        force_up = pkg_pol.get("force_update", self.settings["force_update"])
+
+        def respond(status, code, open_flag, update_flag, msg, eph=None, bkeys=None, lic=None):
+            s_ts = int(time.time())
+            s_nonce = os.urandom(24)
+            s_nonce_hex = s_nonce.hex()
+            res_aad = f"V3RES|3|{op}|{pkg}|{ver}|{fp}|{nonce_hex}|{s_nonce_hex}|{s_ts}|{code}".encode("utf-8")
+            payload = {
+                "status": status,
+                "code": code,
+                "op": op,
+                "server_open": open_flag,
+                "force_update": update_flag,
+                "min_version": min_ver,
+                "latest_version": latest_ver,
+                "download_url": dl_url,
+                "message": msg,
+                "req_nonce": nonce_hex,
+                "s_nonce": s_nonce_hex,
+                "s_ts": s_ts,
+                "ephemeral_session_key": eph,
+                "session_token": hashlib.sha256(eph.encode()).hexdigest() if eph else None,
+                "bundle_keys": bkeys or {},
+                "license": lic or {"valid": False},
+            }
+            res_key = v3_crypto.hkdf_sha256(shared, self.pepper, b"3105-V3-RES|" + req_nonce, 32)
+            ct = v3_crypto.xchacha20_poly1305_encrypt(res_key, s_nonce, json.dumps(payload).encode("utf-8"), res_aad)
+            ct_hash = hashlib.sha256(ct).digest()
+            sig_msg = b"3105-V3-SIG|" + res_aad + b"|" + ct_hash
+            sig = v3_crypto.ed25519_sign(self.ed_seed, sig_msg)
+            return 200, {
+                "v": 3,
+                "op": op,
+                "pkg": pkg,
+                "ver": ver,
+                "fp": fp,
+                "req_nonce": nonce_hex,
+                "s_nonce": s_nonce_hex,
+                "s_ts": s_ts,
+                "code": code,
+                "ct": base64.b64encode(ct).decode("ascii"),
+                "sig": sig.hex(),
+            }
+
+        # 1. Kill-Switch
+        if not server_open:
+            return respond("server_closed", "SERVER_CLOSED", False, False, closed_msg)
+
+        # 1b. Device HWID Ban Check
+        ban_rec = next((b for b in getattr(self, "banned_devices", []) if b.get("active") and b.get("hwid", "").lower() == fp.lower()), None)
+        if ban_rec:
+            r_txt = ban_rec.get("reason", "").strip()
+            msg = f"Thiết bị này đã bị khóa vĩnh viễn. Lý do: {r_txt}" if r_txt else "Thiết bị bị cấm truy cập."
+            return respond("device_banned", "DEVICE_BANNED", True, False, msg)
+
+        # 2. Tamper & Hash Manifest Check
+        if int(inner.get("tamper_flags", 0)) != 0:
+            return respond("denied", "TAMPER_DETECTED", True, False, "Tamper flags detected")
+
+        app_h = inner.get("app_hash", "").lower()
+        sec_h = inner.get("sec_hash", "").lower()
+        matched = next(
+            (m for m in self.manifests if m["package_id"] == pkg and m["app_hash"] == app_h and m["sec_hash"] == sec_h),
+            None,
+        )
+        if self.settings["enforce_binary_hash"] or self.manifests:
+            if not matched or matched["revoked"] or not matched["active"]:
+                return respond("denied", "TAMPER_DETECTED", True, False, "Binary integrity mismatch")
+            if compare_semver(ver, matched["version"]) != 0:
+                return respond("denied", "TAMPER_DETECTED", True, False, "Manifest version spoof mismatch")
+            auth_ver = matched["version"]
+        else:
+            auth_ver = ver
+
+        # 3. Force Update Check
+        if compare_semver(auth_ver, min_ver) < 0 or (force_up and compare_semver(auth_ver, latest_ver) < 0):
+            return respond("force_update", "FORCE_UPDATE", True, True, self.settings["update_message"])
+
+        if op == "preflight":
+            return respond("ok", "OK", True, False, "Ready")
+
+        # 4. License Validation
+        rec = next((k for k in self.keys if k["key"].upper() == lic_key.strip().upper()), None)
+        if not rec:
+            return respond("denied", "INVALID_KEY", True, False, "Key invalid")
+        if rec.get("status", "active") != "active":
+            return respond("denied", "KEY_REVOKED", True, False, "Key revoked")
+        if rec["is_used"] and rec.get("expiry_ts", 0) > 0 and now >= rec["expiry_ts"]:
+            return respond("denied", "KEY_EXPIRED", True, False, "Key expired")
+        if not rec["is_used"]:
+            dur = {"1h": 3600, "1d": 86400, "7d": 7 * 86400, "30d": 30 * 86400}.get(rec["duration"], 0)
+            rec["expiry_ts"] = (now + dur) if dur else 0
+            rec["is_used"] = True
+        devs = rec.setdefault("devices", [])
+        if fp not in devs:
+            if len(devs) >= rec.get("max_devices", 1) > 0:
+                return respond("denied", "DEVICE_LIMIT", True, False, "Device limit")
+            devs.append(fp)
+
+        bkeys = {}
+        for fn in self.BUNDLED:
+            bid = v3_crypto.derive_bundle_id(fn)
+            bkeys[bid.hex()] = v3_crypto.derive_bundle_key(self.bundle_master, bid).hex()
+
+        eph = os.urandom(32).hex()
+        return respond(
+            "ok",
+            "OK",
+            True,
+            False,
+            "Authorized",
+            eph=eph,
+            bkeys=bkeys,
+            lic={"valid": True, "expiry_ts": rec["expiry_ts"], "is_permanent": rec["duration"] == "permanent"},
+        )
+
+
+def client_build_and_decrypt(
+    server_x_pub: bytes,
+    server_ed_pub: bytes,
+    pepper: bytes,
+    op: str,
+    pkg: str,
+    ver: str,
+    bld: str,
+    fp: str,
+    app_hash: str,
+    sec_hash: str,
+    license_key: str,
+    transport,
+    tamper_flags: int = 0,
+    ts_override: Optional[int] = None,
+) -> Tuple[int, dict, Optional[dict]]:
+    """Simulates exact `sec_core` + `SecCoreBridge.swift` V3 client behavior."""
+    c_priv = os.urandom(32)
+    c_pub = v3_crypto.x25519_public_key(c_priv)
+    shared = v3_crypto.x25519_shared(c_priv, server_x_pub)
+    req_nonce = os.urandom(24)
+    nonce_hex = req_nonce.hex()
+    ts = ts_override if ts_override is not None else int(time.time())
+
+    req_aad = f"V3REQ|3|{op}|{pkg}|{ver}|{bld}|{fp}|{nonce_hex}|{ts}".encode("utf-8")
+    req_key = v3_crypto.hkdf_sha256(shared, pepper, b"3105-V3-REQ", 32)
+    proof = hmac.new(pepper, req_aad + b"|" + license_key.encode("utf-8"), hashlib.sha256).hexdigest()
+
+    inner = {
+        "op": op,
+        "key": license_key,
+        "pkg": pkg,
+        "ver": ver,
+        "bld": bld,
+        "app_hash": app_hash,
+        "sec_hash": sec_hash,
+        "tamper_flags": tamper_flags,
+        "client_proof": proof,
+        "ts": ts,
+    }
+    ct = v3_crypto.xchacha20_poly1305_encrypt(req_key, req_nonce, json.dumps(inner).encode("utf-8"), req_aad)
+    env = {
+        "v": 3,
+        "op": op,
+        "pkg": pkg,
+        "ver": ver,
+        "bld": bld,
+        "nonce": nonce_hex,
+        "ts": ts,
+        "c_pub": c_pub.hex(),
+        "fp": fp,
+        "ct": base64.b64encode(ct).decode("ascii"),
+    }
+    status, resp_env = transport(env)
+    if status != 200:
+        return status, resp_env, None
+
+    # Client verifies Ed25519 BEFORE AEAD decrypt
+    res_aad = (
+        f"V3RES|3|{resp_env['op']}|{resp_env['pkg']}|{resp_env['ver']}|"
+        f"{resp_env['fp']}|{resp_env['req_nonce']}|{resp_env['s_nonce']}|{resp_env['s_ts']}|{resp_env['code']}"
+    ).encode("utf-8")
+    ct_raw = base64.b64decode(resp_env["ct"])
+    sig_msg = b"3105-V3-SIG|" + res_aad + b"|" + hashlib.sha256(ct_raw).digest()
+    if not v3_crypto.ed25519_verify(server_ed_pub, sig_msg, bytes.fromhex(resp_env["sig"])):
+        raise ValueError("Ed25519 signature invalid")
+    if resp_env["req_nonce"] != nonce_hex:
+        raise ValueError("Response req_nonce mismatch")
+
+    res_key = v3_crypto.hkdf_sha256(shared, pepper, b"3105-V3-RES|" + req_nonce, 32)
+    pt = v3_crypto.xchacha20_poly1305_decrypt(res_key, bytes.fromhex(resp_env["s_nonce"]), ct_raw, res_aad)
+    return 200, env, json.loads(pt.decode("utf-8"))
+
+
+def build_synthetic_macho(text_bytes: bytes, marker: bytes) -> bytes:
+    """Constructs a minimal valid 64-bit Mach-O file with __TEXT,__text and __DATA,__sechash."""
+    page = 4096
+    text_padded = text_bytes.ljust(page, b"\x00")
+    data_payload = (marker + b"\x00" * 64).ljust(page, b"\x00")
+
+    def seg_cmd(name: str, vmaddr: int, fileoff: int, filesize: int, sects: list) -> bytes:
+        hdr = struct.pack(
+            "<II16sQQQQiiII",
+            0x19,  # LC_SEGMENT_64
+            72 + 80 * len(sects),
+            name.encode("ascii").ljust(16, b"\x00"),
+            vmaddr,
+            filesize,
+            fileoff,
+            filesize,
+            5,
+            5,
+            len(sects),
+            0,
+        )
+        sec_buf = b""
+        for sname, saddr, ssize, soff in sects:
+            sec_buf += struct.pack(
+                "<16s16sQQIIIIIIII",
+                sname.encode("ascii").ljust(16, b"\x00"),
+                name.encode("ascii").ljust(16, b"\x00"),
+                saddr,
+                ssize,
+                soff,
+                4,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+            )
+        return hdr + sec_buf
+
+    lc1 = seg_cmd("__TEXT", 0x100000000, 0, page * 2, [("__text", 0x100001000, len(text_bytes), page)])
+    lc2 = seg_cmd("__DATA", 0x100002000, page * 2, page, [("__sechash", 0x100002000, 80, page * 2)])
+    cmds = lc1 + lc2
+    mh = struct.pack("<IiiIIIII", 0xFEEDFACF, 0x0100000C, 0, 6, 2, len(cmds), 0, 0)
+    header_padded = (mh + cmds).ljust(page, b"\x00")
+    return header_padded + text_padded + data_payload
+
+
+class SecuritySuiteTests(unittest.TestCase):
+    RUST_BIN: Optional[Path] = None
+
+    @classmethod
+    def setUpClass(cls):
+        cls.tmpdir = Path(tempfile.mkdtemp(prefix="p3105_suite_"))
+        cls.x_priv = os.urandom(32)
+        cls.x_pub = v3_crypto.x25519_public_key(cls.x_priv)
+        cls.ed_seed = os.urandom(32)
+        cls.ed_pub = v3_crypto.ed25519_public_key(cls.ed_seed)
+        cls.pepper = os.urandom(32).hex()
+        cls.bundle_master = os.urandom(32)
+        cls.ci_secret = os.urandom(32).hex()
+
+        cls.secrets_map = {
+            "SERVER_X25519_PRIV_HEX": cls.x_priv.hex(),
+            "SERVER_ED25519_PRIV_HEX": cls.ed_seed.hex(),
+            "PRE_SHARED_PEPPER": cls.pepper,
+            "BUNDLE_PATCH_MASTER_KEY_HEX": cls.bundle_master.hex(),
+            "CI_SYNC_SECRET": cls.ci_secret,
+        }
+
+        cls.pkg = "com.apple.mobile.MobileHouseArrest"
+        cls.fp_main = hashlib.sha256(b"IPHONE-DEVICE-1").hexdigest()
+        cls.fp_other = hashlib.sha256(b"IPHONE-DEVICE-2").hexdigest()
+        cls.app_hash_v21 = hashlib.sha256(b"3105-ARM64-TEXT-V2.1.0").hexdigest()
+        cls.sec_hash_v21 = hashlib.sha256(b"SEC-DYLIB-TEXT-V2.1.0").hexdigest()
+        cls.app_hash_v20 = hashlib.sha256(b"3105-ARM64-TEXT-V2.0.0").hexdigest()
+        cls.sec_hash_v20 = hashlib.sha256(b"SEC-DYLIB-TEXT-V2.0.0").hexdigest()
+
+        # Run real build-time obfuscation on an isolated copy of the workspace
+        cls.stage = cls.tmpdir / "stage"
+        shutil.copytree(
+            REPO_ROOT,
+            cls.stage,
+            ignore=shutil.ignore_patterns(".git", "dist", "serverkey_core", "tests"),
+        )
+        cls.obf_report = obfuscate_build.run_obfuscation(
+            workspace=cls.stage,
+            x25519_pub_hex=cls.x_pub.hex(),
+            ed25519_pub_hex=cls.ed_pub.hex(),
+            pepper=cls.pepper,
+            bundle_master_hex=cls.bundle_master.hex(),
+            spki_primary_hex=hashlib.sha256(b"pin1").hexdigest(),
+            spki_backup_hex=hashlib.sha256(b"pin2").hexdigest(),
+            api_host="20-10.store",
+            api_path="/api/v3",
+            strict=True,
+        )
+
+    @classmethod
+    def tearDownClass(cls):
+        shutil.rmtree(cls.tmpdir, ignore_errors=True)
+
+    def _new_server(self) -> InProcessV3Server:
+        srv = InProcessV3Server(self.tmpdir / "data", self.secrets_map)
+        srv.banned_devices = []
+        srv.ci_register(self.pkg, "2.1.0", "9", self.app_hash_v21, self.sec_hash_v21)
+        srv.ci_register(self.pkg, "2.0", "8", self.app_hash_v20, self.sec_hash_v20)
+        srv.keys.append(
+            {
+                "key": "PHUCVN-30D-VALID-0001",
+                "duration": "30d",
+                "status": "active",
+                "is_used": False,
+                "max_devices": 1,
+                "devices": [],
+            }
+        )
+        srv.keys.append(
+            {
+                "key": "PHUCVN-BANNED-0002",
+                "duration": "permanent",
+                "status": "revoked",
+                "is_used": False,
+                "max_devices": 1,
+                "devices": [],
+            }
+        )
+        return srv
+
+    # -----------------------------------------------------------------------
+    # SCENARIO 1: Client Obfuscation, Symbol Renaming, V4 Packing & Mach-O Seal
+    # -----------------------------------------------------------------------
+    def test_01_ci_obfuscation_packing_and_macho_seal(self):
+        v4_tag = bytes.fromhex(self.obf_report["v4_tag_hex"])
+        self.assertGreaterEqual(len(self.obf_report["packed_3105"]), 7)
+        self.assertGreater(self.obf_report["swift_strings_encrypted"], 15)
+
+        # Verify ALL staged .3105 files lost legacy headers & publicContentKey
+        for p in list(self.stage.glob("*.3105")) + list((self.stage / "ThreeOneOSFive").rglob("*.3105")):
+            raw = p.read_bytes()
+            self.assertEqual(raw[:4], v4_tag, f"{p.name} missing V4 tag")
+            self.assertNotIn(b"3105PATCH", raw)
+            self.assertNotIn(b"bplist00", raw)
+            self.assertNotIn(b"publicContentKey", raw)
+
+        # Verify Rust C-ABI symbol renaming synced cleanly with Swift
+        swift_cfg = (self.stage / "ThreeOneOSFive" / "helpers" / "GeneratedSecurityConfig.swift").read_text("utf-8")
+        rs_lib = (self.stage / "sec_core" / "src" / "lib.rs").read_text("utf-8")
+        self.assertIn("export_name =", rs_lib)
+        self.assertNotIn("KeyAuthManager", (self.stage / "ThreeOneOSFive" / "App.swift").read_text("utf-8"))
+        self.assertNotIn("https://phuciosvn.com", (self.stage / "ThreeOneOSFive" / "views" / "KeyGatekeeperView.swift").read_text("utf-8"))
+        self.assertIn("{ _d([", swift_cfg)
+        self.assertIn(
+            "GeneratedSecurityConfig._d(",
+            (self.stage / "ThreeOneOSFive" / "views" / "KeyGatekeeperView.swift").read_text("utf-8"),
+        )
+        self.assertIn(
+            "GeneratedSecurityConfig._d(",
+            (self.stage / "ThreeOneOSFive" / "helpers" / "LocalDevBridge.swift").read_text("utf-8"),
+        )
+        # Ensure string obfuscation preserved balanced braces/parens across all transformed Swift files
+        for rel_sw in obfuscate_build.SWIFT_STRING_TARGET_FILES:
+            sw_txt = (self.stage / rel_sw).read_text("utf-8")
+            self.assertEqual(sw_txt.count("{"), sw_txt.count("}"), f"Unbalanced braces in {rel_sw}")
+            self.assertEqual(sw_txt.count("("), sw_txt.count(")"), f"Unbalanced parens in {rel_sw}")
+
+        # Verify synthetic Mach-O sealing zeroes marker & preserves __TEXT hash
+        marker = bytes.fromhex(self.obf_report["seal_marker_hex"])
+        macho_path = self.tmpdir / "libsec_test.dylib"
+        macho_path.write_bytes(build_synthetic_macho(b"\xc0\x03\x5f\xd6" * 64, marker))
+        sealed_hash = macho_hash.seal_sec_core_dylib(macho_path, self.obf_report["seal_marker_hex"])
+        sealed_blob = macho_path.read_bytes()
+        self.assertNotIn(marker, sealed_blob)
+        off_data = 8192  # 2 * 4096
+        mask = sealed_blob[off_data + 16 : off_data + 48]
+        masked_digest = sealed_blob[off_data + 48 : off_data + 80]
+        unmasked = bytes(m ^ d for m, d in zip(mask, masked_digest)).hex()
+        self.assertEqual(unmasked, sealed_hash)
+
+        # Verify patching 1 byte in __TEXT breaks integrity check
+        patched = bytearray(sealed_blob)
+        patched[4096] ^= 0xFF
+        patched_path = self.tmpdir / "libsec_patched.dylib"
+        patched_path.write_bytes(bytes(patched))
+        self.assertNotEqual(macho_hash.compute_text_sha256(patched_path), sealed_hash)
+
+        # Verify hardened serverkey distribution excludes live secrets and packs CoreEngine.php
+        dist_srv = self.tmpdir / "dist_serverkey"
+        build_serverkey.package_serverkey(REPO_ROOT / "serverkey", dist_srv)
+        packed_core = (dist_srv / "lib" / "CoreEngine.php").read_text("utf-8")
+        self.assertIn("gzuncompress", packed_core)
+        self.assertNotIn("sodium_crypto_scalarmult", packed_core)
+        self.assertFalse((dist_srv / ".env").exists())
+        self.assertTrue((dist_srv / "data" / "banned_devices.json").exists())
+
+    # -----------------------------------------------------------------------
+    # SCENARIO 2: Server Kill-Switch (Closed -> Lock; Re-open -> Normal)
+    # -----------------------------------------------------------------------
+    def test_02_server_kill_switch_global_and_per_app(self):
+        srv = self._new_server()
+
+        # Close server globally
+        srv.settings["server_open"] = False
+        srv.settings["server_closed_message"] = "Server đang bảo trì định kỳ!"
+
+        for op in ("preflight", "activate"):
+            st, _, dec = client_build_and_decrypt(
+                self.x_pub, self.ed_pub, self.pepper.encode(),
+                op, self.pkg, "2.1.0", "9", self.fp_main,
+                self.app_hash_v21, self.sec_hash_v21, "PHUCVN-30D-VALID-0001", srv.process_v3
+            )
+            self.assertEqual(st, 200)
+            self.assertEqual(dec["code"], "SERVER_CLOSED")
+            self.assertFalse(dec["server_open"])
+            self.assertIsNone(dec["ephemeral_session_key"])
+            self.assertEqual(dec["bundle_keys"], {})
+            self.assertEqual(dec["message"], "Server đang bảo trì định kỳ!")
+
+        # Open globally, close per-package only
+        srv.settings["server_open"] = True
+        srv.settings["packages"][self.pkg] = {
+            "server_open": False,
+            "server_closed_message": "Gói 3105 tạm khóa!",
+        }
+        _, _, dec = client_build_and_decrypt(
+            self.x_pub, self.ed_pub, self.pepper.encode(),
+            "activate", self.pkg, "2.1.0", "9", self.fp_main,
+            self.app_hash_v21, self.sec_hash_v21, "PHUCVN-30D-VALID-0001", srv.process_v3
+        )
+        self.assertEqual(dec["code"], "SERVER_CLOSED")
+        self.assertIsNone(dec["ephemeral_session_key"])
+        self.assertEqual(dec["message"], "Gói 3105 tạm khóa!")
+
+        # Re-open package -> normal activation works!
+        srv.settings["packages"][self.pkg]["server_open"] = True
+        _, _, dec_ok = client_build_and_decrypt(
+            self.x_pub, self.ed_pub, self.pepper.encode(),
+            "activate", self.pkg, "2.1.0", "9", self.fp_main,
+            self.app_hash_v21, self.sec_hash_v21, "PHUCVN-30D-VALID-0001", srv.process_v3
+        )
+        self.assertEqual(dec_ok["code"], "OK")
+        self.assertTrue(dec_ok["server_open"])
+        self.assertIsNotNone(dec_ok["ephemeral_session_key"])
+
+    # -----------------------------------------------------------------------
+    # SCENARIO 3: Open Server + New Version + Valid Key -> Full V4 RAM Decrypt
+    # -----------------------------------------------------------------------
+    def test_03_valid_user_new_app_full_v4_decrypt_and_device_limit(self):
+        srv = self._new_server()
+
+        _, _, dec = client_build_and_decrypt(
+            self.x_pub, self.ed_pub, self.pepper.encode(),
+            "activate", self.pkg, "2.1.0", "9", self.fp_main,
+            self.app_hash_v21, self.sec_hash_v21, "PHUCVN-30D-VALID-0001", srv.process_v3
+        )
+        self.assertEqual(dec["code"], "OK")
+        self.assertTrue(dec["license"]["valid"])
+        self.assertGreater(dec["license"]["expiry_ts"], int(time.time()) + 29 * 86400)
+
+        # Decrypt REAL packed V4 preset using server-returned bundle_keys
+        v4_tag = bytes.fromhex(self.obf_report["v4_tag_hex"])
+        v4_file = (self.stage / "Aim_Neck_PhucVN_FFVN.3105").read_bytes()
+        bid_hex = v4_file[4:20].hex()
+        self.assertIn(bid_hex, dec["bundle_keys"])
+
+        bundle_key = bytes.fromhex(dec["bundle_keys"][bid_hex])
+        decrypted_json = pack_3105.unpack_v4_bytes(v4_file, bundle_key, expected_tag4=v4_tag)
+        decoded_payload = json.loads(decrypted_json.decode("utf-8"))
+        self.assertTrue(decoded_payload["project"]["isPrivate"])
+        self.assertGreater(len(decoded_payload["project"]["rules"]), 0)
+
+        # Compare decrypted rule digest against original repository V1 .3105
+        orig_legacy = pack_3105.decode_legacy_3105((REPO_ROOT / "Aim_Neck_PhucVN_FFVN.3105").read_bytes())
+        self.assertEqual(
+            decoded_payload["project"]["rules"][0]["replacementData"],
+            orig_legacy["project"]["rules"][0]["replacementData"],
+        )
+
+        # Second device blocked cleanly (max_devices=1)
+        _, _, dec2 = client_build_and_decrypt(
+            self.x_pub, self.ed_pub, self.pepper.encode(),
+            "activate", self.pkg, "2.1.0", "9", self.fp_other,
+            self.app_hash_v21, self.sec_hash_v21, "PHUCVN-30D-VALID-0001", srv.process_v3
+        )
+        self.assertEqual(dec2["code"], "DEVICE_LIMIT")
+        self.assertIsNone(dec2["ephemeral_session_key"])
+
+    # -----------------------------------------------------------------------
+    # SCENARIO 4: Force Update (Old Version Denied + Spoofed Version Rejected)
+    # -----------------------------------------------------------------------
+    def test_04_force_update_old_version_and_anti_version_spoof(self):
+        srv = self._new_server()
+        srv.settings["force_update"] = True
+        srv.settings["min_required_version"] = "2.1.0"
+        srv.settings["latest_version"] = "2.1.0"
+        srv.settings["download_url"] = "https://20-10.store/new.ipa"
+
+        # Old version 2.0 gets FORCE_UPDATE + link, NO keys even with valid license key
+        _, _, dec = client_build_and_decrypt(
+            self.x_pub, self.ed_pub, self.pepper.encode(),
+            "activate", self.pkg, "2.0", "8", self.fp_main,
+            self.app_hash_v20, self.sec_hash_v20, "PHUCVN-30D-VALID-0001", srv.process_v3
+        )
+        self.assertEqual(dec["code"], "FORCE_UPDATE")
+        self.assertTrue(dec["force_update"])
+        self.assertEqual(dec["download_url"], "https://20-10.store/new.ipa")
+        self.assertIsNone(dec["ephemeral_session_key"])
+        self.assertEqual(dec["bundle_keys"], {})
+
+        # Attacker edits Info.plist of v2.0 binary to claim "2.1.0" -> caught by manifest hash binding!
+        _, _, dec_spoof = client_build_and_decrypt(
+            self.x_pub, self.ed_pub, self.pepper.encode(),
+            "activate", self.pkg, "2.1.0", "9", self.fp_main,
+            self.app_hash_v20, self.sec_hash_v20, "PHUCVN-30D-VALID-0001", srv.process_v3
+        )
+        self.assertEqual(dec_spoof["code"], "TAMPER_DETECTED")
+        self.assertIsNone(dec_spoof["ephemeral_session_key"])
+
+    # -----------------------------------------------------------------------
+    # SCENARIO 5: Anti-Crack ("No Key", Binary Patch, Fake Response, Replay, AAD)
+    # -----------------------------------------------------------------------
+    def test_05_attack_resistance_no_key_fake_response_replay_tamper(self):
+        srv = self._new_server()
+
+        # 5a. "No key" / UI patch: cannot decrypt V4 .3105 without valid server-derived bundle_key
+        v4_tag = bytes.fromhex(self.obf_report["v4_tag_hex"])
+        v4_file = (self.stage / "Antena_PhucVN_FFVN.3105").read_bytes()
+        with self.assertRaises(ValueError):
+            pack_3105.unpack_v4_bytes(v4_file, os.urandom(32), expected_tag4=v4_tag)
+
+        # 5b. Fake server response MITM / wrong Ed25519 signature rejected before trusting status
+        captured = {}
+
+        def mitm_fake_sig(env):
+            st, r = srv.process_v3(env)
+            captured["last_req"] = env
+            rogue_ed = os.urandom(32)
+            # Forge Ed25519 signature
+            r["sig"] = os.urandom(64).hex()
+            return st, r
+
+        with self.assertRaises(ValueError):
+            client_build_and_decrypt(
+                self.x_pub, self.ed_pub, self.pepper.encode(),
+                "preflight", self.pkg, "2.1.0", "9", self.fp_main,
+                self.app_hash_v21, self.sec_hash_v21, "", mitm_fake_sig
+            )
+
+        # 5c. Mutating outer AAD header (`ver` or `code`) invalidates signature/AEAD
+        def mitm_tamper_code(env):
+            st, r = srv.process_v3(env)
+            r["code"] = "HACKED"
+            return st, r
+
+        with self.assertRaises(ValueError):
+            client_build_and_decrypt(
+                self.x_pub, self.ed_pub, self.pepper.encode(),
+                "preflight", self.pkg, "2.1.0", "9", self.fp_main,
+                self.app_hash_v21, self.sec_hash_v21, "", mitm_tamper_code
+            )
+
+        # 5d. Replay exact previous request packet -> rejected 403
+        st_replay, err_replay = srv.process_v3(captured["last_req"])
+        self.assertEqual(st_replay, 403)
+        self.assertIn("Replay", err_replay["error"])
+
+        # 5e. Patched client binary hash or client tamper_flags != 0 -> TAMPER_DETECTED, NO keys
+        _, _, dec_patched = client_build_and_decrypt(
+            self.x_pub, self.ed_pub, self.pepper.encode(),
+            "activate", self.pkg, "2.1.0", "9", self.fp_main,
+            hashlib.sha256(b"CRACKED-NOP-PATCH").hexdigest(), self.sec_hash_v21,
+            "PHUCVN-30D-VALID-0001", srv.process_v3
+        )
+        self.assertEqual(dec_patched["code"], "TAMPER_DETECTED")
+        self.assertIsNone(dec_patched["ephemeral_session_key"])
+
+        _, _, dec_flags = client_build_and_decrypt(
+            self.x_pub, self.ed_pub, self.pepper.encode(),
+            "activate", self.pkg, "2.1.0", "9", self.fp_main,
+            self.app_hash_v21, self.sec_hash_v21,
+            "PHUCVN-30D-VALID-0001", srv.process_v3, tamper_flags=0x40
+        )
+        self.assertEqual(dec_flags["code"], "TAMPER_DETECTED")
+
+        # 5f. Optional live Rust binary verification (runs automatically in Linux CI)
+        if self.RUST_BIN and self.RUST_BIN.exists():
+            data_dir = self.tmpdir / "rust_data"
+            data_dir.mkdir(parents=True, exist_ok=True)
+            (data_dir / "settings.json").write_text(json.dumps(srv.settings), "utf-8")
+            (data_dir / "keys.json").write_text(json.dumps(srv.keys), "utf-8")
+            (data_dir / "build_manifests.json").write_text(json.dumps(srv.manifests), "utf-8")
+            (data_dir / "banned_devices.json").write_text("[]", "utf-8")
+            env_file = self.tmpdir / "rust.env"
+            env_file.write_text(
+                "\n".join(f"{k}={v}" for k, v in self.secrets_map.items()) + f"\nSERVERKEY_DATA_DIR={data_dir}\n",
+                "utf-8",
+            )
+
+            def rust_exec(req_env):
+                sub_env = dict(os.environ)
+                sub_env["SERVERKEY_ENV_FILE"] = str(env_file)
+                cmd_in = json.dumps({"action": "v3", "payload": req_env})
+                proc = subprocess.run(
+                    [str(self.RUST_BIN), "--exec"],
+                    input=cmd_in,
+                    text=True,
+                    capture_output=True,
+                    env=sub_env,
+                    check=True,
+                )
+                out = json.loads(proc.stdout)
+                return int(out["http_status"]), out["body"]
+
+            st_r, _, dec_r = client_build_and_decrypt(
+                self.x_pub, self.ed_pub, self.pepper.encode(),
+                "activate", self.pkg, "2.1.0", "9", self.fp_main,
+                self.app_hash_v21, self.sec_hash_v21, "PHUCVN-30D-VALID-0001", rust_exec
+            )
+            self.assertEqual(st_r, 200)
+            self.assertEqual(dec_r["code"], "OK")
+            self.assertIn(hashlib.sha256(b"BUNDLE|Aim_Neck_PhucVN_FFVN.3105").digest()[:16].hex(), dec_r["bundle_keys"])
+
+    # -----------------------------------------------------------------------
+    # SCENARIO 6: Device HWID Ban & Unban Enforcement
+    # -----------------------------------------------------------------------
+    def test_06_device_hwid_ban_and_unban(self):
+        srv = self._new_server()
+        srv.keys.append(
+            {
+                "key": "PHUCVN-30D-FRESH-9999",
+                "duration": "30d",
+                "status": "active",
+                "is_used": False,
+                "max_devices": 1,
+                "devices": [],
+            }
+        )
+
+        # 1. Valid user activates on fp_main first
+        _, _, dec1 = client_build_and_decrypt(
+            self.x_pub, self.ed_pub, self.pepper.encode(),
+            "activate", self.pkg, "2.1.0", "9", self.fp_main,
+            self.app_hash_v21, self.sec_hash_v21, "PHUCVN-30D-VALID-0001", srv.process_v3
+        )
+        self.assertEqual(dec1["code"], "OK")
+
+        # 2. Admin bans fp_main HWID on Server Key
+        srv.banned_devices.append(
+            {
+                "hwid": self.fp_main.upper(),
+                "reason": "Phát hiện share key & thử hook binary",
+                "active": True,
+                "source_key": "PHUCVN-30D-VALID-0001",
+            }
+        )
+
+        # Preflight immediately locks out banned device
+        _, _, dec_pre = client_build_and_decrypt(
+            self.x_pub, self.ed_pub, self.pepper.encode(),
+            "preflight", self.pkg, "2.1.0", "9", self.fp_main,
+            self.app_hash_v21, self.sec_hash_v21, "", srv.process_v3
+        )
+        self.assertEqual(dec_pre["code"], "DEVICE_BANNED")
+        self.assertEqual(dec_pre["status"], "device_banned")
+        self.assertIn("share key", dec_pre["message"])
+        self.assertIsNone(dec_pre["ephemeral_session_key"])
+        self.assertEqual(dec_pre["bundle_keys"], {})
+
+        # Active session heartbeat revoked immediately
+        _, _, dec_hb = client_build_and_decrypt(
+            self.x_pub, self.ed_pub, self.pepper.encode(),
+            "heartbeat", self.pkg, "2.1.0", "9", self.fp_main,
+            self.app_hash_v21, self.sec_hash_v21, "PHUCVN-30D-VALID-0001", srv.process_v3
+        )
+        self.assertEqual(dec_hb["code"], "DEVICE_BANNED")
+        self.assertIsNone(dec_hb["ephemeral_session_key"])
+
+        # Attempting a completely new unused valid key fails AND must not mark that new key used
+        _, _, dec_new = client_build_and_decrypt(
+            self.x_pub, self.ed_pub, self.pepper.encode(),
+            "activate", self.pkg, "2.1.0", "9", self.fp_main,
+            self.app_hash_v21, self.sec_hash_v21, "PHUCVN-30D-FRESH-9999", srv.process_v3
+        )
+        self.assertEqual(dec_new["code"], "DEVICE_BANNED")
+        fresh_rec = next(k for k in srv.keys if k["key"] == "PHUCVN-30D-FRESH-9999")
+        self.assertFalse(fresh_rec["is_used"])
+
+        # Unbanned device fp_other continues working normally
+        _, _, dec_other = client_build_and_decrypt(
+            self.x_pub, self.ed_pub, self.pepper.encode(),
+            "activate", self.pkg, "2.1.0", "9", self.fp_other,
+            self.app_hash_v21, self.sec_hash_v21, "PHUCVN-30D-FRESH-9999", srv.process_v3
+        )
+        self.assertEqual(dec_other["code"], "OK")
+        self.assertIsNotNone(dec_other["ephemeral_session_key"])
+
+        # 3. Admin unbans fp_main -> fp_main regains access smoothly
+        srv.banned_devices.clear()
+        _, _, dec_unban = client_build_and_decrypt(
+            self.x_pub, self.ed_pub, self.pepper.encode(),
+            "activate", self.pkg, "2.1.0", "9", self.fp_main,
+            self.app_hash_v21, self.sec_hash_v21, "PHUCVN-30D-VALID-0001", srv.process_v3
+        )
+        self.assertEqual(dec_unban["code"], "OK")
+        self.assertIsNotNone(dec_unban["ephemeral_session_key"])
+
+
+def main():
+    parser = argparse.ArgumentParser(description="Run 3105 5-Scenario Security Test Suite")
+    parser.add_argument("--rust-bin", type=Path, default=None)
+    args, remaining = parser.parse_known_args()
+    if args.rust_bin:
+        SecuritySuiteTests.RUST_BIN = args.rust_bin
+    runner = unittest.TextTestRunner(verbosity=2)
+    suite = unittest.defaultTestLoader.loadTestsFromTestCase(SecuritySuiteTests)
+    result = runner.run(suite)
+    sys.exit(0 if result.wasSuccessful() else 1)
+
+
+if __name__ == "__main__":
+    main()

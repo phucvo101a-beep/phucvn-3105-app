@@ -1,36 +1,40 @@
 [package]
 name = "sec_core"
-version = "2.0.0"
+version = "3.0.0"
 edition = "2021"
-authors = ["PhucVN AppSec"]
+description = "Zero-Trust Security, Anti-Tamper, Control-Flow & Encrypted Auth Core for 3105"
 
 [lib]
 name = "sec_core"
 crate-type = ["cdylib"]
 
 [dependencies]
-# Memory wiping on drop
+# Cryptography & Secure Memory Zeroization
 zeroize = { version = "1.8", features = ["derive"] }
-
-# Cryptography (pure-Rust, cross-platform)
-x25519-dalek = { version = "2.0", default-features = false, features = ["static_secrets"] }
-ed25519-dalek = { version = "2.1", default-features = false }
-chacha20poly1305 = { version = "0.10", features = ["alloc"] }
-sha2 = { version = "0.10", default-features = false }
+x25519-dalek = { version = "2.0", features = ["static_secrets"] }
+ed25519-dalek = { version = "2.1", features = ["rand_core"] }
+chacha20poly1305 = "0.10"
+sha2 = "0.10"
 hkdf = "0.12"
-rand = { version = "0.8", default-features = false, features = ["std", "std_rng"] }
+hmac = "0.12"
+subtle = "2.5"
+rand = "0.8"
+hex = "0.4"
+base64 = "0.22"
 
-# Compile-time string obfuscation
+# Compile-time String Obfuscation
 obfstr = "0.4"
 
 # Serialization
-serde = { version = "1.0", default-features = false, features = ["derive", "alloc"] }
-serde_json = { version = "1.0", default-features = false, features = ["alloc"] }
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
 
-# TLS & Networking without iOS CFNetwork/NSURLSession
-rustls = { version = "0.23", default-features = false, features = ["ring", "std"] }
-rustls-pki-types = "1.7"
-ring = "0.17"
+# Embedded TLS with SPKI Certificate Pinning (no system proxy reliance)
+rustls = { version = "0.23", default-features = false, features = ["ring", "logging", "std", "tls12"] }
+
+# LocalDevVPN native stack dependencies
+plist = "1.7"
+libc = "0.2"
 
 [profile.release]
 opt-level = "z"
@@ -38,6 +42,3 @@ lto = "fat"
 codegen-units = 1
 panic = "abort"
 strip = "symbols"
-debug = false
-overflow-checks = false
-incremental = false

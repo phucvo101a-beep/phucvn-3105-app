@@ -70,6 +70,9 @@
 		3105A234 /* AppDataBrowserView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 3105A105; };
 		3105LD02 /* LocalDevBridge.swift in Sources */ = {isa = PBXBuildFile; fileRef = 3105LD01; };
 		3105LD04 /* LocalDevStatusCard.swift in Sources */ = {isa = PBXBuildFile; fileRef = 3105LD03; };
+		3105SEC02 /* GeneratedSecurityConfig.swift in Sources */ = {isa = PBXBuildFile; fileRef = 3105SEC01; };
+		3105SEC04 /* SecureMemory.swift in Sources */ = {isa = PBXBuildFile; fileRef = 3105SEC03; };
+		3105SEC06 /* SecCoreBridge.swift in Sources */ = {isa = PBXBuildFile; fileRef = 3105SEC05; };
 		3105A228 /* Localizable.strings in Resources */ = {isa = PBXBuildFile; fileRef = 3105A120; };
 		3105A211 /* Assets.xcassets in Resources */ = {isa = PBXBuildFile; fileRef = 3105A031; };
 		3105P101 /* Antena_PhucVN_FFVN.3105 in Resources */ = {isa = PBXBuildFile; fileRef = 3105P001; };
@@ -125,6 +128,9 @@
 		3105A105 /* AppDataBrowserView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AppDataBrowserView.swift; sourceTree = "<group>"; };
 		3105LD01 /* LocalDevBridge.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LocalDevBridge.swift; sourceTree = "<group>"; };
 		3105LD03 /* LocalDevStatusCard.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LocalDevStatusCard.swift; sourceTree = "<group>"; };
+		3105SEC01 /* GeneratedSecurityConfig.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = GeneratedSecurityConfig.swift; sourceTree = "<group>"; };
+		3105SEC03 /* SecureMemory.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SecureMemory.swift; sourceTree = "<group>"; };
+		3105SEC05 /* SecCoreBridge.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SecCoreBridge.swift; sourceTree = "<group>"; };
 		3105A106 /* AppIconHelper.m */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.objc; path = AppIconHelper.m; sourceTree = "<group>"; };
 		3105A107 /* AppIconHelper.h */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.h; path = AppIconHelper.h; sourceTree = "<group>"; };
 		3105A202 /* KernelExploit.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = KernelExploit.swift; sourceTree = "<group>"; };
@@ -264,6 +270,9 @@
 			children = (
 				3105A099 /* Localization.swift */,
 				3105LD01 /* LocalDevBridge.swift */,
+				3105SEC01 /* GeneratedSecurityConfig.swift */,
+				3105SEC03 /* SecureMemory.swift */,
+				3105SEC05 /* SecCoreBridge.swift */,
 				3105A104 /* ContainerStore.swift */,
 				3105A108 /* ContainerIdentityResolver.swift */,
 				3105A109 /* ContainerBrowserLogic.swift */,
@@ -443,6 +452,9 @@
 				3105H200,
 				3105I200,
 				3105I201,
+				3105SEC02,
+				3105SEC04,
+				3105SEC06,
 				3105K200,
 				3105M201,
 				3105LD02,
@@ -471,7 +483,7 @@
 				CLANG_CXX_LANGUAGE_STANDARD = "gnu++20";
 				CODE_SIGN_ENTITLEMENTS = "";
 				CODE_SIGN_STYLE = Automatic;
-				CURRENT_PROJECT_VERSION = 8;
+				CURRENT_PROJECT_VERSION = 9;
 				ENABLE_USER_SCRIPT_SANDBOXING = NO;
 				GCC_C_LANGUAGE_STANDARD = gnu17;
 				GENERATE_INFOPLIST_FILE = YES;
@@ -487,12 +499,18 @@
 					"$(inherited)",
 					"@executable_path/Frameworks",
 				);
-				MARKETING_VERSION = 2.0;
+				MARKETING_VERSION = 2.1.0;
 				OTHER_LDFLAGS = "-lz";
 				PRODUCT_BUNDLE_IDENTIFIER = "com.apple.mobile.MobileHouseArrest";
 				PRODUCT_NAME = 3105;
+				COPY_PHASE_STRIP = YES;
+				DEAD_CODE_STRIPPING = YES;
+				DEPLOYMENT_POSTPROCESSING = YES;
+				STRIP_INSTALLED_PRODUCT = YES;
+				STRIP_STYLE = all;
 				SWIFT_EMIT_LOC_STRINGS = YES;
 				SWIFT_OBJC_BRIDGING_HEADER = "ThreeOneOSFive/ThreeOneOSFive-Bridging-Header.h";
+				SWIFT_REFLECTION_METADATA_LEVEL = none;
 				SWIFT_VERSION = 5.0;
 				TARGETED_DEVICE_FAMILY = "1,2";
 			};
@@ -505,7 +523,7 @@
 				CLANG_CXX_LANGUAGE_STANDARD = "gnu++20";
 				CODE_SIGN_ENTITLEMENTS = "";
 				CODE_SIGN_STYLE = Automatic;
-				CURRENT_PROJECT_VERSION = 8;
+				CURRENT_PROJECT_VERSION = 9;
 				ENABLE_USER_SCRIPT_SANDBOXING = NO;
 				GCC_C_LANGUAGE_STANDARD = gnu17;
 				GENERATE_INFOPLIST_FILE = YES;
@@ -521,12 +539,18 @@
 					"$(inherited)",
 					"@executable_path/Frameworks",
 				);
-				MARKETING_VERSION = 2.0;
+				MARKETING_VERSION = 2.1.0;
 				OTHER_LDFLAGS = "-lz";
 				PRODUCT_BUNDLE_IDENTIFIER = "com.apple.mobile.MobileHouseArrest";
 				PRODUCT_NAME = 3105;
+				COPY_PHASE_STRIP = YES;
+				DEAD_CODE_STRIPPING = YES;
+				DEPLOYMENT_POSTPROCESSING = YES;
+				STRIP_INSTALLED_PRODUCT = YES;
+				STRIP_STYLE = all;
 				SWIFT_EMIT_LOC_STRINGS = YES;
 				SWIFT_OBJC_BRIDGING_HEADER = "ThreeOneOSFive/ThreeOneOSFive-Bridging-Header.h";
+				SWIFT_REFLECTION_METADATA_LEVEL = none;
 				SWIFT_VERSION = 5.0;
 				TARGETED_DEVICE_FAMILY = "1,2";
 			};
@@ -627,8 +651,13 @@
 				CLANG_WARN_UNGUARDED_AVAILABILITY = YES_AGGRESSIVE;
 				CLANG_WARN_UNREACHABLE_CODE = YES;
 				CLANG_WARN__DUPLICATE_METHOD_MATCH = YES;
-				COPY_PHASE_STRIP = NO;
-				DEBUG_INFORMATION_FORMAT = "dwarf-with-dsym";
+				COPY_PHASE_STRIP = YES;
+				DEAD_CODE_STRIPPING = YES;
+				DEBUG_INFORMATION_FORMAT = dwarf;
+				DEPLOYMENT_POSTPROCESSING = YES;
+				STRIP_INSTALLED_PRODUCT = YES;
+				STRIP_STYLE = all;
+				SWIFT_REFLECTION_METADATA_LEVEL = none;
 				ENABLE_NS_ASSERTIONS = NO;
 				ENABLE_STRICT_OBJC_MSGSEND = YES;
 				ENABLE_USER_SCRIPT_SANDBOXING = NO;

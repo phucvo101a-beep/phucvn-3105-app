@@ -27,13 +27,23 @@ DerivedData/
 *.key
 *.mobileprovision
 .env
+**/.env
 .env.*
-!.env.example
+!**/.env.example
+
+# Build & Server Key runtime artifacts
+dist/
+serverkey_core/target/
+sec_core/target/
+serverkey/data/*.lock
+serverkey/data/api_nonces.json
+serverkey/data/rate_limits.json
+serverkey/data/login_limits.json
 
 # Local QA artifacts and internal working notes
 /*.png
 /tasks/
-/Tests/
+!/tests/
 /CONTRIBUTING.md
 /SECURITY.md
 

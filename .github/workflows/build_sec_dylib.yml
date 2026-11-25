@@ -5,6 +5,7 @@ on:
     paths:
       - 'sec_core/**'
       - 'tools/**'
+      - 'scripts/**'
       - '.github/workflows/build_sec_dylib.yml'
   workflow_dispatch:
 
@@ -14,7 +15,7 @@ concurrency:
 
 jobs:
   build_dylib:
-    name: Build libsec_core.dylib (ARM64 iOS)
+    name: Build, Strip & Seal libsec_core.dylib (ARM64 iOS)
     runs-on: macos-latest
     timeout-minutes: 25
 
@@ -28,42 +29,67 @@ jobs:
           rustup target add aarch64-apple-ios
           rustup component add clippy
 
-      - name: Build Keygen CLI
+      - name: Prepare Obfuscated Staging Copy
+        id: stage
+        env:
+          SEC_SERVER_X25519_PUB: ${{ secrets.SEC_SERVER_X25519_PUB }}
+          SEC_SERVER_ED25519_PUB: ${{ secrets.SEC_SERVER_ED25519_PUB }}
+          SEC_PEPPER: ${{ secrets.SEC_PEPPER }}
+          SEC_BUNDLE_MASTER_KEY: ${{ secrets.SEC_BUNDLE_MASTER_KEY }}
+          SEC_SPKI_PIN_PRIMARY: ${{ secrets.SEC_SPKI_PIN_PRIMARY }}
+          SEC_SPKI_PIN_BACKUP: ${{ secrets.SEC_SPKI_PIN_BACKUP }}
         run: |
-          cargo run --manifest-path tools/keygen/Cargo.toml
+          set -euo pipefail
+          STAGE="$RUNNER_TEMP/sec-stage"
+          rm -rf "$STAGE"
+          mkdir -p "$STAGE"
+          /usr/bin/ditto "$GITHUB_WORKSPACE" "$STAGE"
+          MARKER_FILE="$RUNNER_TEMP/seal.marker"
+          XPUB="${SEC_SERVER_X25519_PUB:-$(openssl rand -hex 32)}"
+          EPUB="${SEC_SERVER_ED25519_PUB:-$(openssl rand -hex 32)}"
+          PEPP="${SEC_PEPPER:-$(openssl rand -hex 32)}"
+          BMASTER="${SEC_BUNDLE_MASTER_KEY:-$(openssl rand -hex 32)}"
+          NON_STRICT=""
+          if [ -z "$SEC_SERVER_X25519_PUB" ]; then NON_STRICT="--non-strict"; fi
+          python3 "$STAGE/scripts/obfuscate_build.py" \
+            --workspace "$STAGE" \
+            --x25519-pub "$XPUB" \
+            --ed25519-pub "$EPUB" \
+            --pepper "$PEPP" \
+            --bundle-master "$BMASTER" \
+            --spki-primary "${SEC_SPKI_PIN_PRIMARY:-0000000000000000000000000000000000000000000000000000000000000000}" \
+            --spki-backup "${SEC_SPKI_PIN_BACKUP:-0000000000000000000000000000000000000000000000000000000000000000}" \
+            $NON_STRICT \
+            --marker-out "$MARKER_FILE"
+          echo "stage=$STAGE" >> "$GITHUB_OUTPUT"
+          echo "marker=$MARKER_FILE" >> "$GITHUB_OUTPUT"
 
-      - name: Verify & Compile libsec_core (Release for iOS ARM64)
+      - name: Verify, Compile, Strip & Seal libsec_core.dylib
+        env:
+          STAGE: ${{ steps.stage.outputs.stage }}
+          MARKER: ${{ steps.stage.outputs.marker }}
         run: |
-          cd sec_core
+          set -euo pipefail
+          cd "$STAGE/sec_core"
           export IPHONEOS_DEPLOYMENT_TARGET=16.0
-          echo "Running cargo check..."
           cargo check --target aarch64-apple-ios
-          echo "Running cargo clippy..."
           cargo clippy --target aarch64-apple-ios -- -A dead_code
-          echo "Building release binary..."
           cargo build --release --target aarch64-apple-ios
-
-      - name: Hardening & Symbol Stripping
-        run: |
-          DYLIB_PATH="target/aarch64-apple-ios/release/libsec_core.dylib"
-          if [ -f "$DYLIB_PATH" ]; then
-            echo "Inspecting binary before stripping:"
-            file "$DYLIB_PATH"
-            otool -L "$DYLIB_PATH"
-
-            echo "Stripping non-global symbols..."
-            strip -x "$DYLIB_PATH"
-
-            echo "Binary size:"
-            ls -lh "$DYLIB_PATH"
-          else
-            echo "::error::Binary not found at $DYLIB_PATH"
-            exit 1
-          fi
+          DYLIB="$STAGE/sec_core/target/aarch64-apple-ios/release/libsec_core.dylib"
+          install_name_tool -id "@executable_path/Frameworks/libsec_core.dylib" "$DYLIB"
+          strip -x -S "$DYLIB"
+          SEC_HASH=$(python3 "$STAGE/scripts/macho_hash.py" seal "$DYLIB" --marker-hex "$(cat "$MARKER")")
+          echo "Sealed libsec_core __TEXT SHA-256: $SEC_HASH"
+          for forbidden in "20-10.store" "3105PATCH" "bplist00" "FridaGadget" "SSLKillSwitch"; do
+            if strings "$DYLIB" | grep -Fqi "$forbidden"; then
+              echo "::error::Leaked string $forbidden in dylib!"
+              exit 1
+            fi
+          done
 
       - name: Upload libsec_core.dylib Artifact
         uses: actions/upload-artifact@v4
         with:
           name: libsec_core-arm64-ios
-          path: target/aarch64-apple-ios/release/libsec_core.dylib
+          path: ${{ steps.stage.outputs.stage }}/sec_core/target/aarch64-apple-ios/release/libsec_core.dylib
           if-no-files-found: error

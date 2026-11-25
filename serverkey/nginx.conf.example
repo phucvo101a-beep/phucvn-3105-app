@@ -1,0 +1,30 @@
+# Nginx Hardening Snippet for PHUCVN 3105 Server Key
+# Include inside `server { ... }` block.
+
+location ~* /(\.env|\.git|data/|lib/|api/|schema_addon\.sql|composer\.|README|HUONG_DAN) {
+    deny all;
+    return 403;
+}
+
+location ~* \.(json|sql|bak|old|orig|zip|tar|gz|log|lock|md|py|rs|toml)$ {
+    deny all;
+    return 403;
+}
+
+location = /api/v3 {
+    rewrite ^ /api_v2.php?action=v3 last;
+}
+
+location = /api/ci/register {
+    rewrite ^ /api_v2.php?action=ci_register_build last;
+}
+
+# Restrict api.php legacy surface
+location = /api.php {
+    return 410 '{"error":"LEGACY_API_RETIRED"}';
+}
+
+# Security headers
+add_header X-Content-Type-Options "nosniff" always;
+add_header X-Frame-Options "DENY" always;
+add_header Cache-Control "no-store" always;

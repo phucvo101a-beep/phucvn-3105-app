@@ -254,6 +254,11 @@ enum PatchTransaction {
                     replacementDigest: replacementDigest,
                     appliedFilename: appliedFilename
                 ))
+                // Zero intermediate copy in memory when private/sealed asset is processed
+                if project.isPrivate {
+                    var mutableCopy = resolved.rule.replacementData
+                    secureWipeData(&mutableCopy)
+                }
             }
         } catch let error as PatchPackageError {
             throw error

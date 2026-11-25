@@ -4,9 +4,23 @@ import Foundation
 import Security
 
 enum PatchPackageCodec {
-    private static let magic = Data("3105PATCH\0".utf8)
-    static let latestSchemaVersion = 3
+    private static var magic: Data { GeneratedSecurityConfig.legacyMagicData() }
+    static let latestSchemaVersion = 4
     private static let minimumSchemaVersion = 1
+
+    private static let v4BundleIDToUUID: [String: UUID] = [
+        "61e146614cbea2ad84072a4f5fca5317": UUID(uuidString: "16A78656-EE0A-41F9-B0FA-5F9F44973BBE")!,
+        "4777d77cec3805986e68685216b8a307": UUID(uuidString: "DFC0AF84-76EF-49AF-9945-E8307FAE5C2B")!,
+        "6722c689f5f0451d3811369e3006eaae": UUID(uuidString: "B8192D12-7013-4420-8073-794D00FB4200")!,
+        "fb3dbf9849c3ec6a54057ac5f3f48688": UUID(uuidString: "855F300E-A213-45B6-8A14-D1EFA8D0F7AE")!,
+        "fbdf2846758499d9e60db27d90d3c8df": UUID(uuidString: "C0CA95DF-CD18-4F4A-A3CD-56DA11324716")!,
+        "cde208676db7538d5094f384a236f8e9": UUID(uuidString: "5A53E415-D850-4722-ADF3-1FAE7E73F9AB")!,
+        "a55aee362dde280664cf694b99f3020c": UUID(uuidString: "233DAE36-3734-4E2B-8C66-C491B540B4B5")!,
+    ]
+
+    static func isV4(_ data: Data) -> Bool {
+        data.count >= 48 && data.prefix(4) == GeneratedSecurityConfig.v4FormatTag()
+    }
 
     private struct Envelope: Codable {
         let schemaVersion: Int
@@ -131,6 +145,16 @@ enum PatchPackageCodec {
     }
 
     static func inspect(_ data: Data) throws -> PatchPackageSummary {
+        if isV4(data) {
+            let bidHex = data.subdata(in: 4..<20).map { String(format: "%02x", $0) }.joined()
+            let mappedUUID = v4BundleIDToUUID[bidHex] ?? UUID()
+            return PatchPackageSummary(
+                packageID: mappedUUID,
+                schemaVersion: 4,
+                isPasswordProtected: true,
+                keyFingerprint: Data(count: 32)
+            )
+        }
         let envelope = try parseEnvelope(data)
         return PatchPackageSummary(
             packageID: envelope.packageID,
@@ -140,7 +164,41 @@ enum PatchPackageCodec {
         )
     }
 
+    /// Decrypts a sealed V4 `.3105` container purely in RAM using server-issued ephemeral bundle keys.
+    static func decodeV4(_ data: Data, ticket: RuntimeSessionTicket?) throws -> DecodedPatchPackage {
+        guard isV4(data) else {
+            throw PatchPackageError.unsupportedFormat
+        }
+        let resolvedTicket = ticket ?? KeyAuthManager.shared.activeVerifiedTicket
+        guard let validTicket = resolvedTicket, SecCoreBridge.shared.isActiveTicketValid(validTicket) else {
+            throw PatchPackageError.privateOperationFailed
+        }
+        let plainBox = try SecCoreBridge.shared.decryptV4InRAM(data, ticket: validTicket)
+        defer { plainBox.wipe() }
+
+        let decoder = JSONDecoder()
+        decoder.dateDecodingStrategy = .secondsSince1970
+        decoder.dataDecodingStrategy = .base64
+        let payload = try plainBox.withReadOnlyData { raw in
+            try decoder.decode(Payload.self, from: raw)
+        }
+
+        // Enforce replacement digest integrity and strip disk persistence
+        var securedProject = payload.project
+        securedProject.isPrivate = true
+        for rule in securedProject.rules {
+            guard let expected = payload.replacementDigests[rule.id.uuidString],
+                  Data(SHA256.hash(data: rule.replacementData)) == expected else {
+                throw PatchPackageError.invalidPasswordOrCorruptedPackage
+            }
+        }
+        return DecodedPatchPackage(project: securedProject, contentKey: Data())
+    }
+
     static func decode(_ data: Data, password: String?) throws -> DecodedPatchPackage {
+        if isV4(data) {
+            return try decodeV4(data, ticket: nil)
+        }
         do {
             let envelope = try parseEnvelope(data)
             let contentKey: Data
@@ -425,8 +483,8 @@ enum PatchPackageCodec {
 
     private static func parseEnvelope(_ data: Data) throws -> Envelope {
         var encoded = data
-        let magic10 = Data("3105PATCH\0".utf8)
-        let magic9 = Data("3105PATCH".utf8)
+        let magic10 = GeneratedSecurityConfig.legacyMagicData()
+        let magic9 = magic10.prefix(9)
         if data.count > magic10.count && data.prefix(magic10.count) == magic10 {
             encoded = data.dropFirst(magic10.count)
         } else if data.count > magic9.count && data.prefix(magic9.count) == magic9 {
@@ -524,10 +582,12 @@ enum PatchPackageCodec {
     }
 
     private static func keyAAD(for packageID: UUID, version: Int) -> Data {
-        Data("3105PATCH/v\(version)/key/\(packageID.uuidString)".utf8)
+        let pfx = String(decoding: GeneratedSecurityConfig.legacyMagicData().prefix(9), as: UTF8.self)
+        return Data("\(pfx)/v\(version)/key/\(packageID.uuidString)".utf8)
     }
 
     private static func payloadAAD(for packageID: UUID, version: Int) -> Data {
-        Data("3105PATCH/v\(version)/payload/\(packageID.uuidString)".utf8)
+        let pfx = String(decoding: GeneratedSecurityConfig.legacyMagicData().prefix(9), as: UTF8.self)
+        return Data("\(pfx)/v\(version)/payload/\(packageID.uuidString)".utf8)
     }
 }

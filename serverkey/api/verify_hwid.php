@@ -1,3 +1,1 @@
-<?php
-$_GET['action'] = 'verify_hwid';
-require_once dirname(__DIR__) . '/api.php';
+<?php require __DIR__ . '/index.php';

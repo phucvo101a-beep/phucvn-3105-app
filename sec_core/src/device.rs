@@ -1,117 +1,192 @@
-//! Hardware Fingerprint Engine & Persistent iOS Keychain Storage
-//! Generates an immutable device identifier combining Keychain UUID + sysctl `hw.machine`
-
-use sha2::{Digest, Sha256};
-use std::ffi::CStr;
-use std::os::raw::{c_char, c_int, c_void};
 use obfstr::obfstr;
+use sha2::{Digest, Sha256};
+use std::ffi::{c_void, CString};
 
+#[cfg(target_vendor = "apple")]
 extern "C" {
     fn sysctlbyname(
-        name: *const c_char,
+        name: *const i8,
         oldp: *mut c_void,
         oldlenp: *mut usize,
-        newp: *mut c_void,
+        newp: *const c_void,
         newlen: usize,
-    ) -> c_int;
+    ) -> i32;
 
-    // Security framework Keychain APIs
+    static kCFAllocatorDefault: *const c_void;
+    static kCFBooleanTrue: *const c_void;
+
+    static kSecClass: *const c_void;
+    static kSecClassGenericPassword: *const c_void;
+    static kSecAttrService: *const c_void;
+    static kSecAttrAccount: *const c_void;
+    static kSecAttrAccessible: *const c_void;
+    static kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly: *const c_void;
+    static kSecValueData: *const c_void;
+    static kSecReturnData: *const c_void;
+    static kSecMatchLimit: *const c_void;
+    static kSecMatchLimitOne: *const c_void;
+
+    fn CFDictionaryCreateMutable(
+        allocator: *const c_void,
+        capacity: isize,
+        key_callbacks: *const c_void,
+        value_callbacks: *const c_void,
+    ) -> *mut c_void;
+    fn CFDictionaryAddValue(the_dict: *mut c_void, key: *const c_void, value: *const c_void);
+    fn CFStringCreateWithCString(
+        alloc: *const c_void,
+        c_str: *const i8,
+        encoding: u32,
+    ) -> *const c_void;
+    fn CFDataCreate(alloc: *const c_void, bytes: *const u8, length: isize) -> *const c_void;
+    fn CFDataGetLength(the_data: *const c_void) -> isize;
+    fn CFDataGetBytePtr(the_data: *const c_void) -> *const u8;
+    fn CFRelease(cf: *const c_void);
+
     fn SecItemCopyMatching(query: *const c_void, result: *mut *const c_void) -> i32;
     fn SecItemAdd(attributes: *const c_void, result: *mut *const c_void) -> i32;
-    fn CFRelease(cf: *const c_void);
-    fn CFStringCreateWithCString(alloc: *const c_void, c_str: *const c_char, encoding: u32) -> *const c_void;
-    fn CFStringGetCString(cf: *const c_void, buffer: *mut c_char, max_size: isize, encoding: u32) -> bool;
-    fn CFDictionaryCreate(
-        alloc: *const c_void,
-        keys: *const *const c_void,
-        values: *const *const c_void,
-        num_values: isize,
-        key_callbacks: *const c_void,
-        val_callbacks: *const c_void,
-    ) -> *const c_void;
 }
 
-const K_CF_STRING_ENCODING_UTF8: u32 = 0x08000100;
+const K_CF_STRING_ENCODING_UTF8: u32 = 0x0800_0100;
 
-/// Read `hw.machine` (e.g., "iPhone15,2") via direct sysctlbyname
-pub fn get_hardware_model() -> String {
-    let name = obfstr!("hw.machine");
-    let mut name_buf = [0i8; 16];
-    for (i, b) in name.bytes().enumerate() {
-        if i < 15 {
-            name_buf[i] = b as i8;
-        }
-    }
-
-    let mut size = 0usize;
-    unsafe {
-        if sysctlbyname(name_buf.as_ptr(), core::ptr::null_mut(), &mut size, core::ptr::null_mut(), 0) == 0 && size > 0 {
-            let mut buf = vec![0u8; size];
-            if sysctlbyname(name_buf.as_ptr(), buf.as_mut_ptr() as *mut c_void, &mut size, core::ptr::null_mut(), 0) == 0 {
-                return CStr::from_bytes_with_nul(&buf)
-                    .map(|c| c.to_string_lossy().into_owned())
-                    .unwrap_or_else(|_| "iPhone_arm64".to_string());
+/// Retrieves device hardware model (e.g. "iPhone16,2").
+pub fn get_hardware_machine() -> String {
+    #[cfg(target_vendor = "apple")]
+    {
+        if let Ok(name) = CString::new(obfstr!("hw.machine")) {
+            let mut size: usize = 0;
+            unsafe {
+                sysctlbyname(name.as_ptr(), core::ptr::null_mut(), &mut size, core::ptr::null(), 0);
+                if size > 0 && size < 128 {
+                    let mut buf = vec![0u8; size];
+                    if sysctlbyname(
+                        name.as_ptr(),
+                        buf.as_mut_ptr() as *mut c_void,
+                        &mut size,
+                        core::ptr::null(),
+                        0,
+                    ) == 0
+                    {
+                        if let Some(end) = buf.iter().position(|&b| b == 0) {
+                            buf.truncate(end);
+                        }
+                        if let Ok(s) = String::from_utf8(buf) {
+                            return s;
+                        }
+                    }
+                }
             }
         }
     }
-    "iPhone_arm64".to_string()
+    obfstr!("unknown-apple").to_string()
 }
 
-/// Keychain Service wrapper to store and retrieve persistent UUID
-pub fn get_persistent_keychain_uuid() -> String {
-    let account = obfstr!("com.phucvn.3105.device_uuid");
-    if let Some(existing) = keychain_read_string(account) {
-        if !existing.trim().is_empty() {
-            return existing;
+/// Reads persistent device salt string from iOS Keychain.
+#[cfg(target_vendor = "apple")]
+fn keychain_read_string(service: &str, account: &str) -> Option<String> {
+    let svc_c = CString::new(service).ok()?;
+    let acc_c = CString::new(account).ok()?;
+    unsafe {
+        let cf_svc = CFStringCreateWithCString(kCFAllocatorDefault, svc_c.as_ptr(), K_CF_STRING_ENCODING_UTF8);
+        let cf_acc = CFStringCreateWithCString(kCFAllocatorDefault, acc_c.as_ptr(), K_CF_STRING_ENCODING_UTF8);
+        let dict = CFDictionaryCreateMutable(kCFAllocatorDefault, 6, core::ptr::null(), core::ptr::null());
+        if dict.is_null() || cf_svc.is_null() || cf_acc.is_null() {
+            if !cf_svc.is_null() { CFRelease(cf_svc); }
+            if !cf_acc.is_null() { CFRelease(cf_acc); }
+            if !dict.is_null() { CFRelease(dict); }
+            return None;
+        }
+        CFDictionaryAddValue(dict, kSecClass, kSecClassGenericPassword);
+        CFDictionaryAddValue(dict, kSecAttrService, cf_svc);
+        CFDictionaryAddValue(dict, kSecAttrAccount, cf_acc);
+        CFDictionaryAddValue(dict, kSecReturnData, kCFBooleanTrue);
+        CFDictionaryAddValue(dict, kSecMatchLimit, kSecMatchLimitOne);
+
+        let mut out_ref: *const c_void = core::ptr::null();
+        let status = SecItemCopyMatching(dict, &mut out_ref);
+        CFRelease(dict);
+        CFRelease(cf_svc);
+        CFRelease(cf_acc);
+
+        if status == 0 && !out_ref.is_null() {
+            let len = CFDataGetLength(out_ref);
+            let ptr = CFDataGetBytePtr(out_ref);
+            let res = if len > 0 && !ptr.is_null() {
+                let slice = core::slice::from_raw_parts(ptr, len as usize);
+                String::from_utf8(slice.to_vec()).ok()
+            } else {
+                None
+            };
+            CFRelease(out_ref);
+            return res;
         }
     }
-
-    // Generate new random pseudo-UUID
-    let mut rand_bytes = [0u8; 16];
-    rand::RngCore::fill_bytes(&mut rand::rngs::OsRng, &mut rand_bytes);
-    // UUID v4 format
-    rand_bytes[6] = (rand_bytes[6] & 0x0F) | 0x40;
-    rand_bytes[8] = (rand_bytes[8] & 0x3F) | 0x80;
-    let new_uuid = format!(
-        "{:02x}{:02x}{:02x}{:02x}-{:02x}{:02x}-{:02x}{:02x}-{:02x}{:02x}-{:02x}{:02x}{:02x}{:02x}{:02x}{:02x}",
-        rand_bytes[0], rand_bytes[1], rand_bytes[2], rand_bytes[3],
-        rand_bytes[4], rand_bytes[5],
-        rand_bytes[6], rand_bytes[7],
-        rand_bytes[8], rand_bytes[9],
-        rand_bytes[10], rand_bytes[11], rand_bytes[12], rand_bytes[13], rand_bytes[14], rand_bytes[15]
-    );
-
-    keychain_write_string(account, &new_uuid);
-    new_uuid
-}
-
-/// Compute 64-character SHA-256 Hardware Fingerprint
-pub fn generate_device_fingerprint() -> String {
-    let hw_model = get_hardware_model();
-    let keychain_uuid = get_persistent_keychain_uuid();
-
-    let combined = format!("{}:{}:PHUCVN_V2", hw_model, keychain_uuid);
-    let mut hasher = Sha256::new();
-    hasher.update(combined.as_bytes());
-    format!("{:02x}", hasher.finalize())
-}
-
-/// Read string from iOS Keychain
-pub fn keychain_read_string(_key: &str) -> Option<String> {
-    // For iOS arm64 targets, use CoreFoundation/Security CFDictionary
-    #[cfg(target_os = "ios")]
-    unsafe {
-        // Implementation calling SecItemCopyMatching
-        None
-    }
-    #[cfg(not(target_os = "ios"))]
     None
 }
 
-/// Write string to iOS Keychain
-pub fn keychain_write_string(_key: &str, _value: &str) {
-    #[cfg(target_os = "ios")]
+#[cfg(target_vendor = "apple")]
+fn keychain_write_string(service: &str, account: &str, val: &str) -> bool {
+    let (Ok(svc_c), Ok(acc_c)) = (CString::new(service), CString::new(account)) else {
+        return false;
+    };
     unsafe {
-        // Implementation calling SecItemAdd
+        let cf_svc = CFStringCreateWithCString(kCFAllocatorDefault, svc_c.as_ptr(), K_CF_STRING_ENCODING_UTF8);
+        let cf_acc = CFStringCreateWithCString(kCFAllocatorDefault, acc_c.as_ptr(), K_CF_STRING_ENCODING_UTF8);
+        let cf_data = CFDataCreate(kCFAllocatorDefault, val.as_ptr(), val.len() as isize);
+        let dict = CFDictionaryCreateMutable(kCFAllocatorDefault, 6, core::ptr::null(), core::ptr::null());
+        if dict.is_null() || cf_svc.is_null() || cf_acc.is_null() || cf_data.is_null() {
+            if !cf_svc.is_null() { CFRelease(cf_svc); }
+            if !cf_acc.is_null() { CFRelease(cf_acc); }
+            if !cf_data.is_null() { CFRelease(cf_data); }
+            if !dict.is_null() { CFRelease(dict); }
+            return false;
+        }
+        CFDictionaryAddValue(dict, kSecClass, kSecClassGenericPassword);
+        CFDictionaryAddValue(dict, kSecAttrService, cf_svc);
+        CFDictionaryAddValue(dict, kSecAttrAccount, cf_acc);
+        CFDictionaryAddValue(dict, kSecAttrAccessible, kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly);
+        CFDictionaryAddValue(dict, kSecValueData, cf_data);
+
+        let status = SecItemAdd(dict, core::ptr::null_mut());
+        CFRelease(dict);
+        CFRelease(cf_svc);
+        CFRelease(cf_acc);
+        CFRelease(cf_data);
+        status == 0
     }
+}
+
+#[cfg(not(target_vendor = "apple"))]
+fn keychain_read_string(_service: &str, _account: &str) -> Option<String> {
+    None
+}
+
+#[cfg(not(target_vendor = "apple"))]
+fn keychain_write_string(_service: &str, _account: &str, _val: &str) -> bool {
+    false
+}
+
+/// Computes persistent hardware-bound SHA-256 device fingerprint (64 hex chars).
+pub fn get_device_fingerprint() -> String {
+    let hw = get_hardware_machine();
+    let svc = obfstr!("com.phucvn.3105.devfp").to_string();
+    let acc = obfstr!("device_secret_id").to_string();
+
+    let persistent_id = match keychain_read_string(&svc, &acc) {
+        Some(existing) if !existing.trim().is_empty() => existing,
+        _ => {
+            let mut rnd = [0u8; 16];
+            rand::RngCore::fill_bytes(&mut rand::rngs::OsRng, &mut rnd);
+            let generated = hex::encode(rnd);
+            let _ = keychain_write_string(&svc, &acc, &generated);
+            keychain_read_string(&svc, &acc).unwrap_or(generated)
+        }
+    };
+
+    let mut hasher = Sha256::new();
+    hasher.update(obfstr!("PHUCVN3105-HWID-V3|").as_bytes());
+    hasher.update(hw.as_bytes());
+    hasher.update(b"|");
+    hasher.update(persistent_id.as_bytes());
+    hex::encode(hasher.finalize())
 }

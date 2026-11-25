@@ -1,56 +1,62 @@
-//! Anti-Hooking, Anti-Frida & Dylib Injection Detection
-
-use std::ffi::CStr;
-use std::net::{SocketAddr, TcpStream};
-use std::time::Duration;
 use obfstr::obfstr;
+use std::ffi::{c_char, c_void, CStr, CString};
 
+#[cfg(target_vendor = "apple")]
 extern "C" {
     fn _dyld_image_count() -> u32;
-    fn _dyld_get_image_name(image_index: u32) -> *const libc::c_char;
-    fn getenv(name: *const libc::c_char) -> *const libc::c_char;
+    fn _dyld_get_image_name(image_index: u32) -> *const c_char;
+    fn getenv(name: *const c_char) -> *const c_char;
+    fn dlsym(handle: *mut c_void, symbol: *const c_char) -> *mut c_void;
 }
 
-mod libc {
-    pub type c_char = i8;
-}
+const RTLD_DEFAULT: *mut c_void = (-2isize) as *mut c_void;
 
-/// Blacklisted hook libraries and tweak dylibs
-#[inline(always)]
-fn get_suspicious_patterns() -> [&'static str; 16] {
-    [
-        obfstr!("FridaGadget"),
-        obfstr!("frida-agent"),
-        obfstr!("Substrate"),
-        obfstr!("ElleKit"),
-        obfstr!("Substitute"),
-        obfstr!("TweakInject"),
-        obfstr!("SSLKillSwitch"),
-        obfstr!("Shadow"),
-        obfstr!("Choicy"),
-        obfstr!("iGameGod"),
-        obfstr!("Flex"),
-        obfstr!("bfdecrypt"),
-        obfstr!("CrackerXI"),
-        obfstr!("TrollDecrypt"),
-        obfstr!("libcycript"),
-        obfstr!("libhooker"),
-    ]
-}
-
-/// Scan all loaded dynamic libraries via `_dyld_get_image_name`
-pub fn scan_loaded_dyld_images() -> bool {
-    let patterns = get_suspicious_patterns();
+/// Detects Substrate, Substitute, ElleKit, Frida, SSLKillSwitch, Cycript and similar tweak images.
+pub fn scan_injected_dylibs() -> bool {
+    #[cfg(target_vendor = "apple")]
     unsafe {
         let count = _dyld_image_count();
         for i in 0..count {
-            let name_ptr = _dyld_get_image_name(i);
-            if name_ptr.is_null() {
+            let ptr = _dyld_get_image_name(i);
+            if ptr.is_null() {
                 continue;
             }
-            if let Ok(name_str) = CStr::from_ptr(name_ptr).to_str() {
-                for pattern in &patterns {
-                    if name_str.contains(pattern) {
+            if let Ok(raw) = CStr::from_ptr(ptr).to_str() {
+                let lower = raw.to_ascii_lowercase();
+                if lower.contains(obfstr!("frida"))
+                    || lower.contains(obfstr!("substrate"))
+                    || lower.contains(obfstr!("substitute"))
+                    || lower.contains(obfstr!("ellekit"))
+                    || lower.contains(obfstr!("tweakinject"))
+                    || lower.contains(obfstr!("libhooker"))
+                    || lower.contains(obfstr!("sslkillswitch"))
+                    || lower.contains(obfstr!("cycript"))
+                    || lower.contains(obfstr!("objection"))
+                    || lower.contains(obfstr!("reveal"))
+                    || lower.contains(obfstr!("shadow"))
+                    || lower.contains(obfstr!("choicy"))
+                    || lower.contains(obfstr!("liberty"))
+                    || lower.contains(obfstr!("flyjb"))
+                    || lower.contains(obfstr!("flex"))
+                    || lower.contains(obfstr!("mobileloader"))
+                {
+                    return true;
+                }
+            }
+        }
+    }
+    false
+}
+
+/// Rejects any DYLD_INSERT_LIBRARIES environment injection (normal app uses LC_LOAD_DYLIB).
+pub fn check_dyld_insert_env() -> bool {
+    #[cfg(target_vendor = "apple")]
+    unsafe {
+        if let Ok(key) = CString::new(obfstr!("DYLD_INSERT_LIBRARIES")) {
+            let val = getenv(key.as_ptr());
+            if !val.is_null() {
+                if let Ok(s) = CStr::from_ptr(val).to_str() {
+                    if !s.trim().is_empty() {
                         return true;
                     }
                 }
@@ -60,22 +66,52 @@ pub fn scan_loaded_dyld_images() -> bool {
     false
 }
 
-/// Verify `DYLD_INSERT_LIBRARIES` environment variable
-pub fn check_dyld_insert_libraries() -> bool {
+/// Checks ARM64 first two instructions at target pointer for common inline hook trampolines (`LDR X16/X17 + BR`).
+#[inline(always)]
+pub fn is_trampoline_hooked(fn_ptr: *const u8) -> bool {
+    if fn_ptr.is_null() {
+        return false;
+    }
+    #[cfg(target_arch = "aarch64")]
     unsafe {
-        let env_key = obfstr!("DYLD_INSERT_LIBRARIES");
-        let mut key_buf = [0i8; 32];
-        for (i, b) in env_key.bytes().enumerate() {
-            if i < 31 {
-                key_buf[i] = b as i8;
+        let insn0 = core::ptr::read_unaligned(fn_ptr as *const u32);
+        let insn1 = core::ptr::read_unaligned(fn_ptr.add(4) as *const u32);
+        // LDR X16, #... (0x58000010) / LDR X17, #... (0x58000011) followed by BR X16/X17
+        let is_ldr_scratch = (insn0 & 0xFF00_001E) == 0x5800_0010;
+        let is_br_scratch = insn1 == 0xD61F_0200 || insn1 == 0xD61F_0220;
+        if is_ldr_scratch && is_br_scratch {
+            return true;
+        }
+        // Unconditional immediate branch B imm26 at function prologue (`0x14000000..0x17FFFFFF`) often used by Substrate/ElleKit
+        if (insn0 & 0xFC00_0000) == 0x1400_0000 {
+            return true;
+        }
+        // ADRP Xn, #... + ADD Xn + BR Xn inline trampoline
+        if (insn0 & 0x9F00_001F) == 0x9000_0010 && (insn1 & 0xFF80_03FF) == 0x9100_0210 {
+            let insn2 = core::ptr::read_unaligned(fn_ptr.add(8) as *const u32);
+            if insn2 == 0xD61F_0200 || insn2 == 0xD61F_0220 {
+                return true;
             }
         }
-        let ptr = getenv(key_buf.as_ptr());
-        if !ptr.is_null() {
-            if let Ok(val) = CStr::from_ptr(ptr).to_str() {
-                // If any inserted dylib is present that isn't our own module
-                let my_name = obfstr!("libsec_core");
-                if !val.trim().is_empty() && !val.contains(my_name) {
+    }
+    let _ = fn_ptr;
+    false
+}
+
+/// Inspects critical runtime symbols for inline hook trampolines.
+pub fn scan_critical_trampolines() -> bool {
+    #[cfg(target_vendor = "apple")]
+    unsafe {
+        let targets = [
+            obfstr!("objc_msgSend").to_string(),
+            obfstr!("dlsym").to_string(),
+            obfstr!("dlopen").to_string(),
+            obfstr!("SecItemCopyMatching").to_string(),
+        ];
+        for sym in &targets {
+            if let Ok(c_sym) = CString::new(sym.as_str()) {
+                let ptr = dlsym(RTLD_DEFAULT, c_sym.as_ptr());
+                if is_trampoline_hooked(ptr as *const u8) {
                     return true;
                 }
             }
@@ -84,66 +120,33 @@ pub fn check_dyld_insert_libraries() -> bool {
     false
 }
 
-/// Check if local Frida server/gadget ports (27042, 27043) are accepting connections
-pub fn check_frida_listening_ports() -> bool {
-    let addrs = [
-        SocketAddr::from(([127, 0, 0, 1], 27042)),
-        SocketAddr::from(([127, 0, 0, 1], 27043)),
-    ];
-
-    for addr in &addrs {
-        if TcpStream::connect_timeout(addr, Duration::from_millis(15)).is_ok() {
+/// Checks local Frida Gadget/Server TCP ports quickly without blocking long.
+pub fn scan_frida_ports() -> bool {
+    use std::net::{SocketAddr, TcpStream};
+    use std::time::Duration;
+    for port in [27042u16, 27043u16] {
+        let addr: SocketAddr = ([127, 0, 0, 1], port).into();
+        if TcpStream::connect_timeout(&addr, Duration::from_millis(12)).is_ok() {
             return true;
         }
     }
     false
 }
 
-/// Anti-Trampoline Check:
-/// Inspects the first 16 bytes of an ARM64 function address in memory.
-/// Detects Frida/Dobby/ElleKit detour patterns:
-/// 1. `LDR X16, #8; BR X16` -> 0x58000050 followed by 0xd61f0200
-/// 2. Direct branch `B` -> opcodes with high 6 bits `000101` (0x14000000..=0x17ffffff)
-/// 3. `ADRP X16, ...; ADD X16, X16, ...; BR X16`
-#[inline(always)]
-pub unsafe fn is_function_trampoline_hooked(func_ptr: *const ()) -> bool {
-    if func_ptr.is_null() {
-        return false;
+/// Aggregate anti-hook bitmask (0 = clean).
+pub fn anti_hook_bitmask(include_port_scan: bool) -> u32 {
+    let mut mask = 0u32;
+    if scan_injected_dylibs() {
+        mask |= 0x10;
     }
-
-    let code_ptr = func_ptr as *const u32;
-    let insn0 = core::ptr::read_volatile(code_ptr);
-    let insn1 = core::ptr::read_volatile(code_ptr.add(1));
-
-    // Check 1: LDR X16, #8 (0x58000050) + BR X16 (0xd61f0200)
-    if insn0 == 0x58000050 && insn1 == 0xd61f0200 {
-        return true;
+    if check_dyld_insert_env() {
+        mask |= 0x20;
     }
-
-    // Check 2: Direct unconditional branch B (0x14000000..0x17ffffff)
-    if (insn0 & 0xFC000000) == 0x14000000 {
-        return true;
+    if scan_critical_trampolines() {
+        mask |= 0x40;
     }
-
-    // Check 3: ADRP + ADD + BR X16
-    let insn2 = core::ptr::read_volatile(code_ptr.add(2));
-    if (insn0 & 0x9F000000) == 0x90000000 && insn2 == 0xd61f0200 {
-        return true;
+    if include_port_scan && scan_frida_ports() {
+        mask |= 0x80;
     }
-
-    false
-}
-
-/// Full Anti-Hook & Environment scan
-pub fn check_hook_environment() -> bool {
-    if scan_loaded_dyld_images() {
-        return true;
-    }
-    if check_dyld_insert_libraries() {
-        return true;
-    }
-    if check_frida_listening_ports() {
-        return true;
-    }
-    false
+    mask
 }
