@@ -1028,6 +1028,7 @@ class SecuritySuiteTests(unittest.TestCase):
         self.assertIn("activationGeneration", gate_swift)
         self.assertIn("asyncAfter(deadline:", gate_swift)
         self.assertIn("handleCheckingTimeoutFallback", gate_swift)
+        self.assertIn("checkingElapsedSeconds", gate_swift)
         self.assertIn("case connectionError(message: String)", gate_swift)
         bootstrap_block = gate_swift.split("func bootstrapCheck(", 1)[1].split("func activateKey(", 1)[0]
         self.assertIn("case .preflightOpen:", bootstrap_block)

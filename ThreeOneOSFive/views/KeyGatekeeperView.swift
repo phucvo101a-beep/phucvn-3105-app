@@ -27,10 +27,12 @@ final class KeyAuthManager: ObservableObject {
     @Published var isVerifying: Bool = false
     @Published var errorMessage: String? = nil
     @Published var deviceHWID: String = ""
+    @Published var checkingElapsedSeconds: Int = 0
 
     private var expirationDate: Date? = nil
     private var countdownTimer: Timer? = nil
     private var heartbeatTimer: Timer? = nil
+    private var checkingTimer: Timer? = nil
     private var bootstrapGeneration: UInt64 = 0
     private var activationGeneration: UInt64 = 0
     private var isBootstrapping: Bool = false
@@ -59,8 +61,13 @@ final class KeyAuthManager: ObservableObject {
 
     func handleCheckingTimeoutFallback() {
         DispatchQueue.main.async {
-            guard case .checking = self.gatePhase else { return }
+            guard case .checking = self.gatePhase else {
+                self.stopCheckingTimer()
+                return
+            }
+            self.stopCheckingTimer()
             self.bootstrapGeneration &+= 1
+            self.activationGeneration &+= 1
             self.isBootstrapping = false
             self.isVerifying = false
             SecCoreBridge.shared.wipeSession()
@@ -68,6 +75,29 @@ final class KeyAuthManager: ObservableObject {
             self.errorMessage = msg
             self.gatePhase = .connectionError(message: msg)
         }
+    }
+
+    private func startCheckingTimer() {
+        stopCheckingTimer()
+        checkingElapsedSeconds = 0
+        let timer = Timer(timeInterval: 1.0, repeats: true) { [weak self] _ in
+            guard let self else { return }
+            guard case .checking = self.gatePhase else {
+                self.stopCheckingTimer()
+                return
+            }
+            self.checkingElapsedSeconds += 1
+            if self.checkingElapsedSeconds >= 12 {
+                self.handleCheckingTimeoutFallback()
+            }
+        }
+        RunLoop.main.add(timer, forMode: .common)
+        checkingTimer = timer
+    }
+
+    private func stopCheckingTimer() {
+        checkingTimer?.invalidate()
+        checkingTimer = nil
     }
 
     /// Runs mandatory zero-trust preflight (Kill-Switch + Force Update + Integrity), then silent key auth if present.
@@ -83,11 +113,13 @@ final class KeyAuthManager: ObservableObject {
             self.statusMessage = "Đang xác thực trạng thái máy chủ & phiên bản..."
             if !self.isVerifying {
                 self.gatePhase = .checking
+                self.startCheckingTimer()
             }
 
             // Fail-safe watchdog timeout: guarantees infinite Checking spinner never stalls UI.
             DispatchQueue.main.asyncAfter(deadline: .now() + 12.0) { [weak self] in
                 guard let self, self.isBootstrapping, self.bootstrapGeneration == gen else { return }
+                self.stopCheckingTimer()
                 self.isBootstrapping = false
                 self.isVerifying = false
                 SecCoreBridge.shared.wipeSession()
@@ -124,17 +156,21 @@ final class KeyAuthManager: ObservableObject {
                             self.currentKey = savedKey
                             self.activateKey(savedKey, isSilent: true)
                         } else {
+                            self.stopCheckingTimer()
                             self.gatePhase = .requiresKey
                         }
                     case .cryptoError(let msg), .networkError(let msg):
+                        self.stopCheckingTimer()
                         SecCoreBridge.shared.wipeSession()
                         self.errorMessage = msg
                         self.gatePhase = .connectionError(message: msg)
                     case .denied(_, let msg):
+                        self.stopCheckingTimer()
                         SecCoreBridge.shared.wipeSession()
                         self.errorMessage = msg
                         self.gatePhase = .connectionError(message: msg)
                     case .unlocked:
+                        self.stopCheckingTimer()
                         SecCoreBridge.shared.wipeSession()
                         self.gatePhase = .connectionError(message: "Phản hồi kiểm tra máy chủ không hợp lệ.")
                     }
@@ -168,10 +204,12 @@ final class KeyAuthManager: ObservableObject {
             if isSilent {
                 self.statusMessage = "Đang xác thực mã Key bản quyền..."
                 self.gatePhase = .checking
+                self.startCheckingTimer()
             }
 
             DispatchQueue.main.asyncAfter(deadline: .now() + 12.0) { [weak self] in
                 guard let self, self.isVerifying, self.activationGeneration == gen else { return }
+                self.stopCheckingTimer()
                 self.isVerifying = false
                 SecCoreBridge.shared.wipeSession()
                 let msg = "Hết thời gian phản hồi từ máy chủ kích hoạt (12s). Vui lòng thử lại."
@@ -183,6 +221,7 @@ final class KeyAuthManager: ObservableObject {
                 let outcome = SecCoreBridge.shared.activate(licenseKey: trimmed)
                 DispatchQueue.main.async {
                     guard let self, self.isVerifying, self.activationGeneration == gen else { return }
+                    self.stopCheckingTimer()
                     self.isVerifying = false
                     switch outcome {
                     case .unlocked(let ticket, let summary):
@@ -293,10 +332,15 @@ final class KeyAuthManager: ObservableObject {
     }
 
     func unlinkKey() {
-        stopTimers()
-        SecCoreBridge.shared.wipeSession()
         KeychainLicenseVault.deleteLicenseKey()
+        SecCoreBridge.shared.wipeSession()
         DispatchQueue.main.async {
+            self.stopTimers()
+            self.stopCheckingTimer()
+            self.bootstrapGeneration &+= 1
+            self.activationGeneration &+= 1
+            self.isBootstrapping = false
+            self.isVerifying = false
             self.currentKey = ""
             self.expirationDate = nil
             self.remainingCountdownText = ""
@@ -329,6 +373,7 @@ final class KeyAuthManager: ObservableObject {
 
     private func lockOut(to phase: SecurityGatePhase) {
         stopTimers()
+        stopCheckingTimer()
         bootstrapGeneration &+= 1
         activationGeneration &+= 1
         isBootstrapping = false
@@ -376,10 +421,8 @@ final class KeyAuthManager: ObservableObject {
 
 struct SecurityCheckingView: View {
     let message: String
+    let elapsedSeconds: Int
     var onRetry: (() -> Void)? = nil
-    var onTimeoutFallback: (() -> Void)? = nil
-    @State private var elapsedSeconds: Int = 0
-    @State private var isSpinningHintVisible: Bool = false
 
     var body: some View {
         ZStack {
@@ -399,16 +442,20 @@ struct SecurityCheckingView: View {
                     .multilineTextAlignment(.center)
                     .padding(.horizontal, 32)
 
-                if isSpinningHintVisible, let onRetry {
-                    VStack(spacing: 10) {
-                        Text("Đang chờ phản hồi máy chủ (\(elapsedSeconds)s)...")
-                            .font(.system(size: 11, design: .monospaced))
-                            .foregroundStyle(AppTheme.subduedText.opacity(0.8))
-                        Button(action: {
-                            elapsedSeconds = 0
-                            isSpinningHintVisible = false
-                            onRetry()
-                        }) {
+                VStack(spacing: 10) {
+                    HStack(spacing: 6) {
+                        Image(systemName: "clock")
+                            .font(.system(size: 11))
+                        Text("Thời gian chờ: \(elapsedSeconds)s / 12s")
+                            .font(.system(size: 11.5, weight: .semibold, design: .monospaced))
+                    }
+                    .foregroundStyle(AppTheme.accentSoft.opacity(0.9))
+                    .padding(.horizontal, 12)
+                    .padding(.vertical, 5)
+                    .background(Color.white.opacity(0.06), in: Capsule())
+
+                    if elapsedSeconds >= 3, let onRetry {
+                        Button(action: onRetry) {
                             Label("Thử lại kết nối", systemImage: "arrow.clockwise")
                                 .font(.system(size: 12.5, weight: .bold, design: .rounded))
                                 .foregroundStyle(.white)
@@ -416,24 +463,10 @@ struct SecurityCheckingView: View {
                                 .padding(.vertical, 8)
                                 .background(Color.white.opacity(0.12), in: Capsule())
                         }
+                        .transition(.opacity)
                     }
-                    .padding(.top, 4)
-                    .transition(.opacity)
                 }
-            }
-        }
-        .task {
-            while !Task.isCancelled {
-                try? await Task.sleep(nanoseconds: 1_000_000_000)
-                guard !Task.isCancelled else { break }
-                elapsedSeconds += 1
-                if elapsedSeconds >= 3 {
-                    isSpinningHintVisible = true
-                }
-                if elapsedSeconds >= 13 {
-                    onTimeoutFallback?()
-                    break
-                }
+                .padding(.top, 4)
             }
         }
     }

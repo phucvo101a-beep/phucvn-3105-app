@@ -48,10 +48,8 @@ private struct SecurityGateRootView: View {
             case .checking:
                 SecurityCheckingView(
                     message: keyAuth.statusMessage,
-                    onRetry: { keyAuth.bootstrapCheck(force: true) },
-                    onTimeoutFallback: {
-                        keyAuth.handleCheckingTimeoutFallback()
-                    }
+                    elapsedSeconds: keyAuth.checkingElapsedSeconds,
+                    onRetry: { keyAuth.bootstrapCheck(force: true) }
                 )
                 .transition(.opacity)
             case .connectionError(let message):
