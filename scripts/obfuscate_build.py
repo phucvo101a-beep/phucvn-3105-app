@@ -60,6 +60,7 @@ SWIFT_INTERNAL_SECURITY_TYPES = [
     "SemVerComparator",
     "SecurityCheckingView",
     "SecurityLockoutView",
+    "SecurityGateRootView",
 ]
 
 SWIFT_STRING_TARGET_FILES = [

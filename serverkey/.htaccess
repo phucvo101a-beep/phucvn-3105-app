@@ -2,14 +2,14 @@
     RewriteEngine On
     RewriteBase /
 
-    # Deny access to dotfiles, backups, SQL, JSON, logs, Composer/Rust/git internals
+    # Route V3 encrypted API first (before blocking direct access to legacy /api/*.php)
+    RewriteRule ^api/v3/?$ api_v2.php?action=v3 [QSA,L]
+    RewriteRule ^api/ci/register/?$ api_v2.php?action=ci_register_build [QSA,L]
+
+    # Deny access to dotfiles, backups, SQL, JSON, logs, Composer/Rust/git internals & legacy /api/*.php
     RewriteRule ^(\.env|\.git|\.htaccess|composer\.(json|lock)|schema_addon\.sql) - [F,L]
     RewriteRule ^(data|lib|api)/ - [F,L]
     RewriteRule \.(json|sql|bak|old|orig|zip|tar|gz|log|lock|md)$ - [F,L,NC]
-
-    # Route V3 encrypted API only
-    RewriteRule ^api/v3/?$ api_v2.php?action=v3 [QSA,L]
-    RewriteRule ^api/ci/register/?$ api_v2.php?action=ci_register_build [QSA,L]
 
     # Allow real safe entry files (admin.php, api_v2.php, index.php, assets)
     RewriteCond %{REQUEST_FILENAME} -f [OR]

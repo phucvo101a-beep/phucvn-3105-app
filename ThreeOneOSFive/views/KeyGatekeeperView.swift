@@ -30,6 +30,9 @@ final class KeyAuthManager: ObservableObject {
     private var expirationDate: Date? = nil
     private var countdownTimer: Timer? = nil
     private var heartbeatTimer: Timer? = nil
+    private var bootstrapGeneration: UInt64 = 0
+    private var activationGeneration: UInt64 = 0
+    private var isBootstrapping: Bool = false
     private let supportURLString = "https://20-10.store"
 
     var activeVerifiedTicket: RuntimeSessionTicket? {
@@ -43,51 +46,81 @@ final class KeyAuthManager: ObservableObject {
         self.deviceHWID = SecCoreBridge.shared.deviceFingerprint()
         let savedKey = KeychainLicenseVault.loadLicenseKey()
         self.currentKey = savedKey
-        bootstrapCheck()
+    }
+
+    func startBootstrapIfNeeded() {
+        DispatchQueue.main.async {
+            if case .checking = self.gatePhase, !self.isBootstrapping {
+                self.bootstrapCheck(force: false)
+            }
+        }
     }
 
     /// Runs mandatory zero-trust preflight (Kill-Switch + Force Update + Integrity), then silent key auth if present.
-    func bootstrapCheck() {
-        DispatchQueue.main.async {
+    func bootstrapCheck(force: Bool = true) {
+        let performOnMain = {
+            if !force && self.isBootstrapping {
+                return
+            }
+            self.bootstrapGeneration &+= 1
+            let gen = self.bootstrapGeneration
+            self.isBootstrapping = true
             self.errorMessage = nil
             self.statusMessage = "Đang xác thực trạng thái máy chủ & phiên bản..."
             if !self.isVerifying {
                 self.gatePhase = .checking
             }
-        }
 
-        DispatchQueue.global(qos: .userInitiated).async {
-            let preflight = SecCoreBridge.shared.preflight()
-            DispatchQueue.main.async {
-                switch preflight {
-                case .serverClosed(let msg):
-                    self.lockOut(to: .serverClosed(message: msg))
-                case .deviceBanned(let reason, let hwid):
-                    self.lockOut(to: .deviceBanned(reason: reason, hwid: hwid))
-                case .forceUpdate(let minV, let latV, let url, let msg):
-                    self.lockOut(to: .forceUpdate(minVersion: minV, latestVersion: latV, downloadURL: url, message: msg))
-                case .tampered:
-                    self.lockOut(to: .tampered)
-                case .preflightOpen:
-                    let saved = KeychainLicenseVault.loadLicenseKey()
-                    if !saved.isEmpty {
-                        self.currentKey = saved
-                        self.activateKey(saved, isSilent: true)
-                    } else {
+            // Fail-safe watchdog timeout: never let UI remain permanently trapped on Checking screen.
+            DispatchQueue.main.asyncAfter(deadline: .now() + 14.0) { [weak self] in
+                guard let self, self.isBootstrapping, self.bootstrapGeneration == gen else { return }
+                self.isBootstrapping = false
+                SecCoreBridge.shared.wipeSession()
+                self.errorMessage = "Quá thời gian kết nối máy chủ bảo mật (14s). Vui lòng kiểm tra mạng và thử lại."
+                self.gatePhase = .requiresKey
+            }
+
+            DispatchQueue.global(qos: .userInitiated).async { [weak self] in
+                let preflight = SecCoreBridge.shared.preflight()
+                DispatchQueue.main.async {
+                    guard let self, self.isBootstrapping, self.bootstrapGeneration == gen else { return }
+                    self.isBootstrapping = false
+                    switch preflight {
+                    case .serverClosed(let msg):
+                        self.lockOut(to: .serverClosed(message: msg))
+                    case .deviceBanned(let reason, let hwid):
+                        self.lockOut(to: .deviceBanned(reason: reason, hwid: hwid))
+                    case .forceUpdate(let minV, let latV, let url, let msg):
+                        self.lockOut(to: .forceUpdate(minVersion: minV, latestVersion: latV, downloadURL: url, message: msg))
+                    case .tampered:
+                        self.lockOut(to: .tampered)
+                    case .preflightOpen:
+                        let saved = KeychainLicenseVault.loadLicenseKey()
+                        if !saved.isEmpty {
+                            self.currentKey = saved
+                            self.activateKey(saved, isSilent: true)
+                        } else {
+                            self.gatePhase = .requiresKey
+                        }
+                    case .networkError(let msg):
+                        SecCoreBridge.shared.wipeSession()
+                        self.errorMessage = msg
+                        self.gatePhase = .requiresKey
+                    case .denied(_, let msg):
+                        SecCoreBridge.shared.wipeSession()
+                        self.errorMessage = msg
+                        self.gatePhase = .requiresKey
+                    case .unlocked:
                         self.gatePhase = .requiresKey
                     }
-                case .networkError(let msg):
-                    SecCoreBridge.shared.wipeSession()
-                    self.errorMessage = msg
-                    self.gatePhase = .requiresKey
-                case .denied(_, let msg):
-                    SecCoreBridge.shared.wipeSession()
-                    self.errorMessage = msg
-                    self.gatePhase = .requiresKey
-                case .unlocked:
-                    self.gatePhase = .requiresKey
                 }
             }
+        }
+
+        if Thread.isMainThread {
+            performOnMain()
+        } else {
+            DispatchQueue.main.async(execute: performOnMain)
         }
     }
 
@@ -95,6 +128,7 @@ final class KeyAuthManager: ObservableObject {
         let trimmed = rawKey.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty else {
             DispatchQueue.main.async {
+                self.isVerifying = false
                 self.errorMessage = "Vui lòng nhập mã Key bản quyền!"
                 self.gatePhase = .requiresKey
             }
@@ -102,70 +136,81 @@ final class KeyAuthManager: ObservableObject {
         }
 
         DispatchQueue.main.async {
+            self.activationGeneration &+= 1
+            let gen = self.activationGeneration
             self.isVerifying = true
             self.errorMessage = nil
-        }
 
-        DispatchQueue.global(qos: .userInitiated).async {
-            let outcome = SecCoreBridge.shared.activate(licenseKey: trimmed)
-            DispatchQueue.main.async {
+            DispatchQueue.main.asyncAfter(deadline: .now() + 15.0) { [weak self] in
+                guard let self, self.isVerifying, self.activationGeneration == gen else { return }
                 self.isVerifying = false
-                switch outcome {
-                case .unlocked(let ticket, let summary):
-                    KeychainLicenseVault.saveLicenseKey(trimmed)
-                    self.currentKey = trimmed
-                    self.role = summary.role.isEmpty ? "VIP" : summary.role
-                    self.isPermanent = summary.isPermanent
-                    self.deviceSlotsText = summary.maxDevices == 0
-                        ? "\(summary.usedDevices) / Vô hạn"
-                        : "\(summary.usedDevices) / \(summary.maxDevices) máy"
+                SecCoreBridge.shared.wipeSession()
+                self.errorMessage = "Hết thời gian phản hồi từ máy chủ kích hoạt (15s). Vui lòng thử lại."
+                self.gatePhase = .requiresKey
+            }
 
-                    if summary.isPermanent {
-                        self.expiryDateText = "Vĩnh Viễn"
-                        self.exactExpiryDateText = "Vĩnh Viễn (Trọn Đời)"
-                        self.remainingCountdownText = "Vĩnh Viễn (Trọn Đời)"
-                        self.expirationDate = nil
-                        self.secondsRemaining = 999_999_999
-                    } else {
-                        let expDate = Date(timeIntervalSince1970: TimeInterval(summary.expiryTS))
-                        self.expirationDate = expDate
-                        self.secondsRemaining = max(0, TimeInterval(summary.remainingSeconds))
-                        self.expiryDateText = summary.expiryText
-                        let fmt = DateFormatter()
-                        fmt.dateFormat = "dd/MM/yyyy 'lúc' HH:mm:ss"
-                        self.exactExpiryDateText = fmt.string(from: expDate)
-                        self.updateCountdownText()
+            DispatchQueue.global(qos: .userInitiated).async { [weak self] in
+                let outcome = SecCoreBridge.shared.activate(licenseKey: trimmed)
+                DispatchQueue.main.async {
+                    guard let self, self.activationGeneration == gen else { return }
+                    self.isVerifying = false
+                    switch outcome {
+                    case .unlocked(let ticket, let summary):
+                        KeychainLicenseVault.saveLicenseKey(trimmed)
+                        self.currentKey = trimmed
+                        self.role = summary.role.isEmpty ? "VIP" : summary.role
+                        self.isPermanent = summary.isPermanent
+                        self.deviceSlotsText = summary.maxDevices == 0
+                            ? "\(summary.usedDevices) / Vô hạn"
+                            : "\(summary.usedDevices) / \(summary.maxDevices) máy"
+
+                        if summary.isPermanent {
+                            self.expiryDateText = "Vĩnh Viễn"
+                            self.exactExpiryDateText = "Vĩnh Viễn (Trọn Đời)"
+                            self.remainingCountdownText = "Vĩnh Viễn (Trọn Đời)"
+                            self.expirationDate = nil
+                            self.secondsRemaining = 999_999_999
+                        } else {
+                            let expDate = Date(timeIntervalSince1970: TimeInterval(summary.expiryTS))
+                            self.expirationDate = expDate
+                            self.secondsRemaining = max(0, TimeInterval(summary.remainingSeconds))
+                            self.expiryDateText = summary.expiryText
+                            let fmt = DateFormatter()
+                            fmt.dateFormat = "dd/MM/yyyy 'lúc' HH:mm:ss"
+                            self.exactExpiryDateText = fmt.string(from: expDate)
+                            self.updateCountdownText()
+                        }
+                        self.gatePhase = .unlocked(ticket)
+                        self.startTimers()
+
+                    case .serverClosed(let msg):
+                        self.lockOut(to: .serverClosed(message: msg))
+
+                    case .deviceBanned(let reason, let hwid):
+                        self.lockOut(to: .deviceBanned(reason: reason, hwid: hwid))
+
+                    case .forceUpdate(let minV, let latV, let url, let msg):
+                        self.lockOut(to: .forceUpdate(minVersion: minV, latestVersion: latV, downloadURL: url, message: msg))
+
+                    case .tampered:
+                        self.lockOut(to: .tampered)
+
+                    case .denied(_, let msg):
+                        SecCoreBridge.shared.wipeSession()
+                        if isSilent {
+                            KeychainLicenseVault.deleteLicenseKey()
+                        }
+                        self.errorMessage = msg
+                        self.gatePhase = .requiresKey
+
+                    case .networkError(let msg):
+                        SecCoreBridge.shared.wipeSession()
+                        self.errorMessage = msg
+                        self.gatePhase = .requiresKey
+
+                    case .preflightOpen:
+                        self.gatePhase = .requiresKey
                     }
-                    self.gatePhase = .unlocked(ticket)
-                    self.startTimers()
-
-                case .serverClosed(let msg):
-                    self.lockOut(to: .serverClosed(message: msg))
-
-                case .deviceBanned(let reason, let hwid):
-                    self.lockOut(to: .deviceBanned(reason: reason, hwid: hwid))
-
-                case .forceUpdate(let minV, let latV, let url, let msg):
-                    self.lockOut(to: .forceUpdate(minVersion: minV, latestVersion: latV, downloadURL: url, message: msg))
-
-                case .tampered:
-                    self.lockOut(to: .tampered)
-
-                case .denied(_, let msg):
-                    SecCoreBridge.shared.wipeSession()
-                    if isSilent {
-                        KeychainLicenseVault.deleteLicenseKey()
-                    }
-                    self.errorMessage = msg
-                    self.gatePhase = .requiresKey
-
-                case .networkError(let msg):
-                    SecCoreBridge.shared.wipeSession()
-                    self.errorMessage = msg
-                    self.gatePhase = .requiresKey
-
-                case .preflightOpen:
-                    self.gatePhase = .requiresKey
                 }
             }
         }
@@ -175,8 +220,10 @@ final class KeyAuthManager: ObservableObject {
         switch gatePhase {
         case .unlocked:
             performHeartbeat()
-        case .serverClosed, .deviceBanned, .forceUpdate, .checking:
-            bootstrapCheck()
+        case .serverClosed, .deviceBanned, .forceUpdate:
+            bootstrapCheck(force: true)
+        case .checking:
+            startBootstrapIfNeeded()
         default:
             break
         }
@@ -290,6 +337,9 @@ final class KeyAuthManager: ObservableObject {
 
 struct SecurityCheckingView: View {
     let message: String
+    var onRetry: (() -> Void)? = nil
+    @State private var elapsedSeconds: Int = 0
+    @State private var isSpinningHintVisible: Bool = false
 
     var body: some View {
         ZStack {
@@ -308,6 +358,38 @@ struct SecurityCheckingView: View {
                     .foregroundStyle(AppTheme.subduedText)
                     .multilineTextAlignment(.center)
                     .padding(.horizontal, 32)
+
+                if isSpinningHintVisible, let onRetry {
+                    VStack(spacing: 10) {
+                        Text("Đang chờ phản hồi máy chủ (\(elapsedSeconds)s)...")
+                            .font(.system(size: 11, design: .monospaced))
+                            .foregroundStyle(AppTheme.subduedText.opacity(0.8))
+                        Button(action: {
+                            elapsedSeconds = 0
+                            isSpinningHintVisible = false
+                            onRetry()
+                        }) {
+                            Label("Thử lại kết nối", systemImage: "arrow.clockwise")
+                                .font(.system(size: 12.5, weight: .bold, design: .rounded))
+                                .foregroundStyle(.white)
+                                .padding(.horizontal, 16)
+                                .padding(.vertical, 8)
+                                .background(Color.white.opacity(0.12), in: Capsule())
+                        }
+                    }
+                    .padding(.top, 4)
+                    .transition(.opacity)
+                }
+            }
+        }
+        .task {
+            while !Task.isCancelled {
+                try? await Task.sleep(nanoseconds: 1_000_000_000)
+                guard !Task.isCancelled else { break }
+                elapsedSeconds += 1
+                if elapsedSeconds >= 4 {
+                    isSpinningHintVisible = true
+                }
             }
         }
     }
@@ -532,6 +614,19 @@ struct KeyGatekeeperView: View {
                             )
                         }
                         .disabled(keyAuth.isVerifying)
+
+                        if keyAuth.errorMessage != nil {
+                            Button {
+                                keyAuth.bootstrapCheck(force: true)
+                            } label: {
+                                Label("Kiểm tra lại kết nối máy chủ", systemImage: "arrow.clockwise")
+                                    .font(.system(size: 12, weight: .bold, design: .rounded))
+                                    .foregroundStyle(AppTheme.accentSoft)
+                                    .frame(maxWidth: .infinity)
+                                    .padding(.vertical, 8)
+                            }
+                            .disabled(keyAuth.isVerifying)
+                        }
                     }
                     .padding(18)
                     .background(AppTheme.consoleBackground, in: RoundedRectangle(cornerRadius: 22, style: .continuous))

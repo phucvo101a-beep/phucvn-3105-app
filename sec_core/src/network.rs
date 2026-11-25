@@ -5,10 +5,10 @@ use rustls::client::danger::{HandshakeSignatureValid, ServerCertVerified, Server
 use rustls::pki_types::{CertificateDer, ServerName, UnixTime};
 use rustls::{ClientConfig, ClientConnection, DigitallySignedStruct, Error as RustlsError, SignatureScheme, Stream};
 use sha2::{Digest, Sha256};
-use std::io::{Read, Write};
-use std::net::{TcpStream, ToSocketAddrs};
+use std::io::{ErrorKind, Read, Write};
+use std::net::{SocketAddr, TcpStream, ToSocketAddrs};
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 use subtle::ConstantTimeEq;
 
 #[inline(always)]
@@ -170,9 +170,10 @@ fn skip_der_tlv(der: &[u8], idx: &mut usize, expected_tag: u8) -> Option<()> {
     }
 }
 
-fn decode_chunked_body(raw: &[u8]) -> Result<Vec<u8>, String> {
+fn decode_chunked_parts(raw: &[u8]) -> Result<(Vec<u8>, bool), String> {
     let mut out = Vec::with_capacity(raw.len());
     let mut pos = 0usize;
+    let mut saw_terminator = false;
     while pos < raw.len() {
         let Some(rel_crlf) = raw[pos..].windows(2).position(|w| w == b"\r\n") else {
             break;
@@ -184,6 +185,9 @@ fn decode_chunked_body(raw: &[u8]) -> Result<Vec<u8>, String> {
             .map_err(|_| "Chunk size parse error".to_string())?;
         pos += rel_crlf + 2;
         if chunk_len == 0 {
+            if pos + 2 <= raw.len() {
+                saw_terminator = true;
+            }
             break;
         }
         if pos + chunk_len > raw.len() {
@@ -195,22 +199,110 @@ fn decode_chunked_body(raw: &[u8]) -> Result<Vec<u8>, String> {
             pos += 2;
         }
     }
-    Ok(out)
+    Ok((out, saw_terminator))
 }
 
 fn connect_tcp_any(domain: &str, port: u16) -> Result<TcpStream, String> {
     let host_port = format!("{domain}:{port}");
-    let addrs = host_port
+    let resolved: Vec<SocketAddr> = host_port
         .to_socket_addrs()
-        .map_err(|_| obfstr!("DNS resolution failed").to_string())?;
+        .map_err(|_| obfstr!("DNS resolution failed").to_string())?
+        .collect();
+    if resolved.is_empty() {
+        return Err(obfstr!("No socket address").to_string());
+    }
+
+    // Try IPv4 addresses first so broken/blackholed Wi-Fi IPv6 routes don't stall 16s+,
+    // while automatically falling back to IPv6 on NAT64/DNS64 cellular networks.
+    let mut ordered = Vec::with_capacity(resolved.len());
+    ordered.extend(resolved.iter().copied().filter(|a| a.is_ipv4()));
+    ordered.extend(resolved.iter().copied().filter(|a| a.is_ipv6()));
+
+    let total_deadline = Instant::now() + Duration::from_secs(8);
     let mut last_err = String::from("No socket address");
-    for addr in addrs {
-        match TcpStream::connect_timeout(&addr, Duration::from_secs(8)) {
+    for addr in ordered {
+        let now = Instant::now();
+        if now >= total_deadline {
+            break;
+        }
+        let per_try = (total_deadline - now).min(Duration::from_secs(4));
+        match TcpStream::connect_timeout(&addr, per_try) {
             Ok(s) => return Ok(s),
             Err(e) => last_err = e.to_string(),
         }
     }
     Err(format!("TCP connect error: {last_err}"))
+}
+
+fn parse_content_length(lower_hdr: &str) -> Option<usize> {
+    for line in lower_hdr.lines() {
+        if let Some(rest) = line.strip_prefix("content-length:") {
+            if let Ok(n) = rest.trim().parse::<usize>() {
+                return Some(n);
+            }
+        }
+    }
+    None
+}
+
+fn read_http_response<R: Read>(reader: &mut R, deadline: Instant) -> Result<Vec<u8>, String> {
+    let mut buf = Vec::with_capacity(4096);
+    let mut chunk = [0u8; 4096];
+    let mut hdr_end_opt: Option<usize> = None;
+    let mut content_len_opt: Option<usize> = None;
+    let mut is_chunked = false;
+
+    loop {
+        if Instant::now() >= deadline {
+            if hdr_end_opt.is_some() {
+                break;
+            }
+            return Err(obfstr!("HTTP response timed out").to_string());
+        }
+        match reader.read(&mut chunk) {
+            Ok(0) => break,
+            Ok(n) => {
+                buf.extend_from_slice(&chunk[..n]);
+                if hdr_end_opt.is_none() {
+                    if let Some(pos) = buf.windows(4).position(|w| w == b"\r\n\r\n") {
+                        hdr_end_opt = Some(pos);
+                        let lower_hdr = String::from_utf8_lossy(&buf[..pos]).to_ascii_lowercase();
+                        is_chunked = lower_hdr.contains(obfstr!("transfer-encoding: chunked"));
+                        if !is_chunked {
+                            content_len_opt = parse_content_length(&lower_hdr);
+                        }
+                    }
+                }
+                if let Some(hdr_end) = hdr_end_opt {
+                    let body = &buf[hdr_end + 4..];
+                    if let Some(expected_len) = content_len_opt {
+                        if body.len() >= expected_len {
+                            break;
+                        }
+                    } else if is_chunked {
+                        if let Ok((_, true)) = decode_chunked_parts(body) {
+                            break;
+                        }
+                    }
+                }
+            }
+            Err(e) if e.kind() == ErrorKind::Interrupted => continue,
+            Err(e) if e.kind() == ErrorKind::UnexpectedEof => break,
+            Err(e) if e.kind() == ErrorKind::WouldBlock || e.kind() == ErrorKind::TimedOut => {
+                if hdr_end_opt.is_some() {
+                    break;
+                }
+                return Err(obfstr!("HTTP read timeout").to_string());
+            }
+            Err(e) => {
+                if hdr_end_opt.is_some() && !buf.is_empty() {
+                    break;
+                }
+                return Err(format!("TLS read error: {e}"));
+            }
+        }
+    }
+    Ok(buf)
 }
 
 /// Sends an encrypted HTTP/1.1 POST request over pinned TLS to `https://<domain><path>`.
@@ -228,10 +320,10 @@ pub fn post_encrypted_json(
 
     let tcp_stream = connect_tcp_any(domain, 443)?;
     tcp_stream
-        .set_read_timeout(Some(Duration::from_secs(12)))
+        .set_read_timeout(Some(Duration::from_secs(5)))
         .map_err(|e| e.to_string())?;
     tcp_stream
-        .set_write_timeout(Some(Duration::from_secs(12)))
+        .set_write_timeout(Some(Duration::from_secs(5)))
         .map_err(|e| e.to_string())?;
 
     let verifier = Arc::new(SpkiPinningVerifier {
@@ -267,12 +359,11 @@ pub fn post_encrypted_json(
     );
 
     sock.write_all(req.as_bytes())
-        .map_err(|_| obfstr!("TLS write failed").to_string())?;
+        .map_err(|e| format!("TLS write failed: {e}"))?;
     sock.flush()
-        .map_err(|_| obfstr!("TLS flush failed").to_string())?;
+        .map_err(|e| format!("TLS flush failed: {e}"))?;
 
-    let mut response_bytes = Vec::new();
-    let _ = sock.read_to_end(&mut response_bytes);
+    let response_bytes = read_http_response(&mut sock, Instant::now() + Duration::from_secs(10))?;
     if response_bytes.is_empty() {
         return Err(obfstr!("Empty TLS response").to_string());
     }
@@ -292,14 +383,22 @@ pub fn post_encrypted_json(
         .unwrap_or(0);
 
     let decoded_body = if lower_hdr.contains(obfstr!("transfer-encoding: chunked")) {
-        decode_chunked_body(body_slice)?
+        decode_chunked_parts(body_slice)?.0
+    } else if let Some(clen) = parse_content_length(&lower_hdr) {
+        body_slice[..clen.min(body_slice.len())].to_vec()
     } else {
         body_slice.to_vec()
     };
 
     let body_text = String::from_utf8_lossy(&decoded_body).to_string();
     if status_code >= 400 || status_code == 0 {
-        return Err(format!("HTTP {status_code}: {body_text}"));
+        let preview = if body_text.trim_start().starts_with('<') {
+            "Máy chủ từ chối truy cập hoặc đang chặn API (HTML response)"
+        } else {
+            body_text.trim()
+        };
+        let short_preview: String = preview.chars().take(160).collect();
+        return Err(format!("HTTP {status_code}: {short_preview}"));
     }
     Ok(body_text)
 }

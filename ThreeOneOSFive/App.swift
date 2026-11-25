@@ -6,14 +6,10 @@ struct ThreeOneOSFiveApp: App {
     @StateObject private var patchDraftCoordinator = PatchDraftCoordinator()
     @StateObject private var fileOperationCoordinator = FileOperationCoordinator()
     @StateObject private var patchStore = PatchProjectStore()
-    @StateObject private var keyAuth = KeyAuthManager.shared
-    @State private var showOnboarding = OnboardingStore.shouldShow()
-    @Environment(\.scenePhase) private var scenePhase
-    @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
     init() {
         setupLogCapture()
-        LocalDevBridge.shared.initCore()
+        _ = LocalDevBridge.shared
         log("app: 3105 x PHUCVN launching — iOS \(AppInfo.osVersion) (\(AppInfo.osBuild)) \(AppInfo.machineName)")
     }
 
@@ -21,97 +17,123 @@ struct ThreeOneOSFiveApp: App {
 
     var body: some Scene {
         WindowGroup {
-            ZStack {
-                switch keyAuth.gatePhase {
-                case .checking:
-                    SecurityCheckingView(message: keyAuth.statusMessage)
-                        .transition(.opacity)
-                case .serverClosed(let message):
-                    SecurityLockoutView(
-                        mode: .serverClosed(message: message),
-                        onRetry: { keyAuth.bootstrapCheck() }
-                    )
-                    .transition(.opacity)
-                case .deviceBanned(let reason, let hwid):
-                    SecurityLockoutView(
-                        mode: .deviceBanned(reason: reason, hwid: hwid),
-                        onRetry: { keyAuth.bootstrapCheck() }
-                    )
-                    .transition(.opacity)
-                case .forceUpdate(let minVer, let latestVer, let downloadURL, let message):
-                    SecurityLockoutView(
-                        mode: .forceUpdate(
-                            minVersion: minVer,
-                            latestVersion: latestVer,
-                            downloadURL: downloadURL,
-                            message: message
-                        ),
-                        onRetry: { keyAuth.bootstrapCheck() }
-                    )
-                    .transition(.opacity)
-                case .tampered:
-                    SecurityLockoutView(
-                        mode: .tampered,
-                        onRetry: { keyAuth.bootstrapCheck() }
-                    )
-                    .transition(.opacity)
-                case .requiresKey:
-                    KeyGatekeeperView(keyAuth: keyAuth)
-                        .transition(.opacity)
-                case .unlocked(let ticket):
-                    if SecCoreBridge.shared.isActiveTicketValid(ticket) {
-                        ContentView()
-                            .environmentObject(appState)
-                            .environmentObject(patchDraftCoordinator)
-                            .environmentObject(fileOperationCoordinator)
-                            .environmentObject(patchStore)
-                            .opacity(showOnboarding ? 0 : 1)
-                            .allowsHitTesting(!showOnboarding)
-                            .onOpenURL { url in
-                                patchDraftCoordinator.presentImport(url)
-                            }
-
-                        if showOnboarding {
-                            OnboardingView {
-                                OnboardingStore.markCompleted()
-                                withAnimation(reduceMotion ? nil : .easeInOut(duration: 0.24)) {
-                                    showOnboarding = false
-                                }
-                                appState.detectSupport()
-                            }
-                            .transition(
-                                reduceMotion
-                                    ? .opacity
-                                    : .opacity.combined(with: .scale(scale: 0.98))
-                            )
-                            .zIndex(1)
-                        }
-                    } else {
-                        KeyGatekeeperView(keyAuth: keyAuth)
-                            .transition(.opacity)
-                    }
-                }
-            }
+            SecurityGateRootView(
+                appState: appState,
+                patchDraftCoordinator: patchDraftCoordinator,
+                fileOperationCoordinator: fileOperationCoordinator,
+                patchStore: patchStore
+            )
             .environment(\.appLanguage, language)
             .environment(\.locale, language.locale)
             .preferredColorScheme(.dark)
-            .onAppear {
+        }
+    }
+}
+
+/// Dedicated View wrapper owning `@ObservedObject` subscription to `KeyAuthManager.shared`
+/// so SwiftUI reliably observes status/phase transitions even during early Scene startup.
+private struct SecurityGateRootView: View {
+    @ObservedObject var appState: AppState
+    @ObservedObject var patchDraftCoordinator: PatchDraftCoordinator
+    @ObservedObject var fileOperationCoordinator: FileOperationCoordinator
+    @ObservedObject var patchStore: PatchProjectStore
+    @ObservedObject private var keyAuth = KeyAuthManager.shared
+    @State private var showOnboarding = OnboardingStore.shouldShow()
+    @Environment(\.scenePhase) private var scenePhase
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+
+    var body: some View {
+        ZStack {
+            switch keyAuth.gatePhase {
+            case .checking:
+                SecurityCheckingView(
+                    message: keyAuth.statusMessage,
+                    onRetry: { keyAuth.bootstrapCheck(force: true) }
+                )
+                .transition(.opacity)
+            case .serverClosed(let message):
+                SecurityLockoutView(
+                    mode: .serverClosed(message: message),
+                    onRetry: { keyAuth.bootstrapCheck(force: true) }
+                )
+                .transition(.opacity)
+            case .deviceBanned(let reason, let hwid):
+                SecurityLockoutView(
+                    mode: .deviceBanned(reason: reason, hwid: hwid),
+                    onRetry: { keyAuth.bootstrapCheck(force: true) }
+                )
+                .transition(.opacity)
+            case .forceUpdate(let minVer, let latestVer, let downloadURL, let message):
+                SecurityLockoutView(
+                    mode: .forceUpdate(
+                        minVersion: minVer,
+                        latestVersion: latestVer,
+                        downloadURL: downloadURL,
+                        message: message
+                    ),
+                    onRetry: { keyAuth.bootstrapCheck(force: true) }
+                )
+                .transition(.opacity)
+            case .tampered:
+                SecurityLockoutView(
+                    mode: .tampered,
+                    onRetry: { keyAuth.bootstrapCheck(force: true) }
+                )
+                .transition(.opacity)
+            case .requiresKey:
+                KeyGatekeeperView(keyAuth: keyAuth)
+                    .transition(.opacity)
+            case .unlocked(let ticket):
+                if SecCoreBridge.shared.isActiveTicketValid(ticket) {
+                    ContentView()
+                        .environmentObject(appState)
+                        .environmentObject(patchDraftCoordinator)
+                        .environmentObject(fileOperationCoordinator)
+                        .environmentObject(patchStore)
+                        .opacity(showOnboarding ? 0 : 1)
+                        .allowsHitTesting(!showOnboarding)
+                        .onOpenURL { url in
+                            patchDraftCoordinator.presentImport(url)
+                        }
+
+                    if showOnboarding {
+                        OnboardingView {
+                            OnboardingStore.markCompleted()
+                            withAnimation(reduceMotion ? nil : .easeInOut(duration: 0.24)) {
+                                showOnboarding = false
+                            }
+                            appState.detectSupport()
+                        }
+                        .transition(
+                            reduceMotion
+                                ? .opacity
+                                : .opacity.combined(with: .scale(scale: 0.98))
+                        )
+                        .zIndex(1)
+                    }
+                } else {
+                    KeyGatekeeperView(keyAuth: keyAuth)
+                        .transition(.opacity)
+                }
+            }
+        }
+        .onAppear {
+            keyAuth.startBootstrapIfNeeded()
+            if !showOnboarding && keyAuth.activeVerifiedTicket != nil {
+                appState.detectSupport()
+            }
+        }
+        .onChange(of: scenePhase) { phase in
+            if phase == .active {
+                keyAuth.verifyLiveSessionOnForeground()
                 if !showOnboarding && keyAuth.activeVerifiedTicket != nil {
                     appState.detectSupport()
                 }
             }
-            .onChange(of: scenePhase) { phase in
-                if phase == .active {
-                    keyAuth.verifyLiveSessionOnForeground()
-                    if !showOnboarding && keyAuth.activeVerifiedTicket != nil {
-                        appState.detectSupport()
-                    }
-                }
-            }
-            .onChange(of: keyAuth.gatePhase) { phase in
-                if case .unlocked(let t) = phase, SecCoreBridge.shared.isActiveTicketValid(t), !showOnboarding {
-                    appState.detectSupport()
-                }
+        }
+        .onChange(of: keyAuth.gatePhase) { phase in
+            if case .unlocked(let t) = phase, SecCoreBridge.shared.isActiveTicketValid(t), !showOnboarding {
+                appState.detectSupport()
             }
         }
     }

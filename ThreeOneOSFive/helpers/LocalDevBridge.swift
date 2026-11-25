@@ -170,17 +170,24 @@ public final class LocalDevBridge: ObservableObject {
         return dir
     }
 
+    private var isCoreInitialized = false
+
     private init() {
         initCore()
     }
 
     public func initCore() {
-        LocalDevLib.shared.resolveSymbols()
+        guard !isCoreInitialized else { return }
+        isCoreInitialized = true
+
         let path = storageDirectory.path
         let host = "10.7.0.1"
-        _ = LocalDevLib.shared.fnInit?(path, host, 62078)
-        autoDiscoverPairingFiles()
-        refreshStatus()
+        DispatchQueue.global(qos: .utility).async { [weak self] in
+            LocalDevLib.shared.resolveSymbols()
+            _ = LocalDevLib.shared.fnInit?(path, host, 62078)
+            self?.autoDiscoverPairingFiles()
+            self?.refreshStatus()
+        }
     }
 
     public func autoDiscoverPairingFiles() {
