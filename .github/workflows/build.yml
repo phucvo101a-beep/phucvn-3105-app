@@ -10,12 +10,12 @@ name: Build 3105 x PHUCVN IPA
       runner:
         description: 'Chọn máy ảo macOS'
         required: true
-        default: 'macos-15-intel'
+        default: 'macos-latest'
         type: choice
         options:
-          - macos-15-intel
           - macos-latest
           - macos-15
+          - macos-15-intel
       allow_ephemeral_test_keys:
         description: 'Sinh key test tạm nếu chưa cấu hình GitHub Secrets'
         required: false
@@ -32,7 +32,7 @@ permissions:
 jobs:
   build:
     name: Build 3105 x PHUCVN iOS IPA (Hardened)
-    runs-on: ${{ inputs.runner || 'macos-15-intel' }}
+    runs-on: ${{ inputs.runner || 'macos-latest' }}
     timeout-minutes: 45
 
     steps:
