@@ -1237,6 +1237,7 @@ class SecuritySuiteTests(unittest.TestCase):
         proj_sw = (REPO_ROOT / "ThreeOneOSFive" / "views" / "PatchProjectsView.swift").read_text("utf-8")
         self.assertIn("resolvePresetPolicies", core_php)
         self.assertIn("'preset_statuses'", core_php)
+        self.assertIn("require_once __DIR__ . '/lib/CoreEngine.php';", admin_php)
         self.assertIn("save_preset_policies", admin_php)
         self.assertIn("V3PresetStatus", bridge_sw)
         self.assertIn("ĐANG BẢO TRÌ", proj_sw)

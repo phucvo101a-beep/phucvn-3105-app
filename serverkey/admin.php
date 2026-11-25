@@ -4,6 +4,7 @@
  * Quản lý 5 loại key bản quyền: 1 giờ, 1 ngày, 7 ngày, 30 ngày, vĩnh viễn
  */
 require_once __DIR__ . '/config.php';
+require_once __DIR__ . '/lib/CoreEngine.php';
 
 if (PHP_SAPI !== 'cli' && !headers_sent()) {
     header('Cache-Control: no-store, no-cache, must-revalidate, max-age=0');
