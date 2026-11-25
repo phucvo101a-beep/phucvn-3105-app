@@ -1037,10 +1037,20 @@ class SecuritySuiteTests(unittest.TestCase):
         self.assertIn("is_ipv4()", net_rs)
         self.assertNotIn("read_to_end(", net_rs)
 
-        # Verify sec_core dlsym extern clash & ios_ui dead_code remediation + verify-seal Mach-O roundtrip
+        # Verify sec_core dlsym extern clash, unsafe FFI obfuscation & ios_ui dead_code remediation
         anti_hook_rs = (REPO_ROOT / "sec_core" / "src" / "anti_hook.rs").read_text(encoding="utf-8")
         self.assertIn("libc::dlsym(libc::RTLD_DEFAULT", anti_hook_rs)
+        self.assertIn("libc::getenv(", anti_hook_rs)
         self.assertNotIn("fn dlsym(", anti_hook_rs)
+        self.assertIn("pub unsafe fn is_trampoline_hooked", anti_hook_rs)
+
+        # Verify ALL exported C-ABI symbols (both safe and unsafe) were obfuscated in stage copy
+        staged_lib = (self.stage / "sec_core" / "src" / "lib.rs").read_text(encoding="utf-8")
+        staged_ffi = (self.stage / "sec_core" / "src" / "localdev" / "ffi.rs").read_text(encoding="utf-8")
+        for sym in obfuscate_build.SEC_CABI_SYMBOLS:
+            self.assertRegex(staged_lib, rf'#\[export_name = "_x[0-9a-f]+"\]\s*pub (?:unsafe )?extern "C" fn {sym}\b')
+        for sym in obfuscate_build.LOCALDEV_CABI_SYMBOLS:
+            self.assertRegex(staged_ffi, rf'#\[export_name = "_x[0-9a-f]+"\]\s*pub (?:unsafe )?extern "C" fn {sym}\b')
 
         ios_ui_rs = (REPO_ROOT / "sec_core" / "src" / "ios_ui.rs").read_text(encoding="utf-8")
         self.assertNotIn("on_submit", ios_ui_rs)

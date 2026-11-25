@@ -106,7 +106,7 @@ pub fn base64_decode(input: &str) -> Result<Vec<u8>, String> {
 }
 
 pub fn base64_encode(input: &[u8]) -> String {
-    let mut out = String::with_capacity((input.len() + 2) / 3 * 4);
+    let mut out = String::with_capacity(input.len().div_ceil(3) * 4);
     for chunk in input.chunks(3) {
         let b0 = chunk[0] as usize;
         let b1 = if chunk.len() > 1 { chunk[1] as usize } else { 0 };
@@ -345,8 +345,8 @@ fn parse_binary_plist(data: &[u8]) -> Result<PlistValue, String> {
             return Err("Offset table out of bounds".to_string());
         }
         let mut val = 0usize;
-        for i in 0..offset_int_size {
-            val = (val << 8) | (data[pos + i] as usize);
+        for &b in &data[pos..pos + offset_int_size] {
+            val = (val << 8) | (b as usize);
         }
         Ok(val)
     };
@@ -393,8 +393,8 @@ fn parse_bplist_object(
                 return Err("bplist integer out of bounds".to_string());
             }
             let mut val = 0i64;
-            for i in 0..bytes_len {
-                val = (val << 8) | (data[cur + i] as i64);
+            for &b in &data[cur..cur + bytes_len] {
+                val = (val << 8) | (b as i64);
             }
             PlistValue::Integer(val)
         }
@@ -488,8 +488,8 @@ fn read_ref(data: &[u8], cur: &mut usize, ref_size: usize) -> Result<usize, Stri
         return Err("bplist ref out of bounds".to_string());
     }
     let mut val = 0usize;
-    for i in 0..ref_size {
-        val = (val << 8) | (data[*cur + i] as usize);
+    for &b in &data[*cur..*cur + ref_size] {
+        val = (val << 8) | (b as usize);
     }
     *cur += ref_size;
     Ok(val)
@@ -515,8 +515,8 @@ fn read_bplist_length(
         return Err("bplist length value out of bounds".to_string());
     }
     let mut val = 0usize;
-    for i in 0..byte_len {
-        val = (val << 8) | (data[*cur + i] as usize);
+    for &b in &data[*cur..*cur + byte_len] {
+        val = (val << 8) | (b as usize);
     }
     *cur += byte_len;
     Ok(val)

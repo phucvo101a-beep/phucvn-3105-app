@@ -26,19 +26,19 @@ pub fn hmac_sha256(key: &[u8], parts: &[&[u8]]) -> [u8; 32] {
     }
     let mut i_pad = Zeroizing::new([0x36u8; 64]);
     let mut o_pad = Zeroizing::new([0x5Cu8; 64]);
-    for i in 0..64 {
-        i_pad[i] ^= k_block[i];
-        o_pad[i] ^= k_block[i];
+    for ((i_b, o_b), &k_b) in i_pad.iter_mut().zip(o_pad.iter_mut()).zip(k_block.iter()) {
+        *i_b ^= k_b;
+        *o_b ^= k_b;
     }
     let mut inner = Sha256::new();
-    inner.update(&*i_pad);
+    inner.update(i_pad.as_ref());
     for p in parts {
         inner.update(p);
     }
     let inner_hash = inner.finalize();
 
     let mut outer = Sha256::new();
-    outer.update(&*o_pad);
+    outer.update(o_pad.as_ref());
     outer.update(inner_hash);
     let out_digest = outer.finalize();
     let mut out = [0u8; 32];
@@ -178,7 +178,7 @@ pub fn build_v3_request(
     });
     let pt_bytes = Zeroizing::new(serde_json::to_vec(&inner).map_err(|_| "Encode fail")?);
 
-    let cipher = XChaCha20Poly1305::new_from_slice(&*req_key)
+    let cipher = XChaCha20Poly1305::new_from_slice(req_key.as_ref())
         .map_err(|_| obfstr!("Key init fail").to_string())?;
     let ct = cipher
         .encrypt(
@@ -277,7 +277,7 @@ pub fn verify_and_decrypt_v3_response(
     let sig = Signature::from_bytes(&sig_arr);
 
     let ed_pub_bytes = secrets::server_ed25519_pub();
-    let vk = VerifyingKey::from_bytes(&*ed_pub_bytes)
+    let vk = VerifyingKey::from_bytes(&ed_pub_bytes)
         .map_err(|_| obfstr!("Invalid server Ed25519 key").to_string())?;
     vk.verify(&sig_msg, &sig)
         .map_err(|_| obfstr!("Server signature forgery detected!").to_string())?;
@@ -293,7 +293,7 @@ pub fn verify_and_decrypt_v3_response(
     hk.expand(&info, res_key.as_mut())
         .map_err(|_| obfstr!("Response HKDF fail").to_string())?;
 
-    let cipher = XChaCha20Poly1305::new_from_slice(&*res_key)
+    let cipher = XChaCha20Poly1305::new_from_slice(res_key.as_ref())
         .map_err(|_| obfstr!("Response cipher init fail").to_string())?;
     let pt = Zeroizing::new(
         cipher

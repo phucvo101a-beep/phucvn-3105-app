@@ -103,7 +103,8 @@ fn to_c_string(s: String) -> *mut c_char {
 
 fn execute_v3_exchange_flattened(op: &str, license_key: &str) -> Result<String, String> {
     let seed = secrets::gen::OPAQUE_SEED;
-    let mut step: u32 = if ((seed & 1) ^ (seed & 1)) == 0 { 11 } else { 99 };
+    let opaque_even = ((seed.wrapping_mul(seed)).wrapping_add(seed)) & 1;
+    let mut step: u32 = if opaque_even == 0 { 11 } else { 99 };
     let mut tamper: u32 = 0;
     let mut pkt_opt: Option<crypto::EncryptedExchangePacket> = None;
     let mut resp_raw = String::new();
@@ -217,11 +218,11 @@ pub extern "C" fn sec_core_preflight() -> *mut c_char {
 
 /// Authenticates license key against server V3 API, populating masked RAM session + V4 bundle keys.
 #[no_mangle]
-pub extern "C" fn sec_core_activate(key_cstr: *const c_char) -> *mut c_char {
+pub unsafe extern "C" fn sec_core_activate(key_cstr: *const c_char) -> *mut c_char {
     let mut key_owned = if key_cstr.is_null() {
         String::new()
     } else {
-        unsafe { CStr::from_ptr(key_cstr) }
+        CStr::from_ptr(key_cstr)
             .to_string_lossy()
             .trim()
             .to_string()
@@ -278,14 +279,14 @@ pub extern "C" fn sec_core_heartbeat() -> *mut c_char {
 
 /// Verifies ticket and runtime tamper state, returning magic marker on valid unlocked session.
 #[no_mangle]
-pub extern "C" fn sec_core_verify_ticket(ticket_cstr: *const c_char) -> i32 {
+pub unsafe extern "C" fn sec_core_verify_ticket(ticket_cstr: *const c_char) -> i32 {
     if perform_flattened_tamper_scan(false) != 0 {
         sabotage::mark_tampered_and_terminate();
     }
     if ticket_cstr.is_null() {
         return 0;
     }
-    let ticket = unsafe { CStr::from_ptr(ticket_cstr) }.to_string_lossy();
+    let ticket = CStr::from_ptr(ticket_cstr).to_string_lossy();
     if sabotage::verify_ticket_valid(&ticket) {
         TICKET_VALID_MAGIC
     } else {
@@ -295,14 +296,14 @@ pub extern "C" fn sec_core_verify_ticket(ticket_cstr: *const c_char) -> i32 {
 
 /// Stream-decrypts a V4 `.3105` container directly in RAM. Returns NULL unless ticket & server keys are valid.
 #[no_mangle]
-pub extern "C" fn sec_core_decrypt_v4(
+pub unsafe extern "C" fn sec_core_decrypt_v4(
     asset_ptr: *const u8,
     asset_len: usize,
     ticket_cstr: *const c_char,
     out_len: *mut usize,
 ) -> *mut u8 {
     if !out_len.is_null() {
-        unsafe { *out_len = 0 };
+        *out_len = 0;
     }
     if perform_flattened_tamper_scan(false) != 0 {
         sabotage::mark_tampered_and_terminate();
@@ -310,8 +311,8 @@ pub extern "C" fn sec_core_decrypt_v4(
     if asset_ptr.is_null() || asset_len == 0 || ticket_cstr.is_null() || out_len.is_null() {
         return core::ptr::null_mut();
     }
-    let ticket = unsafe { CStr::from_ptr(ticket_cstr) }.to_string_lossy();
-    let asset_slice = unsafe { core::slice::from_raw_parts(asset_ptr, asset_len) };
+    let ticket = CStr::from_ptr(ticket_cstr).to_string_lossy();
+    let asset_slice = core::slice::from_raw_parts(asset_ptr, asset_len);
 
     match sabotage::decrypt_v4_asset_in_ram(asset_slice, &ticket) {
         Ok(pt_zero) => {
@@ -319,7 +320,7 @@ pub extern "C" fn sec_core_decrypt_v4(
             let ptr = boxed.as_mut_ptr();
             let len = boxed.len();
             core::mem::forget(boxed);
-            unsafe { *out_len = len };
+            *out_len = len;
             ptr
         }
         Err(_) => core::ptr::null_mut(),
@@ -342,22 +343,18 @@ pub extern "C" fn sec_core_tamper_detected() -> bool {
 }
 
 #[no_mangle]
-pub extern "C" fn sec_core_free_string(ptr: *mut c_char) {
+pub unsafe extern "C" fn sec_core_free_string(ptr: *mut c_char) {
     if !ptr.is_null() {
-        unsafe {
-            let c = CString::from_raw(ptr);
-            let mut z = c.into_bytes();
-            z.zeroize();
-        }
+        let c = CString::from_raw(ptr);
+        let mut z = c.into_bytes();
+        z.zeroize();
     }
 }
 
 #[no_mangle]
-pub extern "C" fn sec_core_free_bytes(ptr: *mut u8, len: usize) {
+pub unsafe extern "C" fn sec_core_free_bytes(ptr: *mut u8, len: usize) {
     if !ptr.is_null() && len > 0 {
-        unsafe {
-            let mut slice = Box::from_raw(core::ptr::slice_from_raw_parts_mut(ptr, len));
-            (&mut *slice).zeroize();
-        }
+        let mut slice = Box::from_raw(core::ptr::slice_from_raw_parts_mut(ptr, len));
+        (*slice).zeroize();
     }
 }

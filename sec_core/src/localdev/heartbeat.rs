@@ -14,6 +14,12 @@ pub struct HeartbeatService {
     is_running: Arc<AtomicBool>,
 }
 
+impl Default for HeartbeatService {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl HeartbeatService {
     pub fn new() -> Self {
         Self {
@@ -75,15 +81,13 @@ fn run_heartbeat_session(
                     let mut polo = HashMap::new();
                     polo.insert("Command".to_string(), PlistValue::String("Polo".to_string()));
                     send_plist(&mut sock, &polo)?;
-                } else if cmd == "Polo" {
-                    // Ping acknowledged
                 }
             }
             Err(_e) => {
                 // If read timed out, actively send Marco to probe connection
                 let mut ping = HashMap::new();
                 ping.insert("Command".to_string(), PlistValue::String("Marco".to_string()));
-                if let Err(_) = send_plist(&mut sock, &ping) {
+                if send_plist(&mut sock, &ping).is_err() {
                     return Err("Heartbeat disconnected".to_string());
                 }
             }

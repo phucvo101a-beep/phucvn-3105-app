@@ -146,7 +146,7 @@ pub fn activate_vault_session(
         "TKT|{}|{}|{}",
         now, payload.license.expiry_ts, nonce_hex
     );
-    let mac_bytes = hmac_sha256(&*ticket_secret, &[ticket_msg.as_bytes()]);
+    let mac_bytes = hmac_sha256(ticket_secret.as_ref(), &[ticket_msg.as_bytes()]);
     let mac_hex = hex::encode(mac_bytes);
     let full_ticket = format!("{ticket_msg}|{mac_hex}");
 
@@ -157,8 +157,8 @@ pub fn activate_vault_session(
                 let mut bid = [0u8; 16];
                 bid.copy_from_slice(&id_vec);
                 let mut mk = [0u8; 32];
-                for i in 0..32 {
-                    mk[i] = k_vec[i] ^ pad[i];
+                for ((m, &k), &p) in mk.iter_mut().zip(k_vec.iter()).zip(pad.iter()) {
+                    *m = k ^ p;
                 }
                 masked_bundles.insert(bid, mk);
             }
@@ -167,10 +167,15 @@ pub fn activate_vault_session(
 
     with_vault(|v| {
         v.wipe();
-        v.ram_pad.copy_from_slice(&*pad);
-        for i in 0..32 {
-            v.masked_ephemeral_key[i] = eph_raw[i] ^ pad[i];
-            v.masked_ticket_secret[i] = ticket_secret[i] ^ pad[i];
+        v.ram_pad.copy_from_slice(pad.as_ref());
+        for ((ek, ts), ((&e, &t), &p)) in v
+            .masked_ephemeral_key
+            .iter_mut()
+            .zip(v.masked_ticket_secret.iter_mut())
+            .zip(eph_raw.iter().zip(ticket_secret.iter()).zip(pad.iter()))
+        {
+            *ek = e ^ p;
+            *ts = t ^ p;
         }
         v.masked_bundle_keys = masked_bundles;
         v.current_ticket_hex = full_ticket.clone();
@@ -220,10 +225,13 @@ pub fn verify_ticket_valid(ticket: &str) -> bool {
             return false;
         }
         let mut t_secret = Zeroizing::new([0u8; 32]);
-        for i in 0..32 {
-            t_secret[i] = v.masked_ticket_secret[i] ^ v.ram_pad[i];
+        for (dst, (&m, &p)) in t_secret
+            .iter_mut()
+            .zip(v.masked_ticket_secret.iter().zip(v.ram_pad.iter()))
+        {
+            *dst = m ^ p;
         }
-        let expected = hmac_sha256(&*t_secret, &[msg.as_bytes()]);
+        let expected = hmac_sha256(t_secret.as_ref(), &[msg.as_bytes()]);
         bool::from(provided_mac.as_slice().ct_eq(&expected[..]))
             && bool::from(ticket.as_bytes().ct_eq(v.current_ticket_hex.as_bytes()))
     })
@@ -267,13 +275,13 @@ pub fn decrypt_v4_asset_in_ram(asset_bytes: &[u8], ticket: &str) -> Result<Zeroi
             return Err(obfstr!("Missing bundle decryption key").to_string());
         };
         let mut key = Zeroizing::new([0u8; 32]);
-        for i in 0..32 {
-            key[i] = masked[i] ^ v.ram_pad[i];
+        for (dst, (&m, &p)) in key.iter_mut().zip(masked.iter().zip(v.ram_pad.iter())) {
+            *dst = m ^ p;
         }
         Ok(key)
     })?;
 
-    let cipher = XChaCha20Poly1305::new_from_slice(&*unmasked_bundle_key)
+    let cipher = XChaCha20Poly1305::new_from_slice(unmasked_bundle_key.as_ref())
         .map_err(|_| obfstr!("Cipher init fail").to_string())?;
     let bundle_id_hex = hex::encode(bundle_id);
     let tag_hex = hex::encode(expected_tag);

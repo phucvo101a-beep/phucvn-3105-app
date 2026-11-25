@@ -33,7 +33,7 @@ pub const KERN_PROC_PID: i32 = 1;
 #[inline(always)]
 #[cfg(target_arch = "aarch64")]
 pub unsafe fn syscall0(num: usize) -> usize {
-    let mut ret: usize;
+    let ret: usize;
     core::arch::asm!(
         "svc #0x80",
         in("x16") num,
@@ -46,7 +46,7 @@ pub unsafe fn syscall0(num: usize) -> usize {
 #[inline(always)]
 #[cfg(target_arch = "aarch64")]
 pub unsafe fn syscall1(num: usize, arg0: usize) -> usize {
-    let mut ret: usize;
+    let ret: usize;
     core::arch::asm!(
         "svc #0x80",
         in("x16") num,
@@ -59,7 +59,7 @@ pub unsafe fn syscall1(num: usize, arg0: usize) -> usize {
 #[inline(always)]
 #[cfg(target_arch = "aarch64")]
 pub unsafe fn syscall4(num: usize, arg0: usize, arg1: usize, arg2: usize, arg3: usize) -> usize {
-    let mut ret: usize;
+    let ret: usize;
     core::arch::asm!(
         "svc #0x80",
         in("x16") num,
@@ -83,7 +83,7 @@ pub unsafe fn syscall6(
     arg4: usize,
     arg5: usize,
 ) -> usize {
-    let mut ret: usize;
+    let ret: usize;
     core::arch::asm!(
         "svc #0x80",
         in("x16") num,

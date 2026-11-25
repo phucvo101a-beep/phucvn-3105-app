@@ -33,10 +33,10 @@ impl ServerCertVerifier for DeviceCertVerifier {
         _now: UnixTime,
     ) -> Result<ServerCertVerified, RustlsError> {
         // In local pairing, device certificate matches or is accepted if signed by trusted root
-        if !self.expected_device_cert_der.is_empty() {
-            if end_entity.as_ref() == self.expected_device_cert_der.as_slice() {
-                return Ok(ServerCertVerified::assertion());
-            }
+        if !self.expected_device_cert_der.is_empty()
+            && end_entity.as_ref() == self.expected_device_cert_der.as_slice()
+        {
+            return Ok(ServerCertVerified::assertion());
         }
         // Fallback: accept device self-signed cert on loopback tunnel
         Ok(ServerCertVerified::assertion())
@@ -118,10 +118,7 @@ impl LockdownClient {
         send_plist(&mut tcp, &query)?;
 
         let query_resp = read_plist(&mut tcp)?;
-        let query_type = query_resp.get_string("Type").unwrap_or_default();
-        if query_type != "QueryType" && query_resp.get_string("Result").as_deref() != Some("Success") {
-            // Some iOS versions return Success directly
-        }
+        let _query_type = query_resp.get_string("Type").unwrap_or_default();
 
         // 2. StartSSL
         let mut start_ssl = HashMap::new();

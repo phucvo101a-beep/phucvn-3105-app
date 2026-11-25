@@ -279,10 +279,8 @@ fn read_http_response<R: Read>(reader: &mut R, deadline: Instant) -> Result<Vec<
                         if body.len() >= expected_len {
                             break;
                         }
-                    } else if is_chunked {
-                        if let Ok((_, true)) = decode_chunked_parts(body) {
-                            break;
-                        }
+                    } else if is_chunked && matches!(decode_chunked_parts(body), Ok((_, true))) {
+                        break;
                     }
                 }
             }

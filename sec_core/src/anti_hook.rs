@@ -1,12 +1,8 @@
-use obfstr::obfstr;
-use std::ffi::{c_char, CStr, CString};
-
 #[cfg(target_vendor = "apple")]
-extern "C" {
-    fn _dyld_image_count() -> u32;
-    fn _dyld_get_image_name(image_index: u32) -> *const c_char;
-    fn getenv(name: *const c_char) -> *const c_char;
-}
+use crate::integrity::apple_sys::{_dyld_get_image_name, _dyld_image_count};
+use obfstr::obfstr;
+#[cfg(target_vendor = "apple")]
+use std::ffi::{CStr, CString};
 
 /// Detects Substrate, Substitute, ElleKit, Frida, SSLKillSwitch, Cycript and similar tweak images.
 pub fn scan_injected_dylibs() -> bool {
@@ -50,7 +46,7 @@ pub fn check_dyld_insert_env() -> bool {
     #[cfg(target_vendor = "apple")]
     unsafe {
         if let Ok(key) = CString::new(obfstr!("DYLD_INSERT_LIBRARIES")) {
-            let val = getenv(key.as_ptr());
+            let val = libc::getenv(key.as_ptr());
             if !val.is_null() {
                 if let Ok(s) = CStr::from_ptr(val).to_str() {
                     if !s.trim().is_empty() {
@@ -64,13 +60,16 @@ pub fn check_dyld_insert_env() -> bool {
 }
 
 /// Checks ARM64 first two instructions at target pointer for common inline hook trampolines (`LDR X16/X17 + BR`).
+///
+/// # Safety
+/// Caller must guarantee `fn_ptr` is null or points to readable executable instructions (at least 12 bytes).
 #[inline(always)]
-pub fn is_trampoline_hooked(fn_ptr: *const u8) -> bool {
+pub unsafe fn is_trampoline_hooked(fn_ptr: *const u8) -> bool {
     if fn_ptr.is_null() {
         return false;
     }
     #[cfg(target_arch = "aarch64")]
-    unsafe {
+    {
         let insn0 = core::ptr::read_unaligned(fn_ptr as *const u32);
         let insn1 = core::ptr::read_unaligned(fn_ptr.add(4) as *const u32);
         // LDR X16, #... (0x58000010) / LDR X17, #... (0x58000011) followed by BR X16/X17
@@ -91,7 +90,6 @@ pub fn is_trampoline_hooked(fn_ptr: *const u8) -> bool {
             }
         }
     }
-    let _ = fn_ptr;
     false
 }
 

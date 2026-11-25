@@ -7,8 +7,8 @@ pub mod gen;
 #[inline(always)]
 pub fn unsplit_32(a: &[u8; 32], b: &[u8; 32]) -> Zeroizing<[u8; 32]> {
     let mut out = Zeroizing::new([0u8; 32]);
-    for i in 0..32 {
-        out[i] = a[i] ^ b[i];
+    for (o, (&x, &y)) in out.iter_mut().zip(a.iter().zip(b.iter())) {
+        *o = x ^ y;
     }
     out
 }
@@ -24,8 +24,11 @@ pub fn server_ed25519_pub() -> Zeroizing<[u8; 32]> {
 pub fn pre_shared_pepper() -> Zeroizing<Vec<u8>> {
     let len = gen::PEPPER_LEN.min(64);
     let mut out = Zeroizing::new(vec![0u8; len]);
-    for i in 0..len {
-        out[i] = gen::PEPPER_SHARE_A[i] ^ gen::PEPPER_SHARE_B[i];
+    for (o, (&a, &b)) in out
+        .iter_mut()
+        .zip(gen::PEPPER_SHARE_A[..len].iter().zip(gen::PEPPER_SHARE_B[..len].iter()))
+    {
+        *o = a ^ b;
     }
     out
 }

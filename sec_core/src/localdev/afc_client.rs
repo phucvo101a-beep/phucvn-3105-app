@@ -135,8 +135,8 @@ impl AfcClient {
         // Payload is null-terminated strings
         let mut entries = Vec::new();
         let mut start = 0;
-        for i in 0..payload.len() {
-            if payload[i] == 0 {
+        for (i, &b) in payload.iter().enumerate() {
+            if b == 0 {
                 if i > start {
                     let s = String::from_utf8_lossy(&payload[start..i]).to_string();
                     if s != "." && s != ".." {
@@ -160,8 +160,8 @@ impl AfcClient {
         let mut info = HashMap::new();
         let mut pairs = Vec::new();
         let mut start = 0;
-        for i in 0..payload.len() {
-            if payload[i] == 0 {
+        for (i, &b) in payload.iter().enumerate() {
+            if b == 0 {
                 if i > start {
                     pairs.push(String::from_utf8_lossy(&payload[start..i]).to_string());
                 }

@@ -15,19 +15,19 @@ pub const SERVICE_TYPE_HOUSE_ARREST: i32 = 2;
 
 /// Initializes LocalDev manager with storage path and optional loopback host/port
 #[no_mangle]
-pub extern "C" fn localdev_init(
+pub unsafe extern "C" fn localdev_init(
     storage_path: *const c_char,
     default_host: *const c_char,
     port: u16,
 ) -> i32 {
     let storage_str = if !storage_path.is_null() {
-        unsafe { CStr::from_ptr(storage_path).to_str().ok() }
+        CStr::from_ptr(storage_path).to_str().ok()
     } else {
         None
     };
 
     let host_str = if !default_host.is_null() {
-        unsafe { CStr::from_ptr(default_host).to_str().ok() }
+        CStr::from_ptr(default_host).to_str().ok()
     } else {
         None
     };
@@ -44,7 +44,7 @@ pub extern "C" fn localdev_init(
 /// Imports raw bytes of a .mobiledevicepairing or .plist file
 /// Returns JSON status report string
 #[no_mangle]
-pub extern "C" fn localdev_import_pairing(data: *const u8, len: usize) -> *const c_char {
+pub unsafe extern "C" fn localdev_import_pairing(data: *const u8, len: usize) -> *const c_char {
     if data.is_null() || len == 0 {
         return to_json_cstr(json!({
             "code": 5,
@@ -53,7 +53,7 @@ pub extern "C" fn localdev_import_pairing(data: *const u8, len: usize) -> *const
         }));
     }
 
-    let slice = unsafe { std::slice::from_raw_parts(data, len) };
+    let slice = std::slice::from_raw_parts(data, len);
     let res = with_manager(|mgr| mgr.import_pairing(slice));
 
     match res {
@@ -100,19 +100,19 @@ pub extern "C" fn localdev_scan_apps() -> *const c_char {
 
 /// Lists files in directory (either device root/Media via AFC, or app sandbox via HouseArrest)
 #[no_mangle]
-pub extern "C" fn localdev_list_dir(
+pub unsafe extern "C" fn localdev_list_dir(
     service_type: i32,
     bundle_id: *const c_char,
     path: *const c_char,
 ) -> *const c_char {
     let path_str = if !path.is_null() {
-        unsafe { CStr::from_ptr(path).to_str().unwrap_or("/") }
+        CStr::from_ptr(path).to_str().unwrap_or("/")
     } else {
         "/"
     };
 
     let b_id = if !bundle_id.is_null() {
-        unsafe { CStr::from_ptr(bundle_id).to_str().unwrap_or("") }
+        CStr::from_ptr(bundle_id).to_str().unwrap_or("")
     } else {
         ""
     };
@@ -150,7 +150,7 @@ pub extern "C" fn localdev_list_dir(
 /// Returns raw heap buffer. `out_len` receives the byte count.
 /// Caller must free buffer via `localdev_free_bytes`.
 #[no_mangle]
-pub extern "C" fn localdev_read_file(
+pub unsafe extern "C" fn localdev_read_file(
     service_type: i32,
     bundle_id: *const c_char,
     path: *const c_char,
@@ -160,9 +160,9 @@ pub extern "C" fn localdev_read_file(
         return std::ptr::null_mut();
     }
 
-    let path_str = unsafe { CStr::from_ptr(path).to_str().unwrap_or("") };
+    let path_str = CStr::from_ptr(path).to_str().unwrap_or("");
     let b_id = if !bundle_id.is_null() {
-        unsafe { CStr::from_ptr(bundle_id).to_str().unwrap_or("") }
+        CStr::from_ptr(bundle_id).to_str().unwrap_or("")
     } else {
         ""
     };
@@ -180,17 +180,13 @@ pub extern "C" fn localdev_read_file(
 
     match res {
         Ok(mut bytes) => {
-            unsafe {
-                *out_len = bytes.len();
-            }
+            *out_len = bytes.len();
             let ptr = bytes.as_mut_ptr();
             std::mem::forget(bytes);
             ptr
         }
         Err(_) => {
-            unsafe {
-                *out_len = 0;
-            }
+            *out_len = 0;
             std::ptr::null_mut()
         }
     }
@@ -198,7 +194,7 @@ pub extern "C" fn localdev_read_file(
 
 /// Writes file bytes into device or app container with automatic .bak backup
 #[no_mangle]
-pub extern "C" fn localdev_write_file(
+pub unsafe extern "C" fn localdev_write_file(
     service_type: i32,
     bundle_id: *const c_char,
     path: *const c_char,
@@ -212,13 +208,13 @@ pub extern "C" fn localdev_write_file(
         }));
     }
 
-    let path_str = unsafe { CStr::from_ptr(path).to_str().unwrap_or("") };
+    let path_str = CStr::from_ptr(path).to_str().unwrap_or("");
     let b_id = if !bundle_id.is_null() {
-        unsafe { CStr::from_ptr(bundle_id).to_str().unwrap_or("") }
+        CStr::from_ptr(bundle_id).to_str().unwrap_or("")
     } else {
         ""
     };
-    let slice = unsafe { std::slice::from_raw_parts(data, len) };
+    let slice = std::slice::from_raw_parts(data, len);
 
     let res: Result<(), String> = with_manager(|mgr| {
         let pairing = mgr.active_pairing.as_ref().ok_or_else(|| "Chưa có pairing file".to_string())?;
@@ -251,21 +247,17 @@ pub extern "C" fn localdev_write_file(
 
 /// Frees C-string allocated by Rust
 #[no_mangle]
-pub extern "C" fn localdev_free_string(ptr: *mut c_char) {
+pub unsafe extern "C" fn localdev_free_string(ptr: *mut c_char) {
     if !ptr.is_null() {
-        unsafe {
-            let _ = CString::from_raw(ptr);
-        }
+        let _ = CString::from_raw(ptr);
     }
 }
 
 /// Frees byte buffer allocated by `localdev_read_file`
 #[no_mangle]
-pub extern "C" fn localdev_free_bytes(ptr: *mut u8, len: usize) {
+pub unsafe extern "C" fn localdev_free_bytes(ptr: *mut u8, len: usize) {
     if !ptr.is_null() && len > 0 {
-        unsafe {
-            let _ = Vec::from_raw_parts(ptr, len, len);
-        }
+        let _ = Vec::from_raw_parts(ptr, len, len);
     }
 }
 

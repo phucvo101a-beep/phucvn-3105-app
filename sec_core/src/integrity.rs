@@ -5,28 +5,34 @@ use std::ffi::{c_char, c_void, CStr};
 use subtle::ConstantTimeEq;
 
 #[cfg(target_vendor = "apple")]
-extern "C" {
-    fn _dyld_image_count() -> u32;
-    fn _dyld_get_image_header(image_index: u32) -> *const c_void;
-    fn _dyld_get_image_name(image_index: u32) -> *const c_char;
-    fn dladdr(addr: *const c_void, info: *mut DlInfo) -> i32;
+pub(crate) mod apple_sys {
+    use std::ffi::{c_char, c_void};
+    extern "C" {
+        pub fn _dyld_image_count() -> u32;
+        pub fn _dyld_get_image_header(image_index: u32) -> *const c_void;
+        pub fn _dyld_get_image_name(image_index: u32) -> *const c_char;
 
-    fn CFBundleGetMainBundle() -> *const c_void;
-    fn CFBundleGetIdentifier(bundle: *const c_void) -> *const c_void;
-    fn CFBundleGetValueForInfoDictionaryKey(bundle: *const c_void, key: *const c_void) -> *const c_void;
-    fn CFStringCreateWithCString(alloc: *const c_void, c_str: *const c_char, encoding: u32) -> *const c_void;
-    fn CFStringGetCString(the_string: *const c_void, buffer: *mut c_char, buffer_size: isize, encoding: u32) -> bool;
-    fn CFRelease(cf: *const c_void);
-    static kCFAllocatorDefault: *const c_void;
-    static kCFBundleVersionKey: *const c_void;
-}
-
-#[repr(C)]
-struct DlInfo {
-    dli_fname: *const c_char,
-    dli_fbase: *mut c_void,
-    dli_sname: *const c_char,
-    dli_saddr: *mut c_void,
+        pub fn CFBundleGetMainBundle() -> *const c_void;
+        pub fn CFBundleGetIdentifier(bundle: *const c_void) -> *const c_void;
+        pub fn CFBundleGetValueForInfoDictionaryKey(
+            bundle: *const c_void,
+            key: *const c_void,
+        ) -> *const c_void;
+        pub fn CFStringCreateWithCString(
+            alloc: *const c_void,
+            c_str: *const c_char,
+            encoding: u32,
+        ) -> *const c_void;
+        pub fn CFStringGetCString(
+            the_string: *const c_void,
+            buffer: *mut c_char,
+            buffer_size: isize,
+            encoding: u32,
+        ) -> bool;
+        pub fn CFRelease(cf: *const c_void);
+        pub static kCFAllocatorDefault: *const c_void;
+        pub static kCFBundleVersionKey: *const c_void;
+    }
 }
 
 #[repr(C)]
@@ -130,8 +136,8 @@ unsafe fn hash_text_section_from_header(hdr_ptr: *const c_void) -> Option<[u8; 3
 pub fn compute_app_binary_hash_bytes() -> Option<[u8; 32]> {
     #[cfg(target_vendor = "apple")]
     unsafe {
-        if _dyld_image_count() > 0 {
-            return hash_text_section_from_header(_dyld_get_image_header(0));
+        if apple_sys::_dyld_image_count() > 0 {
+            return hash_text_section_from_header(apple_sys::_dyld_get_image_header(0));
         }
     }
     None
@@ -147,21 +153,21 @@ pub fn compute_app_binary_hash() -> String {
 pub fn compute_sec_core_hash_bytes() -> Option<[u8; 32]> {
     #[cfg(target_vendor = "apple")]
     unsafe {
-        let mut info = core::mem::zeroed::<DlInfo>();
+        let mut info = core::mem::zeroed::<libc::Dl_info>();
         let anchor = compute_sec_core_hash_bytes as *const () as *const c_void;
-        if dladdr(anchor, &mut info) != 0 && !info.dli_fbase.is_null() {
-            return hash_text_section_from_header(info.dli_fbase);
+        if libc::dladdr(anchor, &mut info) != 0 && !info.dli_fbase.is_null() {
+            return hash_text_section_from_header(info.dli_fbase as *const c_void);
         }
         // Fallback scan by image name
-        let count = _dyld_image_count();
+        let count = apple_sys::_dyld_image_count();
         for idx in 0..count {
-            let name_ptr = _dyld_get_image_name(idx);
+            let name_ptr = apple_sys::_dyld_get_image_name(idx);
             if name_ptr.is_null() {
                 continue;
             }
             if let Ok(name) = CStr::from_ptr(name_ptr).to_str() {
                 if name.contains(obfstr!("libsec_core")) {
-                    return hash_text_section_from_header(_dyld_get_image_header(idx));
+                    return hash_text_section_from_header(apple_sys::_dyld_get_image_header(idx));
                 }
             }
         }
@@ -190,8 +196,11 @@ pub fn verify_self_text_hash() -> bool {
     };
 
     let mut expected = [0u8; 32];
-    for i in 0..32 {
-        expected[i] = seal[16 + i] ^ seal[48 + i];
+    for (out_b, (&m_b, &h_b)) in expected
+        .iter_mut()
+        .zip(seal[16..48].iter().zip(seal[48..80].iter()))
+    {
+        *out_b = m_b ^ h_b;
     }
     bool::from(actual.ct_eq(&expected))
 }
@@ -202,7 +211,7 @@ unsafe fn cfstring_to_rust(cf_str: *const c_void) -> Option<String> {
         return None;
     }
     let mut buf: [c_char; 256] = [0; 256];
-    if CFStringGetCString(cf_str, buf.as_mut_ptr(), 256, 0x0800_0100) {
+    if apple_sys::CFStringGetCString(cf_str, buf.as_mut_ptr(), 256, 0x0800_0100) {
         return CStr::from_ptr(buf.as_ptr()).to_str().ok().map(|s| s.to_string());
     }
     None
@@ -212,23 +221,32 @@ unsafe fn cfstring_to_rust(cf_str: *const c_void) -> Option<String> {
 pub fn read_bundle_identity() -> (String, String, String) {
     #[cfg(target_vendor = "apple")]
     unsafe {
-        let bundle = CFBundleGetMainBundle();
+        let bundle = apple_sys::CFBundleGetMainBundle();
         if !bundle.is_null() {
-            let pkg = cfstring_to_rust(CFBundleGetIdentifier(bundle))
+            let pkg = cfstring_to_rust(apple_sys::CFBundleGetIdentifier(bundle))
                 .unwrap_or_else(|| obfstr!("com.apple.mobile.MobileHouseArrest").to_string());
             let key_short = std::ffi::CString::new(obfstr!("CFBundleShortVersionString")).ok();
             let ver = key_short
                 .and_then(|c| {
-                    let cf_k = CFStringCreateWithCString(kCFAllocatorDefault, c.as_ptr(), 0x0800_0100);
-                    let res = cfstring_to_rust(CFBundleGetValueForInfoDictionaryKey(bundle, cf_k));
+                    let cf_k = apple_sys::CFStringCreateWithCString(
+                        apple_sys::kCFAllocatorDefault,
+                        c.as_ptr(),
+                        0x0800_0100,
+                    );
+                    let res = cfstring_to_rust(apple_sys::CFBundleGetValueForInfoDictionaryKey(
+                        bundle, cf_k,
+                    ));
                     if !cf_k.is_null() {
-                        CFRelease(cf_k);
+                        apple_sys::CFRelease(cf_k);
                     }
                     res
                 })
                 .unwrap_or_else(|| obfstr!("2.1.0").to_string());
-            let bld = cfstring_to_rust(CFBundleGetValueForInfoDictionaryKey(bundle, kCFBundleVersionKey))
-                .unwrap_or_else(|| obfstr!("9").to_string());
+            let bld = cfstring_to_rust(apple_sys::CFBundleGetValueForInfoDictionaryKey(
+                bundle,
+                apple_sys::kCFBundleVersionKey,
+            ))
+            .unwrap_or_else(|| obfstr!("9").to_string());
             return (pkg, ver, bld);
         }
     }

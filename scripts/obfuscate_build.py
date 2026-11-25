@@ -316,7 +316,7 @@ pub static mut SEC_SELF_SEAL: [u8; 80] = {_fmt_rust_arr(bytes(seal_arr))};
         rs_txt = rs_path.read_text(encoding="utf-8")
         for orig_sym, obf_sym in c_sym_map.items():
             rs_txt = re.sub(
-                rf'#\[no_mangle\]\s*(pub extern "C" fn {re.escape(orig_sym)}\b)',
+                rf'#\[no_mangle\]\s*(pub (?:unsafe )?extern "C" fn {re.escape(orig_sym)}\b)',
                 rf'#[export_name = "{obf_sym}"]\n\1',
                 rs_txt,
             )

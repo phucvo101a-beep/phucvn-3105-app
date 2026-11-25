@@ -48,6 +48,12 @@ pub struct LocalDevManager {
     pub heartbeat: HeartbeatService,
 }
 
+impl Default for LocalDevManager {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl LocalDevManager {
     pub fn new() -> Self {
         Self {

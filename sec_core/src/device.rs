@@ -1,18 +1,12 @@
+#[cfg(target_vendor = "apple")]
+use crate::integrity::apple_sys::{kCFAllocatorDefault, CFRelease, CFStringCreateWithCString};
 use obfstr::obfstr;
 use sha2::{Digest, Sha256};
-use std::ffi::{c_char, c_void, CString};
+#[cfg(target_vendor = "apple")]
+use std::ffi::{c_void, CString};
 
 #[cfg(target_vendor = "apple")]
 extern "C" {
-    fn sysctlbyname(
-        name: *const c_char,
-        oldp: *mut c_void,
-        oldlenp: *mut usize,
-        newp: *const c_void,
-        newlen: usize,
-    ) -> i32;
-
-    static kCFAllocatorDefault: *const c_void;
     static kCFBooleanTrue: *const c_void;
 
     static kSecClass: *const c_void;
@@ -33,15 +27,9 @@ extern "C" {
         value_callbacks: *const c_void,
     ) -> *mut c_void;
     fn CFDictionaryAddValue(the_dict: *mut c_void, key: *const c_void, value: *const c_void);
-    fn CFStringCreateWithCString(
-        alloc: *const c_void,
-        c_str: *const c_char,
-        encoding: u32,
-    ) -> *const c_void;
     fn CFDataCreate(alloc: *const c_void, bytes: *const u8, length: isize) -> *const c_void;
     fn CFDataGetLength(the_data: *const c_void) -> isize;
     fn CFDataGetBytePtr(the_data: *const c_void) -> *const u8;
-    fn CFRelease(cf: *const c_void);
 
     fn SecItemCopyMatching(query: *const c_void, result: *mut *const c_void) -> i32;
     fn SecItemAdd(attributes: *const c_void, result: *mut *const c_void) -> i32;
@@ -56,14 +44,20 @@ pub fn get_hardware_machine() -> String {
         if let Ok(name) = CString::new(obfstr!("hw.machine")) {
             let mut size: usize = 0;
             unsafe {
-                sysctlbyname(name.as_ptr(), core::ptr::null_mut(), &mut size, core::ptr::null(), 0);
+                libc::sysctlbyname(
+                    name.as_ptr(),
+                    core::ptr::null_mut(),
+                    &mut size,
+                    core::ptr::null_mut(),
+                    0,
+                );
                 if size > 0 && size < 128 {
                     let mut buf = vec![0u8; size];
-                    if sysctlbyname(
+                    if libc::sysctlbyname(
                         name.as_ptr(),
                         buf.as_mut_ptr() as *mut c_void,
                         &mut size,
-                        core::ptr::null(),
+                        core::ptr::null_mut(),
                         0,
                     ) == 0
                     {

@@ -1,17 +1,9 @@
 use crate::syscall_arm64;
-use obfstr::obfstr;
-use std::ffi::{c_char, c_void, CString};
-
 #[cfg(target_vendor = "apple")]
-extern "C" {
-    fn sysctlbyname(
-        name: *const c_char,
-        oldp: *mut c_void,
-        oldlenp: *mut usize,
-        newp: *const c_void,
-        newlen: usize,
-    ) -> i32;
-}
+use obfstr::obfstr;
+use std::ffi::c_void;
+#[cfg(target_vendor = "apple")]
+use std::ffi::CString;
 
 const CTL_KERN: i32 = 1;
 const KERN_PROC: i32 = 14;
@@ -100,14 +92,20 @@ pub fn get_darwin_osrelease() -> String {
     if let Ok(name) = CString::new(obfstr!("kern.osrelease")) {
         let mut size: usize = 0;
         unsafe {
-            sysctlbyname(name.as_ptr(), core::ptr::null_mut(), &mut size, core::ptr::null(), 0);
+            libc::sysctlbyname(
+                name.as_ptr(),
+                core::ptr::null_mut(),
+                &mut size,
+                core::ptr::null_mut(),
+                0,
+            );
             if size > 0 && size < 64 {
                 let mut buf = vec![0u8; size];
-                if sysctlbyname(
+                if libc::sysctlbyname(
                     name.as_ptr(),
                     buf.as_mut_ptr() as *mut c_void,
                     &mut size,
-                    core::ptr::null(),
+                    core::ptr::null_mut(),
                     0,
                 ) == 0
                 {
