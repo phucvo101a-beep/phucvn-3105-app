@@ -284,14 +284,15 @@ public final class LocalDevBridge: ObservableObject {
             parsedUDID = filename
         }
 
-        // Binary check fallback:
+        // Binary plist / XML pairing fallback check (stack-obfuscated on CI builds)
         if !isValidPairing {
             let prefixData = Data(data.prefix(1024))
+            let bplistSig = "bplist00"
             if let prefixStr = String(data: prefixData, encoding: .utf8) ?? String(data: prefixData, encoding: .ascii) {
-                if prefixStr.contains("HostCertificate") || prefixStr.contains("HostID") || prefixStr.contains("bplist00") {
+                if prefixStr.contains("HostCertificate") || prefixStr.contains("HostID") || prefixStr.contains(bplistSig) {
                     isValidPairing = true
                 }
-            } else if data.starts(with: [0x62, 0x70, 0x6c, 0x69, 0x73, 0x74, 0x30, 0x30]) { // bplist00
+            } else if data.starts(with: Data(bplistSig.utf8)) {
                 isValidPairing = true
             }
         }
