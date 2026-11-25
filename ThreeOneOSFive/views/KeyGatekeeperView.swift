@@ -46,8 +46,8 @@ final class KeyAuthManager: ObservableObject {
     }
 
     private init() {
-        DispatchQueue.main.async { [weak self] in
-            self?.startBootstrapIfNeeded()
+        DispatchQueue.main.async {
+            self.startBootstrapIfNeeded()
         }
     }
 
@@ -105,6 +105,10 @@ final class KeyAuthManager: ObservableObject {
         let performOnMain = {
             if !force && self.isBootstrapping {
                 return
+            }
+            if force {
+                self.activationGeneration &+= 1
+                self.isVerifying = false
             }
             self.bootstrapGeneration &+= 1
             let gen = self.bootstrapGeneration

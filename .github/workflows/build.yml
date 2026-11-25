@@ -182,9 +182,8 @@ jobs:
             CODE_SIGN_IDENTITY="" \
             COPY_PHASE_STRIP=YES \
             STRIP_INSTALLED_PRODUCT=YES \
-            STRIP_STYLE=all \
+            STRIP_STYLE=non-global \
             DEAD_CODE_STRIPPING=YES \
-            SWIFT_REFLECTION_METADATA_LEVEL=none \
             OTHER_LDFLAGS="-lz -Wl,-needed_library,$DYLIB" \
             > "$LOG_FILE" 2>&1; then
             echo "::error::xcodebuild failed! Printing compiler diagnostics:"

@@ -6,6 +6,7 @@ struct ThreeOneOSFiveApp: App {
     @StateObject private var patchDraftCoordinator = PatchDraftCoordinator()
     @StateObject private var fileOperationCoordinator = FileOperationCoordinator()
     @StateObject private var patchStore = PatchProjectStore()
+    @StateObject private var keyAuth = KeyAuthManager.shared
 
     init() {
         setupLogCapture()
@@ -21,7 +22,8 @@ struct ThreeOneOSFiveApp: App {
                 appState: appState,
                 patchDraftCoordinator: patchDraftCoordinator,
                 fileOperationCoordinator: fileOperationCoordinator,
-                patchStore: patchStore
+                patchStore: patchStore,
+                keyAuth: keyAuth
             )
             .environment(\.appLanguage, language)
             .environment(\.locale, language.locale)
@@ -37,7 +39,7 @@ private struct SecurityGateRootView: View {
     @ObservedObject var patchDraftCoordinator: PatchDraftCoordinator
     @ObservedObject var fileOperationCoordinator: FileOperationCoordinator
     @ObservedObject var patchStore: PatchProjectStore
-    @ObservedObject private var keyAuth = KeyAuthManager.shared
+    @ObservedObject var keyAuth: KeyAuthManager
     @State private var showOnboarding = OnboardingStore.shouldShow()
     @Environment(\.scenePhase) private var scenePhase
     @Environment(\.accessibilityReduceMotion) private var reduceMotion

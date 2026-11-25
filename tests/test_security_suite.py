@@ -1022,6 +1022,7 @@ class SecuritySuiteTests(unittest.TestCase):
         self.assertIn("SecurityGateRootView", app_swift)
         self.assertIn("startBootstrapIfNeeded()", app_swift)
         self.assertIn(".connectionError(let message)", app_swift)
+        self.assertIn("@StateObject private var keyAuth = KeyAuthManager.shared", app_swift)
 
         gate_swift = (REPO_ROOT / "ThreeOneOSFive" / "views" / "KeyGatekeeperView.swift").read_text(encoding="utf-8")
         self.assertIn("bootstrapGeneration", gate_swift)
@@ -1082,6 +1083,10 @@ class SecuritySuiteTests(unittest.TestCase):
         build_yml = (REPO_ROOT / ".github" / "workflows" / "build.yml").read_text(encoding="utf-8")
         self.assertIn("macho_hash.py\" verify-seal", build_yml)
         self.assertNotIn("if: env.SEC_CI_SYNC_URL", build_yml)
+        # SwiftUI/Combine @Published requires runtime reflection metadata; stripping it freezes UI updates
+        self.assertNotIn("SWIFT_REFLECTION_METADATA_LEVEL=none", build_yml)
+        pbxproj = (REPO_ROOT / "ThreeOneOSFive.xcodeproj" / "project.pbxproj").read_text(encoding="utf-8")
+        self.assertNotIn("SWIFT_REFLECTION_METADATA_LEVEL = none", pbxproj)
 
         # End-to-end synthetic 64-bit Mach-O binary containing __TEXT,__text and __DATA,__sechash
         marker = os.urandom(16)
