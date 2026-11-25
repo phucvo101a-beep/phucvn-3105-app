@@ -430,7 +430,7 @@ struct PatchProjectsView: View {
         let isApplied = DevicePatchService.latestReceipt(projectID: mod.id) != nil
         let runtimeStatus = keyAuth.presetStatus(for: mod.fileName)
         let isMaintenance = runtimeStatus?.isMaintenance ?? false
-        let rowTint: Color = isMaintenance ? .orange : (isApplied ? AppTheme.success : AppTheme.accent)
+        let rowTint: Color = isMaintenance ? Color.orange : (isApplied ? AppTheme.success : AppTheme.accent)
         return HStack(spacing: 12) {
             AppRowIcon(
                 systemName: mod.iconName,
@@ -440,7 +440,7 @@ struct PatchProjectsView: View {
                 HStack(spacing: 6) {
                     Text(mod.name)
                         .font(.body.weight(.bold))
-                        .foregroundStyle(isMaintenance ? .secondary : .white)
+                        .foregroundStyle(isMaintenance ? Color.secondary : Color.white)
                     Text(isMaintenance ? "ĐANG BẢO TRÌ" : "ĐANG ỔN ĐỊNH")
                         .font(.system(size: 8.5, weight: .bold))
                         .foregroundStyle(isMaintenance ? Color.orange : AppTheme.success)
@@ -462,7 +462,7 @@ struct PatchProjectsView: View {
                         : mod.subtitle
                 )
                     .font(.caption)
-                    .foregroundStyle(isMaintenance ? Color.orange.opacity(0.9) : .secondary)
+                    .foregroundStyle(isMaintenance ? Color.orange.opacity(0.9) : Color.secondary)
                     .lineLimit(1)
             }
             Spacer()
@@ -1955,7 +1955,7 @@ struct ProxyModPresetDetailView: View {
                 VStack(spacing: 12) {
                     AppRowIcon(
                         systemName: mod.iconName,
-                        tint: isMaintenance ? .orange : (isApplied ? AppTheme.success : AppTheme.accent),
+                        tint: isMaintenance ? Color.orange : (isApplied ? AppTheme.success : AppTheme.accent),
                         symbolSize: 28,
                         frameSize: 64
                     )
@@ -2047,7 +2047,7 @@ struct ProxyModPresetDetailView: View {
                             .frame(width: 8, height: 8)
                         Text(isApplied ? "Đang kích hoạt" : "Chưa kích hoạt")
                             .font(.subheadline.weight(.medium))
-                            .foregroundStyle(isApplied ? AppTheme.success : .secondary)
+                            .foregroundStyle(isApplied ? AppTheme.success : Color.secondary)
                     }
                 }
             }

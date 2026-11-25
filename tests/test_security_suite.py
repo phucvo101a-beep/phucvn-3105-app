@@ -1242,6 +1242,8 @@ class SecuritySuiteTests(unittest.TestCase):
         self.assertIn("V3PresetStatus", bridge_sw)
         self.assertIn("ĐANG BẢO TRÌ", proj_sw)
         self.assertIn("ĐANG ỔN ĐỊNH", proj_sw)
+        self.assertNotIn("isMaintenance ? .secondary", proj_sw)
+        self.assertNotIn(": .secondary)", proj_sw)
 
 
 def main():
