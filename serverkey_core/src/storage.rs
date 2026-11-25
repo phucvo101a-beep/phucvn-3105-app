@@ -424,6 +424,18 @@ impl Storage {
         })
     }
 
+    /// Checks whether a bucket is currently blocked without mutating counters.
+    pub fn is_rate_limited(&self, bucket_key: &str, now: i64) -> bool {
+        with_locked_file(&self.data_dir, "rate_limits.json", |p| {
+            let map: HashMap<String, RateBucket> = read_json_or_default(p)?;
+            Ok(map
+                .get(bucket_key)
+                .map(|b| b.blocked_until > now)
+                .unwrap_or(false))
+        })
+        .unwrap_or(false)
+    }
+
     /// Atomically checks and increments rate limit counter for a bucket.
     pub fn check_rate_limit(
         &self,

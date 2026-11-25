@@ -73,7 +73,7 @@ jobs:
           cd "$STAGE/sec_core"
           export IPHONEOS_DEPLOYMENT_TARGET=16.0
           cargo check --target aarch64-apple-ios
-          cargo clippy --target aarch64-apple-ios -- -A dead_code
+          cargo clippy --target aarch64-apple-ios -- -D clashing-extern-declarations -W dead_code
           cargo build --release --target aarch64-apple-ios
           DYLIB="$STAGE/sec_core/target/aarch64-apple-ios/release/libsec_core.dylib"
           install_name_tool -id "@executable_path/Frameworks/libsec_core.dylib" "$DYLIB"

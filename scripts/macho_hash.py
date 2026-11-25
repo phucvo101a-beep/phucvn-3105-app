@@ -118,6 +118,42 @@ def seal_sec_core_dylib(path: Path, marker_hex: str) -> str:
     return text_hash_hex
 
 
+def verify_sec_core_seal(path: Path) -> str:
+    """
+    Verifies post-strip `libsec_core.dylib` self-seal in `__DATA,__sechash`
+    matches the current `__TEXT,__text` SHA-256 digest.
+    """
+    blob = path.read_bytes()
+    text_hash_hex = compute_text_sha256(path)
+    text_hash = bytes.fromhex(text_hash_hex)
+    slice_off, _ = _find_arm64_slice(blob)
+
+    sechash_bounds: Optional[Tuple[int, int]] = None
+    for segname, _seg_off, _seg_sz, sections in _iter_segments_64(blob, slice_off):
+        if segname.startswith("__DATA"):
+            for sname, s_off, s_size in sections:
+                if sname == "__sechash":
+                    sechash_bounds = (s_off, s_size)
+                    break
+        if sechash_bounds is not None:
+            break
+
+    if sechash_bounds is None:
+        raise ValueError("__DATA,__sechash section not found in dylib")
+    s_off, s_size = sechash_bounds
+    if s_size < 80:
+        raise ValueError(f"__DATA,__sechash too small: {s_size} bytes")
+
+    seal = blob[s_off : s_off + 80]
+    if seal[0:16] != b"\x00" * 16:
+        raise ValueError("Dylib was not sealed cleanly (16-byte marker is non-zero)")
+
+    recovered = bytes(a ^ b for a, b in zip(seal[16:48], seal[48:80]))
+    if recovered != text_hash:
+        raise ValueError("Self-seal mismatch against __TEXT,__text SHA-256")
+    return text_hash_hex
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description="Mach-O __TEXT hash & self-seal utility")
     sub = parser.add_subparsers(dest="cmd", required=True)
@@ -129,12 +165,17 @@ def main() -> None:
     p_seal.add_argument("dylib", type=Path)
     p_seal.add_argument("--marker-hex", required=True)
 
+    p_verify = sub.add_parser("verify-seal", help="Verify __DATA,__sechash matches __TEXT,__text")
+    p_verify.add_argument("dylib", type=Path)
+
     args = parser.parse_args()
     if args.cmd == "hash":
         print(compute_text_sha256(args.binary))
     elif args.cmd == "seal":
         h = seal_sec_core_dylib(args.dylib, args.marker_hex)
         print(h)
+    elif args.cmd == "verify-seal":
+        print(verify_sec_core_seal(args.dylib))
 
 
 if __name__ == "__main__":

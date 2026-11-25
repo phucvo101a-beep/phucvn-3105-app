@@ -1,6 +1,18 @@
 # Nginx Hardening Snippet for PHUCVN 3105 Server Key
 # Include inside `server { ... }` block.
 
+location = /api/v3 {
+    rewrite ^ /api_v2.php?action=v3 last;
+}
+
+location = /api/v3/ {
+    rewrite ^ /api_v2.php?action=v3 last;
+}
+
+location = /api/ci/register {
+    rewrite ^ /api_v2.php?action=ci_register_build last;
+}
+
 location ~* /(\.env|\.git|data/|lib/|api/|schema_addon\.sql|composer\.|README|HUONG_DAN) {
     deny all;
     return 403;
@@ -9,14 +21,6 @@ location ~* /(\.env|\.git|data/|lib/|api/|schema_addon\.sql|composer\.|README|HU
 location ~* \.(json|sql|bak|old|orig|zip|tar|gz|log|lock|md|py|rs|toml)$ {
     deny all;
     return 403;
-}
-
-location = /api/v3 {
-    rewrite ^ /api_v2.php?action=v3 last;
-}
-
-location = /api/ci/register {
-    rewrite ^ /api_v2.php?action=ci_register_build last;
 }
 
 # Restrict api.php legacy surface

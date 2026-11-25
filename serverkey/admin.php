@@ -5,6 +5,14 @@
  */
 require_once __DIR__ . '/config.php';
 
+if (PHP_SAPI !== 'cli' && !headers_sent()) {
+    header('Cache-Control: no-store, no-cache, must-revalidate, max-age=0');
+    header('Pragma: no-cache');
+    header('X-Content-Type-Options: nosniff');
+    header('X-Frame-Options: DENY');
+    header('Referrer-Policy: no-referrer');
+}
+
 $settings = getSettings();
 $msg = $_SESSION['flash_msg'] ?? '';
 $error = $_SESSION['flash_error'] ?? '';

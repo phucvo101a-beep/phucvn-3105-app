@@ -7,6 +7,7 @@ use crate::crypto::{
 use crate::storage::{format_vn_time, now_unix, BuildManifest, Storage};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
+use zeroize::Zeroizing;
 
 const MAX_CLOCK_SKEW_SECS: i64 = 180;
 
@@ -296,10 +297,10 @@ pub fn handle_v3_request(
         req.ts,
     );
 
-    let pt = decrypt_request_v3(&req_key, &req_nonce24, &req_aad, &req.ct).map_err(|_| {
+    let pt = Zeroizing::new(decrypt_request_v3(&req_key, &req_nonce24, &req_aad, &req.ct).map_err(|_| {
         storage.append_log("AEAD_FAIL", "", &req.fp, &req.client_ip, &req.pkg);
         (403, json!({"error": "Cryptographic verification failed"}))
-    })?;
+    })?);
 
     let inner: V3InnerPayload = serde_json::from_slice(&pt)
         .map_err(|_| (400, json!({"error": "Invalid encrypted payload"})))?;
@@ -358,8 +359,10 @@ pub fn handle_v3_request(
             "bundle_keys": bundle_keys,
             "license": license,
         });
-        let pt_bytes = serde_json::to_vec(&inner_res)
-            .map_err(|_| (500, json!({"error": "Response serialize error"})))?;
+        let pt_bytes = Zeroizing::new(
+            serde_json::to_vec(&inner_res)
+                .map_err(|_| (500, json!({"error": "Response serialize error"})))?,
+        );
         let (ct_b64, sig_hex) = seal_and_sign_response_v3(
             keys,
             &shared,
@@ -558,6 +561,18 @@ pub fn handle_v3_request(
 
     // 5. ACTIVATE / HEARTBEAT: require valid non-empty license key & rate limit brute-force
     let clean_key = inner.key.trim().to_string();
+    let key_bucket = format!("kf:{}", &sha256_hex(clean_key.as_bytes())[..16]);
+    let ip_kf_bucket = format!("ip_kf:{}", req.client_ip);
+    if storage.is_rate_limited(&ip_kf_bucket, now) || storage.is_rate_limited(&key_bucket, now) {
+        storage.append_log(
+            "KEY_BRUTE_BLOCK",
+            &mask_key(&clean_key),
+            &req.fp,
+            &req.client_ip,
+            &req.pkg,
+        );
+        return Err((429, json!({"error": "Too many failed license attempts"})));
+    }
     if clean_key.is_empty() || clean_key.len() > 128 {
         return send_v3(
             "denied",
@@ -575,7 +590,6 @@ pub fn handle_v3_request(
         );
     }
 
-    let key_bucket = format!("kf:{}", &sha256_hex(clean_key.as_bytes())[..16]);
     enum KeyCheckOutcome {
         Ok(LicenseSummary),
         Fail(&'static str, String),
@@ -745,6 +759,7 @@ pub fn handle_v3_request(
     match outcome {
         KeyCheckOutcome::Fail(code, msg) => {
             let _ = storage.check_rate_limit(&key_bucket, 300, 12, 600, now);
+            let _ = storage.check_rate_limit(&ip_kf_bucket, 300, 25, 600, now);
             storage.append_log(
                 code,
                 &mask_key(&clean_key),

@@ -37,6 +37,14 @@ final class CoreEngine {
         $this->bundleMasterKey = hex2bin($bHex);
     }
 
+    public function __destruct() {
+        foreach (['x25519Priv', 'ed25519Seed', 'bundleMasterKey', 'pepper', 'ciSyncSecret'] as $prop) {
+            if (isset($this->{$prop}) && is_string($this->{$prop}) && $this->{$prop} !== '') {
+                @sodium_memzero($this->{$prop});
+            }
+        }
+    }
+
     public static function compareSemver(string $a, string $b): int {
         $norm = static function (string $s): array {
             $clean = preg_replace('/^[vV]/', '', trim($s));
@@ -87,6 +95,11 @@ final class CoreEngine {
             $dirty = true;
             return true;
         });
+    }
+
+    private static function isRateLimited(string $bucket, int $now): bool {
+        $map = readJsonFile(RATE_LIMITS_FILE, []);
+        return isset($map[$bucket]) && intval($map[$bucket]['blocked_until'] ?? 0) > $now;
     }
 
     private static function checkAndRecordNonce(string $nonceHex, int $now): bool {
@@ -184,13 +197,17 @@ final class CoreEngine {
             return [400, ['error' => 'Malformed base64 ciphertext']];
         }
         $pt = sodium_crypto_aead_xchacha20poly1305_ietf_decrypt($ctRaw, $reqAad, $nonce24, $reqKey);
+        @sodium_memzero($reqKey);
         if ($pt === false) {
+            @sodium_memzero($shared);
             addLog('AEAD_FAIL', '', $pkg, $clientIp, $fpHex);
             return [403, ['error' => 'Cryptographic verification failed']];
         }
 
         $inner = json_decode($pt, true);
+        @sodium_memzero($pt);
         if (!is_array($inner) || ($inner['op'] ?? '') !== $op || ($inner['pkg'] ?? '') !== $pkg || ($inner['ver'] ?? '') !== $ver || intval($inner['ts'] ?? 0) !== $ts) {
+            @sodium_memzero($shared);
             return [403, ['error' => 'Envelope mismatch']];
         }
 
@@ -198,6 +215,7 @@ final class CoreEngine {
         $proofHex = strtolower(trim((string)($inner['client_proof'] ?? '')));
         $expectedProof = hash_hmac('sha256', $reqAad . '|' . $innerKey, $this->pepper);
         if (!hash_equals($expectedProof, $proofHex)) {
+            @sodium_memzero($shared);
             addLog('PROOF_FAIL', '', $pkg, $clientIp, $fpHex);
             return [403, ['error' => 'Client authentication proof invalid']];
         }
@@ -213,7 +231,7 @@ final class CoreEngine {
             ?string $sessToken = null,
             array $bundleKeys = [],
             ?array $license = null
-        ) use ($op, $pkg, $ver, $fpHex, $nonceHex, $nonce24, $shared): array {
+        ) use ($op, $pkg, $ver, $fpHex, $nonceHex, $nonce24, &$shared): array {
             $sTs = time();
             $sNonce24 = random_bytes(24);
             $sNonceHex = bin2hex($sNonce24);
@@ -248,13 +266,17 @@ final class CoreEngine {
             ];
             $ptBytes = json_encode($payload, JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE);
             $resKey = hash_hkdf('sha256', $shared, 32, '3105-V3-RES|' . $nonce24, $this->pepper);
+            @sodium_memzero($shared);
             $resCt = sodium_crypto_aead_xchacha20poly1305_ietf_encrypt($ptBytes, $resAad, $sNonce24, $resKey);
+            @sodium_memzero($resKey);
+            @sodium_memzero($ptBytes);
             $ctHash = hash('sha256', $resCt, true);
             $sigMsg = '3105-V3-SIG|' . $resAad . '|' . $ctHash;
             $kp = sodium_crypto_sign_seed_keypair($this->ed25519Seed);
             $sk = sodium_crypto_sign_secretkey($kp);
             $sig = sodium_crypto_sign_detached($sigMsg, $sk);
-            sodium_memzero($sk);
+            @sodium_memzero($sk);
+            @sodium_memzero($kp);
 
             return [200, [
                 'v' => 3,
@@ -351,6 +373,12 @@ final class CoreEngine {
 
         // 4. License Validation & Atomic Device Binding
         $cleanKey = trim($innerKey);
+        $keyBucket = 'kf:' . substr(hash('sha256', $cleanKey), 0, 16);
+        if (self::isRateLimited("ip_kf:$clientIp", $now) || self::isRateLimited($keyBucket, $now)) {
+            @sodium_memzero($shared);
+            addLog('KEY_BRUTE_BLOCK', self::maskKey($cleanKey), $pkg, $clientIp, $fpHex);
+            return [429, ['error' => 'Too many failed license attempts']];
+        }
         if ($cleanKey === '' || strlen($cleanKey) > 128) {
             return $sendV3('denied', 'INVALID_KEY', true, false, $policy, 'Vui lòng nhập mã Key hợp lệ.');
         }
@@ -439,8 +467,8 @@ final class CoreEngine {
         });
 
         if (empty($outcome['ok'])) {
-            $keyBucket = 'kf:' . substr(hash('sha256', $cleanKey), 0, 16);
             self::checkRateLimit($keyBucket, 300, 12, 600, $now);
+            self::checkRateLimit("ip_kf:$clientIp", 300, 25, 600, $now);
             addLog($outcome['code'], self::maskKey($cleanKey), $outcome['msg'], $clientIp, $fpHex);
             return $sendV3('denied', $outcome['code'], true, false, $policy, $outcome['msg']);
         }

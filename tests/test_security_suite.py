@@ -1037,6 +1037,44 @@ class SecuritySuiteTests(unittest.TestCase):
         self.assertIn("is_ipv4()", net_rs)
         self.assertNotIn("read_to_end(", net_rs)
 
+        # Verify sec_core dlsym extern clash & ios_ui dead_code remediation + verify-seal Mach-O roundtrip
+        anti_hook_rs = (REPO_ROOT / "sec_core" / "src" / "anti_hook.rs").read_text(encoding="utf-8")
+        self.assertIn("libc::dlsym(libc::RTLD_DEFAULT", anti_hook_rs)
+        self.assertNotIn("fn dlsym(", anti_hook_rs)
+
+        ios_ui_rs = (REPO_ROOT / "sec_core" / "src" / "ios_ui.rs").read_text(encoding="utf-8")
+        self.assertNotIn("on_submit", ios_ui_rs)
+        self.assertNotIn("ActivationUiContext", ios_ui_rs)
+        self.assertNotIn("fn dlsym(", ios_ui_rs)
+
+        core_php = (REPO_ROOT / "serverkey" / "lib" / "CoreEngine.php").read_text(encoding="utf-8")
+        self.assertIn("sodium_memzero", core_php)
+        self.assertIn("__destruct", core_php)
+        self.assertIn("ip_kf:", core_php)
+
+        build_yml = (REPO_ROOT / ".github" / "workflows" / "build.yml").read_text(encoding="utf-8")
+        self.assertIn("macho_hash.py\" verify-seal", build_yml)
+        self.assertNotIn("if: env.SEC_CI_SYNC_URL", build_yml)
+
+        # End-to-end synthetic 64-bit Mach-O binary containing __TEXT,__text and __DATA,__sechash
+        marker = os.urandom(16)
+        text_code = b"\xC0\x03\x5F\xD6" * 8
+        sechash_buf = marker + (b"\x00" * 64)
+        text_off = 512
+        data_off = 512 + len(text_code)
+        hdr = struct.pack("<IiiIIIII", macho_hash.MH_MAGIC_64, macho_hash.CPU_TYPE_ARM64, 0, 6, 2, 72 + 80 + 72 + 80, 0, 0)
+        seg_text = struct.pack("<II16sQQQQiiII", macho_hash.LC_SEGMENT_64, 152, b"__TEXT".ljust(16, b"\x00"), 0, len(text_code), text_off, len(text_code), 5, 5, 1, 0)
+        sec_text = struct.pack("<16s16sQQIIIIIIII", b"__text".ljust(16, b"\x00"), b"__TEXT".ljust(16, b"\x00"), 0, len(text_code), text_off, 2, 0, 0, 0, 0, 0, 0)
+        seg_data = struct.pack("<II16sQQQQiiII", macho_hash.LC_SEGMENT_64, 152, b"__DATA".ljust(16, b"\x00"), 0, len(sechash_buf), data_off, len(sechash_buf), 3, 3, 1, 0)
+        sec_data = struct.pack("<16s16sQQIIIIIIII", b"__sechash".ljust(16, b"\x00"), b"__DATA".ljust(16, b"\x00"), 0, len(sechash_buf), data_off, 2, 0, 0, 0, 0, 0, 0)
+        synth_blob = (hdr + seg_text + sec_text + seg_data + sec_data).ljust(text_off, b"\x00") + text_code + sechash_buf
+        synth_path = self.tmpdir / "libsec_core_synth.dylib"
+        synth_path.write_bytes(synth_blob)
+        sealed_hash = macho_hash.seal_sec_core_dylib(synth_path, marker.hex())
+        verified_hash = macho_hash.verify_sec_core_seal(synth_path)
+        self.assertEqual(sealed_hash, verified_hash)
+        self.assertEqual(sealed_hash, hashlib.sha256(text_code).hexdigest())
+
 
 def main():
     parser = argparse.ArgumentParser(description="Run 3105 5-Scenario Security Test Suite")

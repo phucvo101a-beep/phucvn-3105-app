@@ -1,15 +1,12 @@
 use obfstr::obfstr;
-use std::ffi::{c_char, c_void, CStr, CString};
+use std::ffi::{c_char, CStr, CString};
 
 #[cfg(target_vendor = "apple")]
 extern "C" {
     fn _dyld_image_count() -> u32;
     fn _dyld_get_image_name(image_index: u32) -> *const c_char;
     fn getenv(name: *const c_char) -> *const c_char;
-    fn dlsym(handle: *mut c_void, symbol: *const c_char) -> *mut c_void;
 }
-
-const RTLD_DEFAULT: *mut c_void = (-2isize) as *mut c_void;
 
 /// Detects Substrate, Substitute, ElleKit, Frida, SSLKillSwitch, Cycript and similar tweak images.
 pub fn scan_injected_dylibs() -> bool {
@@ -110,7 +107,7 @@ pub fn scan_critical_trampolines() -> bool {
         ];
         for sym in &targets {
             if let Ok(c_sym) = CString::new(sym.as_str()) {
-                let ptr = dlsym(RTLD_DEFAULT, c_sym.as_ptr());
+                let ptr = libc::dlsym(libc::RTLD_DEFAULT, c_sym.as_ptr());
                 if is_trampoline_hooked(ptr as *const u8) {
                     return true;
                 }

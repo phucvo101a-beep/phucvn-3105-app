@@ -231,18 +231,28 @@ jobs:
           done
 
           APP_HASH=$(python3 "$STAGE/scripts/macho_hash.py" hash "$APP/$EXECUTABLE")
-          echo "3105 __TEXT SHA-256: $APP_HASH"
+          BUNDLED_SEC_HASH=$(python3 "$STAGE/scripts/macho_hash.py" verify-seal "$APP/Frameworks/libsec_core.dylib")
+          echo "3105 __TEXT SHA-256 (post-strip): $APP_HASH"
+          echo "Bundled libsec_core __TEXT SHA-256 (sealed): $BUNDLED_SEC_HASH"
+          if [ "$BUNDLED_SEC_HASH" != "${{ steps.secdylib.outputs.sec_hash }}" ]; then
+            echo "::error::Bundled libsec_core.dylib hash shifted after sealing!"
+            exit 1
+          fi
 
           echo "app=$APP" >> "$GITHUB_OUTPUT"
           echo "bundle_id=$BUNDLE_ID" >> "$GITHUB_OUTPUT"
           echo "app_version=$APP_VERSION" >> "$GITHUB_OUTPUT"
           echo "app_build=$APP_BUILD" >> "$GITHUB_OUTPUT"
           echo "app_hash=$APP_HASH" >> "$GITHUB_OUTPUT"
+          echo "sec_hash=$BUNDLED_SEC_HASH" >> "$GITHUB_OUTPUT"
 
       - name: Create & Verify IPA
         id: ipa
         env:
+          STAGE: ${{ steps.stage.outputs.stage }}
           APP: ${{ steps.build.outputs.app }}
+          APP_HASH: ${{ steps.build.outputs.app_hash }}
+          SEC_HASH: ${{ steps.build.outputs.sec_hash }}
         shell: bash
         run: |
           set -euo pipefail
@@ -251,6 +261,13 @@ jobs:
           rm -rf "$PACKAGE" "$OUTPUT"
           mkdir -p "$PACKAGE/Payload"
           /usr/bin/ditto "$APP" "$PACKAGE/Payload/3105.app"
+          EXECUTABLE=$(/usr/libexec/PlistBuddy -c "Print :CFBundleExecutable" "$PACKAGE/Payload/3105.app/Info.plist")
+          PACKED_APP_HASH=$(python3 "$STAGE/scripts/macho_hash.py" hash "$PACKAGE/Payload/3105.app/$EXECUTABLE")
+          PACKED_SEC_HASH=$(python3 "$STAGE/scripts/macho_hash.py" verify-seal "$PACKAGE/Payload/3105.app/Frameworks/libsec_core.dylib")
+          if [ "$PACKED_APP_HASH" != "$APP_HASH" ] || [ "$PACKED_SEC_HASH" != "$SEC_HASH" ]; then
+            echo "::error::IPA binary hashes diverged before packaging!"
+            exit 1
+          fi
           cd "$PACKAGE"
           /usr/bin/zip -qry "$OUTPUT" Payload
           /usr/bin/unzip -tq "$OUTPUT"
@@ -258,7 +275,7 @@ jobs:
           ls -lh "$OUTPUT"
 
       - name: Register Build Hashes with Server Key
-        if: env.SEC_CI_SYNC_URL != '' && env.SEC_CI_SYNC_SECRET != ''
+        if: success() && steps.stage.outputs.is_production == 'true'
         env:
           STAGE: ${{ steps.stage.outputs.stage }}
           SEC_CI_SYNC_URL: ${{ secrets.SEC_CI_SYNC_URL }}
@@ -267,10 +284,14 @@ jobs:
           APP_VERSION: ${{ steps.build.outputs.app_version }}
           APP_BUILD: ${{ steps.build.outputs.app_build }}
           APP_HASH: ${{ steps.build.outputs.app_hash }}
-          SEC_HASH: ${{ steps.secdylib.outputs.sec_hash }}
+          SEC_HASH: ${{ steps.build.outputs.sec_hash }}
         shell: bash
         run: |
           set -euo pipefail
+          if [ -z "${SEC_CI_SYNC_URL:-}" ] || [ -z "${SEC_CI_SYNC_SECRET:-}" ]; then
+            echo "::notice::SEC_CI_SYNC_URL / SEC_CI_SYNC_SECRET chua cau hinh — bo qua tu dong dang ky Build Hash."
+            exit 0
+          fi
           python3 "$STAGE/scripts/ci_sync.py" \
             --url "$SEC_CI_SYNC_URL" \
             --secret "$SEC_CI_SYNC_SECRET" \

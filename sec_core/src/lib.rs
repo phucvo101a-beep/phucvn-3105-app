@@ -156,6 +156,7 @@ fn execute_v3_exchange_flattened(op: &str, license_key: &str) -> Result<String, 
                 }
                 let pkt = pkt_opt.as_ref().ok_or("Missing packet")?;
                 let (decoded, raw_env) = crypto::verify_and_decrypt_v3_response(pkt, &resp_raw)?;
+                resp_raw.zeroize();
 
                 let mut ticket = String::new();
                 if op == obfstr!("activate") || op == obfstr!("heartbeat") {
