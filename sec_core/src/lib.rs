@@ -27,6 +27,7 @@ static WATCHDOG_STARTED: AtomicBool = AtomicBool::new(false);
 const TICKET_VALID_MAGIC: i32 = 0x3105_5A17;
 
 /// Constructor executed automatically before main() on dylib load.
+#[used]
 #[cfg_attr(target_vendor = "apple", link_section = "__DATA,__mod_init_func")]
 pub static INIT_CONSTRUCTOR: extern "C" fn() = init_sec_core;
 
@@ -34,7 +35,7 @@ pub static INIT_CONSTRUCTOR: extern "C" fn() = init_sec_core;
 pub extern "C" fn init_sec_core() {
     anti_debug::enforce_deny_attach();
     if perform_flattened_tamper_scan(false) != 0 {
-        sabotage::mark_tampered_and_terminate();
+        sabotage::wipe_vault(true);
     }
     start_watchdog_if_needed();
 }
@@ -104,6 +105,7 @@ fn to_c_string(s: String) -> *mut c_char {
 enum ExchangeFailure {
     Network(String),
     Crypto(String),
+    Tampered(String),
 }
 
 impl ExchangeFailure {
@@ -111,6 +113,7 @@ impl ExchangeFailure {
         let (status, code, msg) = match self {
             ExchangeFailure::Network(msg) => ("network_error", "NETWORK_ERROR", msg),
             ExchangeFailure::Crypto(msg) => ("crypto_error", "CRYPTO_ERROR", msg),
+            ExchangeFailure::Tampered(msg) => ("tampered", "TAMPER_DETECTED", msg),
         };
         let mut obj = json!({
             "ok": false,
@@ -140,8 +143,11 @@ fn execute_v3_exchange_flattened(op: &str, license_key: &str) -> Result<String, 
         match step {
             11 => {
                 tamper = perform_flattened_tamper_scan(false);
-                if tamper != 0 {
-                    sabotage::mark_tampered_and_terminate();
+                if tamper != 0 || sabotage::is_runtime_tamper_latched() {
+                    sabotage::wipe_vault(true);
+                    return Err(ExchangeFailure::Tampered(format!(
+                        "Phát hiện bất thường môi trường thực thi [mã 0x{tamper:x}]."
+                    )));
                 }
                 step = 22;
             }
@@ -184,8 +190,12 @@ fn execute_v3_exchange_flattened(op: &str, license_key: &str) -> Result<String, 
                 step = 44;
             }
             44 => {
-                if perform_flattened_tamper_scan(false) != 0 {
-                    sabotage::mark_tampered_and_terminate();
+                let post_tamper = perform_flattened_tamper_scan(false);
+                if post_tamper != 0 || sabotage::is_runtime_tamper_latched() {
+                    sabotage::wipe_vault(true);
+                    return Err(ExchangeFailure::Tampered(format!(
+                        "Phát hiện bất thường môi trường thực thi [mã 0x{post_tamper:x}]."
+                    )));
                 }
                 let pkt = pkt_opt
                     .as_ref()

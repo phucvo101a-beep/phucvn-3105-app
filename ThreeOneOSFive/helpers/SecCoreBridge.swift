@@ -140,8 +140,14 @@ final class SecCoreBridge {
 
     func preflight() -> V3GateOutcome {
         resolveDylib()
-        guard !detectSwiftTamper(), let fn = fnPreflight, let ptr = fn() else {
-            return .tampered(message: "Mô-đun bảo mật bị thiếu hoặc đã bị can thiệp.")
+        guard let fn = fnPreflight else {
+            return .tampered(message: "Không thể nạp mô-đun bảo mật [CORE-LOAD].")
+        }
+        if hasBlockedSwiftEnv() {
+            return .tampered(message: "Phát hiện biến môi trường tiêm nhiễm [ENV-INJ].")
+        }
+        guard let ptr = fn() else {
+            return .tampered(message: "Mô-đun bảo mật không trả dữ liệu preflight [PREFLIGHT-NULL].")
         }
         defer { fnFreeString?(ptr) }
         let jsonStr = String(cString: ptr)
@@ -214,11 +220,7 @@ final class SecCoreBridge {
         return SecureBytes(copying: validPtr, count: outLen)
     }
 
-    /// Independent Swift-level anti-tamper sanity checks paired with Rust libsec_core.
-    private func detectSwiftTamper() -> Bool {
-        if let fn = fnTamperDetected, fn() {
-            return true
-        }
+    private func hasBlockedSwiftEnv() -> Bool {
         let blockedEnv = ["DYLD_INSERT_LIBRARIES", "FRIDA_HOST", "_MSSafeMode"]
         for key in blockedEnv {
             if let val = getenv(key), !String(cString: val).isEmpty {
@@ -226,6 +228,14 @@ final class SecCoreBridge {
             }
         }
         return false
+    }
+
+    /// Independent Swift-level anti-tamper sanity checks paired with Rust libsec_core.
+    private func detectSwiftTamper() -> Bool {
+        if let fn = fnTamperDetected, fn() {
+            return true
+        }
+        return hasBlockedSwiftEnv()
     }
 
     private func parseGateJSON(_ jsonStr: String, isPreflight: Bool) -> V3GateOutcome {

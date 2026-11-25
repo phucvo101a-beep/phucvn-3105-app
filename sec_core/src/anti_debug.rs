@@ -12,7 +12,6 @@ const P_TRACED: i32 = 0x0000_0800;
 const PT_DENY_ATTACH: i32 = 31;
 const CS_OPS_STATUS: u32 = 0;
 const CS_DEBUGGED: u32 = 0x1000_0000;
-const CS_VALID: u32 = 0x0000_0001;
 
 #[repr(C)]
 struct KInfoProc {
@@ -73,15 +72,8 @@ pub fn check_csops_flags() -> bool {
             core::mem::size_of::<u32>(),
         )
     };
-    if res == 0 {
-        if (flags & CS_DEBUGGED) != 0 {
-            return true;
-        }
-        // In non-simulator Apple ARM64 devices, invalid CS_VALID indicates patched pages in memory
-        #[cfg(all(target_os = "ios", target_arch = "aarch64"))]
-        if (flags & CS_VALID) == 0 {
-            return true;
-        }
+    if res == 0 && (flags & CS_DEBUGGED) != 0 {
+        return true;
     }
     false
 }

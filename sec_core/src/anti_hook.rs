@@ -16,6 +16,11 @@ pub fn scan_injected_dylibs() -> bool {
             }
             if let Ok(raw) = CStr::from_ptr(ptr).to_str() {
                 let lower = raw.to_ascii_lowercase();
+                // Skip Apple system frameworks/libraries inside the dyld shared cache
+                if lower.starts_with(obfstr!("/system/")) || lower.starts_with(obfstr!("/usr/lib/")) {
+                    continue;
+                }
+                let filename = lower.rsplit('/').next().unwrap_or(lower.as_str());
                 if lower.contains(obfstr!("frida"))
                     || lower.contains(obfstr!("substrate"))
                     || lower.contains(obfstr!("substitute"))
@@ -25,13 +30,14 @@ pub fn scan_injected_dylibs() -> bool {
                     || lower.contains(obfstr!("sslkillswitch"))
                     || lower.contains(obfstr!("cycript"))
                     || lower.contains(obfstr!("objection"))
-                    || lower.contains(obfstr!("reveal"))
-                    || lower.contains(obfstr!("shadow"))
-                    || lower.contains(obfstr!("choicy"))
-                    || lower.contains(obfstr!("liberty"))
-                    || lower.contains(obfstr!("flyjb"))
-                    || lower.contains(obfstr!("flex"))
                     || lower.contains(obfstr!("mobileloader"))
+                    || filename.contains(obfstr!("reveal"))
+                    || filename.contains(obfstr!("shadow"))
+                    || filename.contains(obfstr!("choicy"))
+                    || filename.contains(obfstr!("liberty"))
+                    || filename.contains(obfstr!("flyjb"))
+                    || filename.starts_with(obfstr!("flex"))
+                    || filename.contains(obfstr!("libflex"))
                 {
                     return true;
                 }
@@ -72,22 +78,12 @@ pub unsafe fn is_trampoline_hooked(fn_ptr: *const u8) -> bool {
     {
         let insn0 = core::ptr::read_unaligned(fn_ptr as *const u32);
         let insn1 = core::ptr::read_unaligned(fn_ptr.add(4) as *const u32);
-        // LDR X16, #... (0x58000010) / LDR X17, #... (0x58000011) followed by BR X16/X17
+        // LDR X16, #... (0x58000010) / LDR X17, #... (0x58000011) followed by BR X16/X17.
+        // Note: unconditional `B imm26` and `ADRP+ADD+BR` are legitimate dyld shared-cache stubs/tail calls on iOS ARM64/ARM64e.
         let is_ldr_scratch = (insn0 & 0xFF00_001E) == 0x5800_0010;
         let is_br_scratch = insn1 == 0xD61F_0200 || insn1 == 0xD61F_0220;
         if is_ldr_scratch && is_br_scratch {
             return true;
-        }
-        // Unconditional immediate branch B imm26 at function prologue (`0x14000000..0x17FFFFFF`) often used by Substrate/ElleKit
-        if (insn0 & 0xFC00_0000) == 0x1400_0000 {
-            return true;
-        }
-        // ADRP Xn, #... + ADD Xn + BR Xn inline trampoline
-        if (insn0 & 0x9F00_001F) == 0x9000_0010 && (insn1 & 0xFF80_03FF) == 0x9100_0210 {
-            let insn2 = core::ptr::read_unaligned(fn_ptr.add(8) as *const u32);
-            if insn2 == 0xD61F_0200 || insn2 == 0xD61F_0220 {
-                return true;
-            }
         }
     }
     false

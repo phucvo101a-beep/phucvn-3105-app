@@ -83,9 +83,9 @@ private struct SecurityGateRootView: View {
                     onRetry: { keyAuth.bootstrapCheck(force: true) }
                 )
                 .transition(.opacity)
-            case .tampered:
+            case .tampered(let message):
                 SecurityLockoutView(
-                    mode: .tampered,
+                    mode: .tampered(message: message),
                     onRetry: { keyAuth.bootstrapCheck(force: true) }
                 )
                 .transition(.opacity)

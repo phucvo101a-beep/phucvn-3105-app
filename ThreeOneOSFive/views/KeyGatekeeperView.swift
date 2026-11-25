@@ -6,7 +6,7 @@ enum SecurityGatePhase: Equatable {
     case serverClosed(message: String)
     case deviceBanned(reason: String, hwid: String)
     case forceUpdate(minVersion: String, latestVersion: String, downloadURL: String, message: String)
-    case tampered
+    case tampered(message: String)
     case requiresKey
     case unlocked(RuntimeSessionTicket)
 }
@@ -153,8 +153,8 @@ final class KeyAuthManager: ObservableObject {
                         self.lockOut(to: .deviceBanned(reason: reason, hwid: hwid))
                     case .forceUpdate(let minV, let latV, let url, let msg):
                         self.lockOut(to: .forceUpdate(minVersion: minV, latestVersion: latV, downloadURL: url, message: msg))
-                    case .tampered:
-                        self.lockOut(to: .tampered)
+                    case .tampered(let msg):
+                        self.lockOut(to: .tampered(message: msg))
                     case .preflightOpen:
                         if !savedKey.isEmpty {
                             self.currentKey = savedKey
@@ -265,8 +265,8 @@ final class KeyAuthManager: ObservableObject {
                     case .forceUpdate(let minV, let latV, let url, let msg):
                         self.lockOut(to: .forceUpdate(minVersion: minV, latestVersion: latV, downloadURL: url, message: msg))
 
-                    case .tampered:
-                        self.lockOut(to: .tampered)
+                    case .tampered(let msg):
+                        self.lockOut(to: .tampered(message: msg))
 
                     case .denied(_, let msg):
                         SecCoreBridge.shared.wipeSession()
@@ -315,8 +315,8 @@ final class KeyAuthManager: ObservableObject {
                     self.lockOut(to: .deviceBanned(reason: reason, hwid: hwid))
                 case .forceUpdate(let minV, let latV, let url, let msg):
                     self.lockOut(to: .forceUpdate(minVersion: minV, latestVersion: latV, downloadURL: url, message: msg))
-                case .tampered:
-                    self.lockOut(to: .tampered)
+                case .tampered(let msg):
+                    self.lockOut(to: .tampered(message: msg))
                 case .cryptoError(let msg):
                     SecCoreBridge.shared.wipeSession()
                     self.stopTimers()
@@ -482,7 +482,7 @@ struct SecurityLockoutView: View {
         case serverClosed(message: String)
         case deviceBanned(reason: String, hwid: String)
         case forceUpdate(minVersion: String, latestVersion: String, downloadURL: String, message: String)
-        case tampered
+        case tampered(message: String)
     }
 
     let mode: LockoutMode
@@ -604,7 +604,8 @@ struct SecurityLockoutView: View {
         case .serverClosed(let message): return message
         case .deviceBanned(let reason, _): return reason
         case .forceUpdate(_, _, _, let message): return message
-        case .tampered: return "Ứng dụng phát hiện môi trường bất thường hoặc mã nhị phân bị chỉnh sửa."
+        case .tampered(let message):
+            return message.isEmpty ? "Ứng dụng phát hiện môi trường bất thường hoặc mã nhị phân bị chỉnh sửa." : message
         }
     }
 }

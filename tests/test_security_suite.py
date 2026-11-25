@@ -1024,6 +1024,8 @@ class SecuritySuiteTests(unittest.TestCase):
         self.assertIn(".connectionError(let message)", app_swift)
         self.assertIn("@StateObject private var keyAuth = KeyAuthManager.shared", app_swift)
 
+        self.assertIn("case .tampered(let message):", app_swift)
+
         gate_swift = (REPO_ROOT / "ThreeOneOSFive" / "views" / "KeyGatekeeperView.swift").read_text(encoding="utf-8")
         self.assertIn("bootstrapGeneration", gate_swift)
         self.assertIn("activationGeneration", gate_swift)
@@ -1061,6 +1063,10 @@ class SecuritySuiteTests(unittest.TestCase):
         self.assertIn("libc::getenv(", anti_hook_rs)
         self.assertNotIn("fn dlsym(", anti_hook_rs)
         self.assertIn("pub unsafe fn is_trampoline_hooked", anti_hook_rs)
+        self.assertNotIn("0x1400_0000", anti_hook_rs)
+        anti_debug_rs = (REPO_ROOT / "sec_core" / "src" / "anti_debug.rs").read_text(encoding="utf-8")
+        self.assertNotIn("CS_VALID", anti_debug_rs)
+        self.assertIn("#[used]", lib_rs)
 
         # Verify ALL exported C-ABI symbols (both safe and unsafe) were obfuscated in stage copy
         staged_lib = (self.stage / "sec_core" / "src" / "lib.rs").read_text(encoding="utf-8")
