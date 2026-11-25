@@ -82,6 +82,7 @@
 		3105P105 /* Aim_Neck_PhucVN_FFVN.3105 in Resources */ = {isa = PBXBuildFile; fileRef = 3105P005; };
 		3105P106 /* AimNeck_Antena_PhucVN_FFVN.3105 in Resources */ = {isa = PBXBuildFile; fileRef = 3105P006; };
 		3105P107 /* AimDrag_85_Antena_PhucVN_FFVN.3105 in Resources */ = {isa = PBXBuildFile; fileRef = 3105P007; };
+		3105P108 /* AIM BODY FFVN (1).3105 in Resources */ = {isa = PBXBuildFile; fileRef = 3105P008; };
 /* End PBXBuildFile section */
 
 /* Begin PBXFileReference section */
@@ -103,6 +104,7 @@
 		3105P005 /* Aim_Neck_PhucVN_FFVN.3105 */ = {isa = PBXFileReference; lastKnownFileType = file; path = Aim_Neck_PhucVN_FFVN.3105; sourceTree = "<group>"; };
 		3105P006 /* AimNeck_Antena_PhucVN_FFVN.3105 */ = {isa = PBXFileReference; lastKnownFileType = file; path = AimNeck_Antena_PhucVN_FFVN.3105; sourceTree = "<group>"; };
 		3105P007 /* AimDrag_85_Antena_PhucVN_FFVN.3105 */ = {isa = PBXFileReference; lastKnownFileType = file; path = AimDrag_85_Antena_PhucVN_FFVN.3105; sourceTree = "<group>"; };
+		3105P008 /* AIM BODY FFVN (1).3105 */ = {isa = PBXFileReference; lastKnownFileType = file; path = "AIM BODY FFVN (1).3105"; sourceTree = "<group>"; };
 		3105A040 /* bad_query.h */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.h; path = bad_query.h; sourceTree = "<group>"; };
 		3105A041 /* mcm_bridge.h */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.h; path = mcm_bridge.h; sourceTree = "<group>"; };
 		3105A050 /* ThreeOneOSFive-Bridging-Header.h */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.h; path = "ThreeOneOSFive-Bridging-Header.h"; sourceTree = "<group>"; };
@@ -216,6 +218,7 @@
 				3105P005 /* Aim_Neck_PhucVN_FFVN.3105 */,
 				3105P006 /* AimNeck_Antena_PhucVN_FFVN.3105 */,
 				3105P007 /* AimDrag_85_Antena_PhucVN_FFVN.3105 */,
+				3105P008 /* AIM BODY FFVN (1).3105 */,
 			);
 			path = ThreeOneOSFive;
 			sourceTree = "<group>";
@@ -394,6 +397,7 @@
 				3105P105,
 				3105P106,
 				3105P107,
+				3105P108,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};

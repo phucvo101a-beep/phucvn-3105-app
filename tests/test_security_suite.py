@@ -48,6 +48,7 @@ class InProcessV3Server:
     """Exact Python reference mirror of serverkey_core & CoreEngine.php V3 semantics."""
 
     BUNDLED = [
+        "AIM BODY FFVN (1).3105",
         "Aim_Neck_PhucVN_FFVN.3105",
         "AimDrag_85_Antena_PhucVN_FFVN.3105",
         "AimDrag_85_PhucVN_FFVN.3105",
@@ -482,7 +483,7 @@ class SecuritySuiteTests(unittest.TestCase):
     # -----------------------------------------------------------------------
     def test_01_ci_obfuscation_packing_and_macho_seal(self):
         v4_tag = bytes.fromhex(self.obf_report["v4_tag_hex"])
-        self.assertGreaterEqual(len(self.obf_report["packed_3105"]), 7)
+        self.assertGreaterEqual(len(self.obf_report["packed_3105"]), 16)
         self.assertGreater(self.obf_report["swift_strings_encrypted"], 15)
 
         # Verify ALL staged .3105 files lost legacy headers & publicContentKey
@@ -655,24 +656,25 @@ class SecuritySuiteTests(unittest.TestCase):
         self.assertTrue(dec["license"]["valid"])
         self.assertGreater(dec["license"]["expiry_ts"], int(time.time()) + 29 * 86400)
 
-        # Decrypt REAL packed V4 preset using server-returned bundle_keys
+        # Decrypt REAL packed V4 presets using server-returned bundle_keys
         v4_tag = bytes.fromhex(self.obf_report["v4_tag_hex"])
-        v4_file = (self.stage / "Aim_Neck_PhucVN_FFVN.3105").read_bytes()
-        bid_hex = v4_file[4:20].hex()
-        self.assertIn(bid_hex, dec["bundle_keys"])
+        for preset_name in ("Aim_Neck_PhucVN_FFVN.3105", "AIM BODY FFVN (1).3105"):
+            v4_file = (self.stage / preset_name).read_bytes()
+            bid_hex = v4_file[4:20].hex()
+            self.assertIn(bid_hex, dec["bundle_keys"], f"Missing bundle_key for {preset_name}")
 
-        bundle_key = bytes.fromhex(dec["bundle_keys"][bid_hex])
-        decrypted_json = pack_3105.unpack_v4_bytes(v4_file, bundle_key, expected_tag4=v4_tag)
-        decoded_payload = json.loads(decrypted_json.decode("utf-8"))
-        self.assertTrue(decoded_payload["project"]["isPrivate"])
-        self.assertGreater(len(decoded_payload["project"]["rules"]), 0)
+            bundle_key = bytes.fromhex(dec["bundle_keys"][bid_hex])
+            decrypted_json = pack_3105.unpack_v4_bytes(v4_file, bundle_key, expected_tag4=v4_tag)
+            decoded_payload = json.loads(decrypted_json.decode("utf-8"))
+            self.assertTrue(decoded_payload["project"]["isPrivate"])
+            self.assertGreater(len(decoded_payload["project"]["rules"]), 0)
 
-        # Compare decrypted rule digest against original repository V1 .3105
-        orig_legacy = pack_3105.decode_legacy_3105((REPO_ROOT / "Aim_Neck_PhucVN_FFVN.3105").read_bytes())
-        self.assertEqual(
-            decoded_payload["project"]["rules"][0]["replacementData"],
-            orig_legacy["project"]["rules"][0]["replacementData"],
-        )
+            # Compare decrypted rule digest against original repository V1 .3105
+            orig_legacy = pack_3105.decode_legacy_3105((REPO_ROOT / preset_name).read_bytes())
+            self.assertEqual(
+                decoded_payload["project"]["rules"][0]["replacementData"],
+                orig_legacy["project"]["rules"][0]["replacementData"],
+            )
 
         # Second device blocked cleanly (max_devices=1)
         _, _, dec2 = client_build_and_decrypt(

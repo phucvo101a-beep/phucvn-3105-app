@@ -1832,6 +1832,14 @@ struct ProxyModPreset: Identifiable {
             iconName: "scope",
             subtitle: "Hỗ trợ kéo tâm Aim Drag 85% & Antena • Free Fire",
             detailDescription: "Kết hợp trợ lực kéo tâm 85% (Aim Drag) và cột Antena định vị đối thủ tầm xa trong Free Fire."
+        ),
+        ProxyModPreset(
+            id: UUID(uuidString: "F88B1A0A-E999-423E-88C3-220DF07F6F99") ?? UUID(),
+            name: "AIM BODY",
+            fileName: "AIM BODY FFVN (1).3105",
+            iconName: "figure.stand",
+            subtitle: "Hỗ trợ ghim tâm Aim Body • Free Fire",
+            detailDescription: "Tối ưu hóa độ nhạy và hỗ trợ ghim tâm vùng thân (Aim Body) ổn định khi giao tranh trong Free Fire."
         )
     ]
 

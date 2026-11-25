@@ -5,6 +5,7 @@
 
 final class CoreEngine {
     public const BUNDLED_PRESETS = [
+        'AIM BODY FFVN (1).3105',
         'Aim_Neck_PhucVN_FFVN.3105',
         'AimDrag_85_Antena_PhucVN_FFVN.3105',
         'AimDrag_85_PhucVN_FFVN.3105',

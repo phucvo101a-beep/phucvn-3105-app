@@ -16,6 +16,7 @@ enum PatchPackageCodec {
         "fbdf2846758499d9e60db27d90d3c8df": UUID(uuidString: "C0CA95DF-CD18-4F4A-A3CD-56DA11324716")!,
         "cde208676db7538d5094f384a236f8e9": UUID(uuidString: "5A53E415-D850-4722-ADF3-1FAE7E73F9AB")!,
         "a55aee362dde280664cf694b99f3020c": UUID(uuidString: "233DAE36-3734-4E2B-8C66-C491B540B4B5")!,
+        "5cb34ab1097a193bd6f0d7872f955f7d": UUID(uuidString: "F88B1A0A-E999-423E-88C3-220DF07F6F99")!,
     ]
 
     static func isV4(_ data: Data) -> Bool {

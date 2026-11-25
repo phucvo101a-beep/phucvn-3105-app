@@ -47,6 +47,7 @@ pub fn hmac_sha256(key: &[u8], parts: &[&[u8]]) -> [u8; 32] {
 
 /// Official 3105 bundled preset filenames mapped deterministically to V4 bundle IDs.
 pub const BUNDLED_PRESET_FILENAMES: &[&str] = &[
+    "AIM BODY FFVN (1).3105",
     "Aim_Neck_PhucVN_FFVN.3105",
     "AimDrag_85_Antena_PhucVN_FFVN.3105",
     "AimDrag_85_PhucVN_FFVN.3105",
