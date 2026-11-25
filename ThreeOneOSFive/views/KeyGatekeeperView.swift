@@ -133,9 +133,10 @@ final class KeyAuthManager: ObservableObject {
                     case .denied(_, let msg):
                         SecCoreBridge.shared.wipeSession()
                         self.errorMessage = msg
-                        self.gatePhase = .requiresKey
+                        self.gatePhase = .connectionError(message: msg)
                     case .unlocked:
-                        self.gatePhase = .requiresKey
+                        SecCoreBridge.shared.wipeSession()
+                        self.gatePhase = .connectionError(message: "Phản hồi kiểm tra máy chủ không hợp lệ.")
                     }
                 }
             }

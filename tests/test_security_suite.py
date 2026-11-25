@@ -1029,6 +1029,9 @@ class SecuritySuiteTests(unittest.TestCase):
         self.assertIn("asyncAfter(deadline:", gate_swift)
         self.assertIn("handleCheckingTimeoutFallback", gate_swift)
         self.assertIn("case connectionError(message: String)", gate_swift)
+        bootstrap_block = gate_swift.split("func bootstrapCheck(", 1)[1].split("func activateKey(", 1)[0]
+        self.assertIn("case .preflightOpen:", bootstrap_block)
+        self.assertNotIn("self.errorMessage = msg\n                        self.gatePhase = .requiresKey", bootstrap_block)
 
         sec_bridge = (REPO_ROOT / "ThreeOneOSFive" / "helpers" / "SecCoreBridge.swift").read_text(encoding="utf-8")
         self.assertIn("case cryptoError(message: String)", sec_bridge)
