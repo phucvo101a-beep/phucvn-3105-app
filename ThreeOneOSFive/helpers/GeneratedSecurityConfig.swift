@@ -60,7 +60,7 @@ enum GeneratedSecurityConfig {
         defer {
             bytes.withUnsafeMutableBytes { buf in
                 if let base = buf.baseAddress {
-                    _ = memset_s(base, buf.count, 0, buf.count)
+                    p3105_secure_zero(base, buf.count)
                 }
             }
         }

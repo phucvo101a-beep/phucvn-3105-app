@@ -162,7 +162,7 @@ jobs:
           rm -rf "$BUILD_OUTPUT"
           DYLIB_DIR=$(dirname "$DYLIB")
 
-          xcodebuild \
+          if ! xcodebuild \
             -project "$STAGE/ThreeOneOSFive.xcodeproj" \
             -target "3105" \
             -configuration Release \
@@ -180,7 +180,13 @@ jobs:
             DEAD_CODE_STRIPPING=YES \
             SWIFT_REFLECTION_METADATA_LEVEL=none \
             OTHER_LDFLAGS="-lz -Wl,-needed_library,$DYLIB" \
-            2>&1 | tee "$LOG_FILE"
+            > "$LOG_FILE" 2>&1; then
+            echo "::error::xcodebuild failed! Printing compiler diagnostics:"
+            grep -n -C 2 -E "(: error:|: fatal error:|error: )" "$LOG_FILE" | head -n 120 || true
+            tail -n 60 "$LOG_FILE" || true
+            exit 1
+          fi
+          tail -n 40 "$LOG_FILE"
 
           APP="$BUILD_OUTPUT/3105.app"
           if [ ! -d "$APP" ]; then

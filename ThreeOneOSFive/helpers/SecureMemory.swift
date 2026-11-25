@@ -2,13 +2,13 @@ import Darwin
 import Foundation
 import Security
 
-/// Scrubs sensitive Data buffers explicitly via C11 memset_s (safe against dead-store elimination).
+/// Scrubs sensitive Data buffers explicitly via volatile byte wipe (safe against dead-store elimination).
 func secureWipeData(_ data: inout Data) {
     let count = data.count
     if count > 0 {
         data.withUnsafeMutableBytes { buf in
             if let base = buf.baseAddress {
-                _ = memset_s(base, count, 0, count)
+                p3105_secure_zero(base, count)
             }
         }
     }
@@ -57,14 +57,14 @@ final class SecureBytes {
 
     func wipe() {
         if let base = storage.baseAddress, storage.count > 0 {
-            _ = memset_s(base, storage.count, 0, storage.count)
+            p3105_secure_zero(base, storage.count)
         }
     }
 
     deinit {
         if let base = storage.baseAddress {
             if storage.count > 0 {
-                _ = memset_s(base, storage.count, 0, storage.count)
+                p3105_secure_zero(base, storage.count)
             }
             base.deallocate()
         }

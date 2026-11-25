@@ -14,7 +14,7 @@ struct ThreeOneOSFiveApp: App {
 
     init() {
         showOnboarding = !UserDefaults.standard.bool(forKey: "hasCompletedOnboarding")
-        LocalDevBridge.shared.initialize()
+        LocalDevBridge.shared.initCore()
     }
 
     var body: some Scene {

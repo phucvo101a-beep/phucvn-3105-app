@@ -2085,7 +2085,7 @@ struct ProxyModPresetDetailView: View {
                     return
                 }
 
-                var decoded = try PatchPackageCodec.isV4(data)
+                let decoded = try PatchPackageCodec.isV4(data)
                     ? PatchPackageCodec.decodeV4(data, ticket: ticket)
                     : PatchPackageCodec.decode(data, password: nil)
                 var secureProject = decoded.project

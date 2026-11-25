@@ -17,4 +17,15 @@ NSDictionary *appInfoForBundleID(NSString *bundleID);
 /// selector is unavailable or the requested bundle cannot be opened.
 BOOL openApplicationForBundleID(NSString *bundleID);
 
+/// Constant-barrier memory wipe immune to dead-store elimination & rsize_t SDK differences.
+static inline void p3105_secure_zero(void * _Nullable ptr, size_t len) {
+    if (!ptr || len == 0) {
+        return;
+    }
+    volatile unsigned char *p = (volatile unsigned char *)ptr;
+    while (len--) {
+        *p++ = 0;
+    }
+}
+
 NS_ASSUME_NONNULL_END
