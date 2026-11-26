@@ -721,6 +721,11 @@ function normalizeKey(&$k) {
     if (!isset($k['status']) || $k['status'] === '') {
         $k['status'] = 'active';
     }
+    if (!isset($k['created_by'])) {
+        $k['created_by'] = '';
+    } else {
+        $k['created_by'] = trim((string)$k['created_by']);
+    }
     if (!isset($k['devices']) || !is_array($k['devices'])) {
         $k['devices'] = [];
         if (!empty($k['used_by']) && is_string($k['used_by'])) {

@@ -313,6 +313,7 @@ if ($isLoggedIn && $_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['action
                 'is_used' => false,
                 'used_by' => null,
                 'used_at' => null,
+                'created_by' => $actor,
                 'created_at' => date('Y-m-d H:i:s')
             ];
             $createdKeys[] = $keyCode;
@@ -327,7 +328,8 @@ if ($isLoggedIn && $_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['action
             'duration' => $durName,
             'devices' => $devName,
             'qty' => $qty,
-            'role' => strtoupper($role)
+            'role' => strtoupper($role),
+            'created_by' => $actor,
         ];
     }
 
@@ -688,11 +690,20 @@ $activeUsers = count(array_filter($allUsers, function($u) { return !empty($u['is
 $totalKeys = count($allKeys);
 $unusedKeys = count(array_filter($allKeys, function($k) { return empty($k['is_used']); }));
 $totalConnectedDevices = 0;
+$keyCreatorMap = [];
+$hasLegacyUnknownCreator = false;
 foreach ($allKeys as $k) {
     if (!empty($k['devices']) && is_array($k['devices'])) {
         $totalConnectedDevices += count($k['devices']);
     }
+    $cName = trim((string)($k['created_by'] ?? ''));
+    if ($cName !== '') {
+        $keyCreatorMap[strtolower($cName)] = $cName;
+    } else {
+        $hasLegacyUnknownCreator = true;
+    }
 }
+ksort($keyCreatorMap);
 ?>
 <!DOCTYPE html>
 <html lang="vi">
@@ -979,7 +990,8 @@ foreach ($allKeys as $k) {
                             <div style="font-size: 12.5px; color: var(--text-muted); margin-top: 5px;">
                                 Thời hạn: <strong style="color: #38bdf8;"><?= htmlspecialchars($newlyCreatedMeta['duration'] ?? '') ?></strong> • 
                                 Giới hạn: <strong style="color: #34d399;"><?= htmlspecialchars($newlyCreatedMeta['devices'] ?? '') ?></strong> • 
-                                Gói: <span class="badge badge-vip"><?= htmlspecialchars($newlyCreatedMeta['role'] ?? 'VIP') ?></span>
+                                Gói: <span class="badge badge-vip"><?= htmlspecialchars($newlyCreatedMeta['role'] ?? 'VIP') ?></span> •
+                                Người tạo: <span class="badge badge-member"><?= htmlspecialchars($newlyCreatedMeta['created_by'] ?? '') ?></span>
                             </div>
                         </div>
 
@@ -1063,13 +1075,24 @@ foreach ($allKeys as $k) {
                 <div style="background: rgba(255,255,255,0.02); border: 1px solid rgba(255,255,255,0.06); border-radius: var(--radius-md); padding: 12px 14px; margin-bottom: 18px; display: flex; gap: 10px; align-items: center; flex-wrap: wrap; justify-content: space-between;">
                     <div style="display: flex; gap: 10px; align-items: center; flex: 1; min-width: 260px; max-width: 520px; position: relative;">
                         <i class="fa-solid fa-magnifying-glass" style="position: absolute; left: 12px; color: var(--text-muted); font-size: 13px; pointer-events: none;"></i>
-                        <input type="text" id="searchKeyInput" class="form-input" placeholder="Tìm theo mã key, HWID thiết bị, gói..." style="padding-left: 36px; padding-right: 32px; height: 38px; font-size: 13px;" value="<?= htmlspecialchars($keySearch) ?>" oninput="filterKeys()" autocomplete="off">
+                        <input type="text" id="searchKeyInput" class="form-input" placeholder="Tìm theo mã key, HWID, người tạo, gói..." style="padding-left: 36px; padding-right: 32px; height: 38px; font-size: 13px;" value="<?= htmlspecialchars($keySearch) ?>" oninput="filterKeys()" autocomplete="off">
                         <button type="button" id="clearSearchKeyBtn" style="position: absolute; right: 10px; background: none; border: none; color: var(--text-muted); cursor: pointer; display: none; padding: 4px;" title="Xóa tìm kiếm" onclick="clearKeySearch()">
                             <i class="fa-solid fa-xmark"></i>
                         </button>
                     </div>
 
                     <div style="display: flex; gap: 8px; align-items: center; flex-wrap: wrap;">
+                        <!-- Lọc tài khoản tạo -->
+                        <select id="filterKeyCreator" class="form-select" style="width: auto; height: 38px; font-size: 12.5px; padding: 0 12px;" onchange="filterKeys()">
+                            <option value="all">👤 Tất cả người tạo</option>
+                            <?php foreach ($keyCreatorMap as $cLower => $cLabel): ?>
+                                <option value="<?= htmlspecialchars($cLower) ?>"><?= htmlspecialchars($cLabel) ?></option>
+                            <?php endforeach; ?>
+                            <?php if ($hasLegacyUnknownCreator): ?>
+                                <option value="__unknown__">Hệ thống / Cũ</option>
+                            <?php endif; ?>
+                        </select>
+
                         <!-- Lọc trạng thái -->
                         <select id="filterKeyStatus" class="form-select" style="width: auto; height: 38px; font-size: 12.5px; padding: 0 12px;" onchange="filterKeys()">
                             <option value="all">⚡ Tất cả trạng thái</option>
@@ -1104,16 +1127,19 @@ foreach ($allKeys as $k) {
                                 <th>GÓI</th>
                                 <th>TRẠNG THÁI & GIỚI HẠN</th>
                                 <th>THIẾT BỊ ĐÃ KÍCH HOẠT (HWID)</th>
+                                <th>NGƯỜI TẠO</th>
                                 <th>NGÀY TẠO</th>
                                 <th>THAO TÁC</th>
                             </tr>
                         </thead>
                         <tbody id="keysTableBody">
                             <?php if (empty($allKeys)): ?>
-                                <tr><td colspan="7" style="text-align: center; color: var(--text-muted); padding: 30px;">Chưa có mã key nào. Hãy chọn loại key ở trên để tạo.</td></tr>
+                                <tr><td colspan="8" style="text-align: center; color: var(--text-muted); padding: 30px;">Chưa có mã key nào. Hãy chọn loại key ở trên để tạo.</td></tr>
                             <?php else: foreach (array_reverse($allKeys) as $k): 
                                 $devCount = isset($k['devices']) && is_array($k['devices']) ? count($k['devices']) : 0;
                                 $maxDev = isset($k['max_devices']) ? intval($k['max_devices']) : 1;
+                                $creatorVal = trim((string)($k['created_by'] ?? ''));
+                                $creatorAttr = $creatorVal !== '' ? strtolower($creatorVal) : '__unknown__';
                                 $hwidsJoined = '';
                                 if (!empty($k['devices']) && is_array($k['devices'])) {
                                     $hwidsJoined = implode(' ', array_column($k['devices'], 'hwid'));
@@ -1132,6 +1158,7 @@ foreach ($allKeys as $k) {
                                     data-duration="<?= strtolower(htmlspecialchars($k['duration'] ?? ($k['days'] ?? ''))) ?>"
                                     data-role="<?= strtolower(htmlspecialchars($k['role'] ?? 'vip')) ?>"
                                     data-status="<?= $statusSlug ?>"
+                                    data-creator="<?= htmlspecialchars($creatorAttr) ?>"
                                     data-hwids="<?= strtolower(htmlspecialchars($hwidsJoined)) ?>"
                                 >
                                     <td style="white-space: nowrap;">
@@ -1240,6 +1267,15 @@ foreach ($allKeys as $k) {
                                             </div>
                                         <?php endif; ?>
                                     </td>
+                                    <td>
+                                        <?php if ($creatorVal !== ''): ?>
+                                            <span class="badge badge-member" title="Tạo bởi tài khoản: <?= htmlspecialchars($creatorVal) ?>">
+                                                <i class="fa-solid fa-user-shield"></i> <?= htmlspecialchars($creatorVal) ?>
+                                            </span>
+                                        <?php else: ?>
+                                            <span style="color: var(--text-muted); font-size: 11.5px;">Hệ thống / Cũ</span>
+                                        <?php endif; ?>
+                                    </td>
                                     <td style="font-size: 11.5px; color: var(--text-muted);"><?= htmlspecialchars($k['created_at'] ?? 'N/A') ?></td>
                                     <td style="white-space: nowrap;">
                                         <?php $isKeyRevoked = in_array(strtolower((string)($k['status'] ?? 'active')), ['revoked', 'banned', 'disabled'], true); ?>
@@ -1267,7 +1303,7 @@ foreach ($allKeys as $k) {
                                 </tr>
                             <?php endforeach; endif; ?>
                             <tr id="noKeyMatchRow" style="display: none;">
-                                <td colspan="7" style="text-align: center; color: var(--text-muted); padding: 32px;">
+                                <td colspan="8" style="text-align: center; color: var(--text-muted); padding: 32px;">
                                     <i class="fa-solid fa-magnifying-glass" style="font-size: 20px; margin-bottom: 8px; display: block; color: #64748b;"></i>
                                     Không tìm thấy mã key nào phù hợp với điều kiện tìm kiếm.
                                 </td>
@@ -1905,6 +1941,7 @@ foreach ($allKeys as $k) {
     <script>
         function filterKeys() {
             var query = (document.getElementById('searchKeyInput')?.value || '').trim().toLowerCase();
+            var creatorFilter = document.getElementById('filterKeyCreator')?.value || 'all';
             var statusFilter = document.getElementById('filterKeyStatus')?.value || 'all';
             var durationFilter = document.getElementById('filterKeyDuration')?.value || 'all';
             var clearBtn = document.getElementById('clearSearchKeyBtn');
@@ -1919,11 +1956,13 @@ foreach ($allKeys as $k) {
             rows.forEach(function(row) {
                 var key = row.getAttribute('data-key') || '';
                 var hwids = row.getAttribute('data-hwids') || '';
+                var creator = row.getAttribute('data-creator') || '';
                 var duration = row.getAttribute('data-duration') || '';
                 var status = row.getAttribute('data-status') || '';
                 var textContent = row.textContent.toLowerCase();
 
-                var matchesQuery = !query || key.includes(query) || hwids.includes(query) || textContent.includes(query);
+                var matchesQuery = !query || key.includes(query) || hwids.includes(query) || creator.includes(query) || textContent.includes(query);
+                var matchesCreator = (creatorFilter === 'all') || (creator === creatorFilter);
                 var matchesStatus = (statusFilter === 'all') || (status === statusFilter);
 
                 var matchesDuration = true;
@@ -1941,7 +1980,7 @@ foreach ($allKeys as $k) {
                     }
                 }
 
-                if (matchesQuery && matchesStatus && matchesDuration) {
+                if (matchesQuery && matchesCreator && matchesStatus && matchesDuration) {
                     row.style.display = '';
                     visibleCount++;
                 } else {
@@ -2001,9 +2040,11 @@ foreach ($allKeys as $k) {
 
         function resetKeyFilters() {
             var searchInput = document.getElementById('searchKeyInput');
+            var creatorSelect = document.getElementById('filterKeyCreator');
             var statusSelect = document.getElementById('filterKeyStatus');
             var durationSelect = document.getElementById('filterKeyDuration');
             if (searchInput) searchInput.value = '';
+            if (creatorSelect) creatorSelect.value = 'all';
             if (statusSelect) statusSelect.value = 'all';
             if (durationSelect) durationSelect.value = 'all';
             filterKeys();
