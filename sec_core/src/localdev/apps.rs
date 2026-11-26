@@ -7,7 +7,6 @@ use super::plist_util::PlistValue;
 use super::tunnel::{read_plist, send_plist, LockdownClient};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
-use std::time::Duration;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct LocalDevAppInfo {
@@ -30,11 +29,20 @@ impl AppScanner {
         port: u16,
         pairing: &PairingFile,
     ) -> Result<Vec<LocalDevAppInfo>, String> {
-        let candidate_ips = [ip, "10.7.1.1", "10.7.0.1", "127.0.0.1"];
+        let mut candidate_ips = vec![ip];
+        for fallback in ["10.7.1.1", "10.7.0.1", "127.0.0.1"] {
+            if !candidate_ips.contains(&fallback) {
+                candidate_ips.push(fallback);
+            }
+        }
+
         let mut lockdown_client = None;
         let mut last_err = String::new();
 
-        for &target_ip in &candidate_ips {
+        for target_ip in candidate_ips {
+            if !LockdownClient::test_tunnel_reachability(target_ip, port) {
+                continue;
+            }
             match LockdownClient::connect(target_ip, port, pairing) {
                 Ok(client) => {
                     lockdown_client = Some(client);
@@ -53,9 +61,7 @@ impl AppScanner {
         })?;
 
         let (mut sock, _service_port, _ssl) = lockdown.start_service("com.apple.mobile.installation_proxy")?;
-
-        sock.set_read_timeout(Some(Duration::from_secs(12))).ok();
-        sock.set_write_timeout(Some(Duration::from_secs(10))).ok();
+        sock.set_timeouts(12, 10);
 
         // Send Browse request
         let mut req = HashMap::new();
@@ -85,6 +91,9 @@ impl AppScanner {
         // Stream responses until Status == "Complete"
         loop {
             let resp = read_plist(&mut sock)?;
+            if let Some(err) = resp.get_string("Error") {
+                return Err(format!("installation_proxy error: {}", err));
+            }
             let status = resp.get_string("Status").unwrap_or_default();
 
             if let Some(PlistValue::Array(list)) = resp.get("CurrentList") {

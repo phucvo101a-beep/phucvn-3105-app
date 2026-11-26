@@ -79,8 +79,9 @@ impl HouseArrestClient {
         bundle_id: &str,
         path: &str,
     ) -> Result<Vec<String>, String> {
-        let (mut afc, _mode) = Self::connect_app_container(ip, port, pairing, bundle_id)?;
-        afc.list_dir(path)
+        let (mut afc, mode) = Self::connect_app_container(ip, port, pairing, bundle_id)?;
+        let effective_path = normalize_house_arrest_path(&mode, path);
+        afc.list_dir(&effective_path)
     }
 
     /// Lists directory entries with metadata (directory flag & size) and granted mode
@@ -92,12 +93,8 @@ impl HouseArrestClient {
         path: &str,
     ) -> Result<(Vec<String>, Vec<HouseArrestDirItem>, String), String> {
         let (mut afc, mode) = Self::connect_app_container(ip, port, pairing, bundle_id)?;
-        let effective_path = if mode == "VendDocuments" && (path.is_empty() || path == "/") {
-            "/Documents"
-        } else {
-            path
-        };
-        let entries = afc.list_dir(effective_path)?;
+        let effective_path = normalize_house_arrest_path(&mode, path);
+        let entries = afc.list_dir(&effective_path)?;
         let mut items = Vec::with_capacity(entries.len());
         let prefix = effective_path.trim_end_matches('/');
 
@@ -133,8 +130,9 @@ impl HouseArrestClient {
         bundle_id: &str,
         path: &str,
     ) -> Result<Vec<u8>, String> {
-        let (mut afc, _mode) = Self::connect_app_container(ip, port, pairing, bundle_id)?;
-        afc.read_file_full(path)
+        let (mut afc, mode) = Self::connect_app_container(ip, port, pairing, bundle_id)?;
+        let effective_path = normalize_house_arrest_path(&mode, path);
+        afc.read_file_full(&effective_path)
     }
 
     /// Writes file bytes into target application sandbox with automatic `.bak` backup
@@ -146,15 +144,31 @@ impl HouseArrestClient {
         path: &str,
         data: &[u8],
     ) -> Result<(), String> {
-        let (mut afc, _mode) = Self::connect_app_container(ip, port, pairing, bundle_id)?;
+        let (mut afc, mode) = Self::connect_app_container(ip, port, pairing, bundle_id)?;
+        let effective_path = normalize_house_arrest_path(&mode, path);
 
         // Safety backup: if file already exists, create `<path>.bak` before overwriting
-        if let Ok(existing_bytes) = afc.read_file_full(path) {
-            let backup_path = format!("{}.bak", path);
+        if let Ok(existing_bytes) = afc.read_file_full(&effective_path) {
+            let backup_path = format!("{}.bak", effective_path);
             let _ = afc.write_file_full(&backup_path, &existing_bytes);
         }
 
         // Write new file bytes in 128KB chunks
-        afc.write_file_full(path, data)
+        afc.write_file_full(&effective_path, data)
+    }
+}
+
+fn normalize_house_arrest_path(mode: &str, path: &str) -> String {
+    let clean = path.trim();
+    if mode != "VendDocuments" {
+        return if clean.is_empty() { "/".to_string() } else { clean.to_string() };
+    }
+    let trimmed = clean.trim_start_matches('/');
+    if trimmed.is_empty() || trimmed == "Documents" {
+        "/Documents".to_string()
+    } else if trimmed.starts_with("Documents/") {
+        format!("/{}", trimmed)
+    } else {
+        format!("/Documents/{}", trimmed)
     }
 }

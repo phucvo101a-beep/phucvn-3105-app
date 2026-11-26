@@ -218,27 +218,52 @@ public final class LocalDevBridge: ObservableObject {
     }
 
     private var isCoreInitialized = false
+    private let coreInitLock = NSLock()
+    private let workerQueue = DispatchQueue(label: "com.phucvn.3105.localdev.worker", qos: .userInitiated)
+    private var lastLoggedStatusKey: String = ""
 
     private init() {
         initCore()
     }
 
-    public func initCore() {
+    private func ensureCoreInitialized() {
+        coreInitLock.lock()
+        defer { coreInitLock.unlock() }
         guard !isCoreInitialized else { return }
-        isCoreInitialized = true
-
+        LocalDevLib.shared.resolveSymbols()
         let path = storageDirectory.path
         let host = "10.7.0.1"
+        _ = LocalDevLib.shared.fnInit?(path, host, 62078)
+        isCoreInitialized = true
+    }
+
+    private func logStatusIfChanged(_ status: LocalDevStatus) {
+        let key = "\(status.code)|\(status.status)|\(status.message)"
+        guard key != lastLoggedStatusKey else { return }
+        lastLoggedStatusKey = key
+        log("localdev: code=\(status.code) [\(status.status)] — \(status.message)")
+    }
+
+    public func initCore() {
         DispatchQueue.global(qos: .utility).async { [weak self] in
-            LocalDevLib.shared.resolveSymbols()
-            _ = LocalDevLib.shared.fnInit?(path, host, 62078)
-            self?.autoDiscoverPairingFiles()
-            self?.refreshStatus()
+            self?.workerQueue.async {
+                guard let self else { return }
+                self.ensureCoreInitialized()
+                if !self.autoDiscoverPairingFiles() {
+                    self.refreshStatus()
+                }
+            }
         }
     }
 
-    public func autoDiscoverPairingFiles() {
-        guard currentStatus.code == LocalDevCode.missingPairing.rawValue else { return }
+    @discardableResult
+    public func autoDiscoverPairingFiles() -> Bool {
+        let savedMobilePairing = storageDirectory.appendingPathComponent("pairing.mobiledevicepairing")
+        let savedPlist = storageDirectory.appendingPathComponent("pairing.plist")
+        if FileManager.default.fileExists(atPath: savedMobilePairing.path)
+            || FileManager.default.fileExists(atPath: savedPlist.path) {
+            return false
+        }
 
         let docs = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask).first!
         let candidateDirs = [docs, docs.appendingPathComponent("Inbox")]
@@ -249,11 +274,12 @@ public final class LocalDevBridge: ObservableObject {
                 let ext = file.pathExtension.lowercased()
                 if ext == "mobiledevicepairing" || ext == "plist" {
                     if importPairingData(from: file) {
-                        return
+                        return true
                     }
                 }
             }
         }
+        return false
     }
 
     public func openLocalDevVPNApp() {
@@ -261,6 +287,7 @@ public final class LocalDevBridge: ObservableObject {
             "localdev://",
             "localdevvpn://",
             "stos://",
+            "stosvpn://",
             "wireguard://",
             "App-prefs:VPN",
             "App-prefs:root=General&path=VPN",
@@ -282,17 +309,24 @@ public final class LocalDevBridge: ObservableObject {
     }
 
     public func refreshStatus() {
-        LocalDevLib.shared.resolveSymbols()
-        guard let fnStatus = LocalDevLib.shared.fnStatus,
-              let cStr = fnStatus() else { return }
-        defer { LocalDevLib.shared.fnFreeString?(cStr) }
-        let jsonStr = String(cString: cStr)
+        workerQueue.async { [weak self] in
+            guard let self else { return }
+            self.ensureCoreInitialized()
+            guard let fnStatus = LocalDevLib.shared.fnStatus,
+                  let cStr = fnStatus() else { return }
+            defer { LocalDevLib.shared.fnFreeString?(cStr) }
+            let jsonStr = String(cString: cStr)
 
-        if let data = jsonStr.data(using: .utf8),
-           let status = try? JSONDecoder().decode(LocalDevStatus.self, from: data) {
-            DispatchQueue.main.async {
-                self.currentStatus = status
-                AppLog.shared.writeDiagnosticsSnapshot()
+            if let data = jsonStr.data(using: .utf8),
+               let status = try? JSONDecoder().decode(LocalDevStatus.self, from: data) {
+                self.logStatusIfChanged(status)
+                DispatchQueue.main.async {
+                    self.currentStatus = status
+                    if status.isLive {
+                        self.lastError = nil
+                    }
+                    AppLog.shared.writeDiagnosticsSnapshot()
+                }
             }
         }
     }
@@ -370,39 +404,43 @@ public final class LocalDevBridge: ObservableObject {
             return false
         }
 
-        // 2. Also forward to Rust core if loaded
-        LocalDevLib.shared.resolveSymbols()
-        if let fnImport = LocalDevLib.shared.fnImportPairing {
-            let bytes = [UInt8](data)
-            if let cStr = fnImport(bytes, bytes.count) {
-                defer { LocalDevLib.shared.fnFreeString?(cStr) }
-                let jsonStr = String(cString: cStr)
-                if let respData = jsonStr.data(using: .utf8),
-                   let status = try? JSONDecoder().decode(LocalDevStatus.self, from: respData) {
-                    DispatchQueue.main.async {
-                        self.currentStatus = status
-                        self.lastError = nil
-                        AppLog.shared.writeDiagnosticsSnapshot()
+        // 2. Also forward to Rust core on workerQueue so TLS handshake never blocks UI
+        let fallbackUDID = parsedUDID ?? filename
+        workerQueue.async { [weak self] in
+            guard let self else { return }
+            self.ensureCoreInitialized()
+            if let fnImport = LocalDevLib.shared.fnImportPairing {
+                let bytes = [UInt8](data)
+                if let cStr = fnImport(bytes, bytes.count) {
+                    defer { LocalDevLib.shared.fnFreeString?(cStr) }
+                    let jsonStr = String(cString: cStr)
+                    if let respData = jsonStr.data(using: .utf8),
+                       let status = try? JSONDecoder().decode(LocalDevStatus.self, from: respData) {
+                        self.logStatusIfChanged(status)
+                        DispatchQueue.main.async {
+                            self.currentStatus = status
+                            self.lastError = status.isLive ? nil : status.message
+                            AppLog.shared.writeDiagnosticsSnapshot()
+                        }
+                        return
                     }
-                    return true
                 }
             }
-        }
 
-        // 3. Update status to LIVE with verified UDID
-        let displayUDID = parsedUDID ?? filename
-        DispatchQueue.main.async {
-            self.currentStatus = LocalDevStatus(
-                code: LocalDevCode.live.rawValue,
-                status: "ĐÃ KẾT NỐI LOCALDEV (LIVE)",
-                message: "Ghép nối thiết bị thành công! Sẵn sàng quét dữ liệu.",
-                host: "10.7.0.1",
-                port: 62078,
-                udid: displayUDID,
-                is_heartbeat_alive: true
-            )
-            self.lastError = nil
-            AppLog.shared.writeDiagnosticsSnapshot()
+            // 3. Simulator / preview fallback when libsec_core.dylib is not attached
+            DispatchQueue.main.async {
+                self.currentStatus = LocalDevStatus(
+                    code: LocalDevCode.live.rawValue,
+                    status: "ĐÃ KẾT NỐI LOCALDEV (LIVE)",
+                    message: "Ghép nối thiết bị thành công! Sẵn sàng quét dữ liệu.",
+                    host: "10.7.0.1",
+                    port: 62078,
+                    udid: fallbackUDID,
+                    is_heartbeat_alive: true
+                )
+                self.lastError = nil
+                AppLog.shared.writeDiagnosticsSnapshot()
+            }
         }
         return true
     }
@@ -411,8 +449,8 @@ public final class LocalDevBridge: ObservableObject {
         isScanning = true
         lastError = nil
 
-        DispatchQueue.global(qos: .userInitiated).async {
-            LocalDevLib.shared.resolveSymbols()
+        workerQueue.async {
+            self.ensureCoreInitialized()
             guard let fnScan = LocalDevLib.shared.fnScanApps,
                   let cStr = fnScan() else {
                 DispatchQueue.main.async {
@@ -432,7 +470,8 @@ public final class LocalDevBridge: ObservableObject {
                 if let apps = resp.apps {
                     resultApps = apps
                 }
-                if !resp.success, let err = resp.error, !self.currentStatus.isLive {
+                if !resp.success, let err = resp.error {
+                    log("localdev: scanApplications failed — \(err)")
                     DispatchQueue.main.async {
                         self.lastError = err
                     }
@@ -457,7 +496,7 @@ public final class LocalDevBridge: ObservableObject {
         bundleID: String?,
         path: String
     ) -> LocalDevDirListing {
-        LocalDevLib.shared.resolveSymbols()
+        ensureCoreInitialized()
         guard let fnList = LocalDevLib.shared.fnListDir,
               let cStr = fnList(service.rawValue, bundleID, path) else {
             return LocalDevDirListing(success: false, mode: nil, error: "LocalDev chưa sẵn sàng", items: [])
@@ -478,7 +517,7 @@ public final class LocalDevBridge: ObservableObject {
     }
 
     public func readFile(service: LocalDevServiceType, bundleID: String?, path: String) -> Data? {
-        LocalDevLib.shared.resolveSymbols()
+        ensureCoreInitialized()
         guard let fnRead = LocalDevLib.shared.fnReadFile else { return nil }
         var outLen = 0
         guard let bufPtr = fnRead(service.rawValue, bundleID, path, &outLen), outLen > 0 else {
@@ -489,7 +528,7 @@ public final class LocalDevBridge: ObservableObject {
     }
 
     public func writeFile(service: LocalDevServiceType, bundleID: String?, path: String, data: Data) -> Bool {
-        LocalDevLib.shared.resolveSymbols()
+        ensureCoreInitialized()
         guard let fnWrite = LocalDevLib.shared.fnWriteFile else { return false }
         let bytes = [UInt8](data)
         guard let cStr = fnWrite(service.rawValue, bundleID, path, bytes, bytes.count) else {

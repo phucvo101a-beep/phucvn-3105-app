@@ -2,11 +2,9 @@
 //! Pure-Rust, chunked I/O (64KB - 256KB), supports iOS 15.0 - iOS 27.2.1
 
 use super::pairing::PairingFile;
-use super::tunnel::LockdownClient;
+use super::tunnel::{LockdownClient, LockdownStream};
 use std::collections::HashMap;
 use std::io::{Read, Write};
-use std::net::TcpStream;
-use std::time::Duration;
 
 pub const AFC_MAGIC: u64 = 0x4141504c36414643; // "CFA6LPAA" in little-endian
 
@@ -33,14 +31,13 @@ pub const AFC_FOPEN_RDAPPEND: u64 = 0x00000006;
 pub const AFC_CHUNK_SIZE: usize = 128 * 1024; // 128 KB buffer
 
 pub struct AfcClient {
-    stream: TcpStream,
+    stream: LockdownStream,
     packet_seq: u64,
 }
 
 impl AfcClient {
-    pub fn new(stream: TcpStream) -> Self {
-        stream.set_read_timeout(Some(Duration::from_secs(15))).ok();
-        stream.set_write_timeout(Some(Duration::from_secs(15))).ok();
+    pub fn new(stream: LockdownStream) -> Self {
+        stream.set_timeouts(15, 15);
         Self {
             stream,
             packet_seq: 0,

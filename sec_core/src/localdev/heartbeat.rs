@@ -67,10 +67,9 @@ fn run_heartbeat_session(
     // 1. Connect to lockdown
     let mut lockdown = LockdownClient::connect(ip, port, pairing)?;
 
-    // 2. Start heartbeat service
+    // 2. Start heartbeat service (LockdownClient wraps TLS automatically if EnableServiceSSL is true)
     let (mut sock, _service_port, _ssl) = lockdown.start_service("com.apple.mobile.heartbeat")?;
-    sock.set_read_timeout(Some(Duration::from_secs(20))).ok();
-    sock.set_write_timeout(Some(Duration::from_secs(10))).ok();
+    sock.set_timeouts(20, 10);
 
     // 3. Heartbeat Loop: Reply Marco -> Polo
     while running.load(Ordering::SeqCst) {

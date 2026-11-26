@@ -110,6 +110,14 @@
         <string>_apple-mobdev2._tcp</string>
         <string>_remotepairing._tcp</string>
     </array>
+    <key>LSApplicationQueriesSchemes</key>
+    <array>
+        <string>localdev</string>
+        <string>localdevvpn</string>
+        <string>stos</string>
+        <string>stosvpn</string>
+        <string>wireguard</string>
+    </array>
     <key>LSSupportsOpeningDocumentsInPlace</key>
     <true/>
     <key>UIFileSharingEnabled</key>

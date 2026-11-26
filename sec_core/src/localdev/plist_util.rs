@@ -189,21 +189,42 @@ fn parse_xml_element(xml: &str, cursor: &mut usize) -> Result<PlistValue, String
         return Err("Unexpected end of XML".to_string());
     }
 
-    if xml[*cursor..].starts_with("<dict>") || xml[*cursor..].starts_with("<dict ") {
+    if xml[*cursor..].starts_with("<dict/>") || xml[*cursor..].starts_with("<dict />") {
+        if let Some(end) = xml[*cursor..].find('>') {
+            *cursor += end + 1;
+        }
+        Ok(PlistValue::Dictionary(HashMap::new()))
+    } else if xml[*cursor..].starts_with("<dict>") || xml[*cursor..].starts_with("<dict ") {
         parse_xml_dict(xml, cursor)
+    } else if xml[*cursor..].starts_with("<array/>") || xml[*cursor..].starts_with("<array />") {
+        if let Some(end) = xml[*cursor..].find('>') {
+            *cursor += end + 1;
+        }
+        Ok(PlistValue::Array(Vec::new()))
     } else if xml[*cursor..].starts_with("<array>") || xml[*cursor..].starts_with("<array ") {
         parse_xml_array(xml, cursor)
     } else if xml[*cursor..].starts_with("<string>") {
         parse_xml_leaf(xml, cursor, "<string>", "</string>").map(PlistValue::String)
-    } else if xml[*cursor..].starts_with("<string/>") {
-        *cursor += "<string/>".len();
+    } else if xml[*cursor..].starts_with("<string/>") || xml[*cursor..].starts_with("<string />") {
+        if let Some(end) = xml[*cursor..].find('>') {
+            *cursor += end + 1;
+        }
+        Ok(PlistValue::String(String::new()))
+    } else if xml[*cursor..].starts_with("<date>") {
+        parse_xml_leaf(xml, cursor, "<date>", "</date>").map(PlistValue::String)
+    } else if xml[*cursor..].starts_with("<date/>") || xml[*cursor..].starts_with("<date />") {
+        if let Some(end) = xml[*cursor..].find('>') {
+            *cursor += end + 1;
+        }
         Ok(PlistValue::String(String::new()))
     } else if xml[*cursor..].starts_with("<data>") {
         let content = parse_xml_leaf(xml, cursor, "<data>", "</data>")?;
         let bytes = base64_decode(&content)?;
         Ok(PlistValue::Data(bytes))
-    } else if xml[*cursor..].starts_with("<data/>") {
-        *cursor += "<data/>".len();
+    } else if xml[*cursor..].starts_with("<data/>") || xml[*cursor..].starts_with("<data />") {
+        if let Some(end) = xml[*cursor..].find('>') {
+            *cursor += end + 1;
+        }
         Ok(PlistValue::Data(Vec::new()))
     } else if xml[*cursor..].starts_with("<integer>") {
         let content = parse_xml_leaf(xml, cursor, "<integer>", "</integer>")?;
@@ -213,11 +234,15 @@ fn parse_xml_element(xml: &str, cursor: &mut usize) -> Result<PlistValue, String
         let content = parse_xml_leaf(xml, cursor, "<real>", "</real>")?;
         let num: f64 = content.trim().parse().unwrap_or(0.0);
         Ok(PlistValue::Real(num))
-    } else if xml[*cursor..].starts_with("<true/>") {
-        *cursor += "<true/>".len();
+    } else if xml[*cursor..].starts_with("<true/>") || xml[*cursor..].starts_with("<true />") {
+        if let Some(end) = xml[*cursor..].find('>') {
+            *cursor += end + 1;
+        }
         Ok(PlistValue::Boolean(true))
-    } else if xml[*cursor..].starts_with("<false/>") {
-        *cursor += "<false/>".len();
+    } else if xml[*cursor..].starts_with("<false/>") || xml[*cursor..].starts_with("<false />") {
+        if let Some(end) = xml[*cursor..].find('>') {
+            *cursor += end + 1;
+        }
         Ok(PlistValue::Boolean(false))
     } else {
         Err(format!("Unknown XML tag near: {}", &xml[*cursor..(*cursor + 30).min(xml.len())]))

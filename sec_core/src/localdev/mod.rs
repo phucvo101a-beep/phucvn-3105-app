@@ -135,23 +135,32 @@ impl LocalDevManager {
             }
         };
 
-        // 2. Check candidate IPs for loopback tunnel reachability
-        let candidate_ips = [self.host.as_str(), "10.7.1.1", "10.7.0.1", "127.0.0.1"];
+        // 2. Check deduplicated candidate IPs for loopback tunnel reachability
+        let mut candidate_ips = vec![self.host.as_str()];
+        for fallback in ["10.7.1.1", "10.7.0.1", "127.0.0.1"] {
+            if !candidate_ips.contains(&fallback) {
+                candidate_ips.push(fallback);
+            }
+        }
+
         let mut active_ip = None;
-        for &ip in &candidate_ips {
+        for ip in candidate_ips {
             if LockdownClient::test_tunnel_reachability(ip, self.port) {
                 active_ip = Some(ip.to_string());
                 break;
             }
         }
 
-        if let Some(ref ip) = active_ip {
-            self.host = ip.clone();
-        } else if !LockdownClient::test_tunnel_reachability(&self.host, self.port) {
+        if let Some(ip) = active_ip {
+            self.host = ip;
+        } else {
             return Ok(LocalDevStatusReport {
                 code: LocalDevStatusCode::VpnDisconnected as i32,
                 status: "CHƯA BẬT LOCALDEV VPN".to_string(),
-                message: format!("Không thể kết nối {}:{}. Hãy bật LocalDevVPN hoặc StosVPN.", self.host, self.port),
+                message: format!(
+                    "Không thể kết nối {}:{}. Hãy bật LocalDevVPN hoặc StosVPN.",
+                    self.host, self.port
+                ),
                 host: self.host.clone(),
                 port: self.port,
                 udid: Some(pairing.udid.clone()),
@@ -159,9 +168,14 @@ impl LocalDevManager {
             });
         }
 
-        // 3. Try lockdown TLS connection with pairing credentials
+        // 3. Try full Lockdown handshake (`StartSession` -> TLS -> `GetValue`)
         match LockdownClient::connect(&self.host, self.port, &pairing) {
-            Ok(_client) => {
+            Ok(client) => {
+                let verified_udid = client
+                    .device_udid
+                    .filter(|u| !u.is_empty())
+                    .unwrap_or_else(|| pairing.udid.clone());
+
                 // Ensure heartbeat worker is running in the background
                 if !self.heartbeat.is_active() {
                     self.heartbeat.start(pairing.clone(), self.host.clone(), self.port);
@@ -170,19 +184,36 @@ impl LocalDevManager {
                 Ok(LocalDevStatusReport {
                     code: LocalDevStatusCode::Live as i32,
                     status: "LOCALDEV LIVE".to_string(),
-                    message: format!("Kết nối LocalDev thành công (UDID: {})", pairing.udid),
+                    message: format!("Kết nối LocalDev thành công (UDID: {})", verified_udid),
                     host: self.host.clone(),
                     port: self.port,
-                    udid: Some(pairing.udid.clone()),
+                    udid: Some(verified_udid),
                     is_heartbeat_alive: true,
                 })
             }
             Err(e) => {
+                let lower = e.to_ascii_lowercase();
                 if e.contains("Permission denied") || e.contains("Operation not permitted") {
                     Ok(LocalDevStatusReport {
                         code: LocalDevStatusCode::LocalNetworkDenied as i32,
                         status: "CHƯA CẤP QUYỀN MẠNG CỤC BỘ".to_string(),
                         message: "Ứng dụng chưa được cấp quyền Mạng cục bộ trong Cài đặt iPhone.".to_string(),
+                        host: self.host.clone(),
+                        port: self.port,
+                        udid: Some(pairing.udid.clone()),
+                        is_heartbeat_alive: false,
+                    })
+                } else if lower.contains("failed to connect to localdevvpn")
+                    || lower.contains("connection refused")
+                    || lower.contains("timed out")
+                {
+                    Ok(LocalDevStatusReport {
+                        code: LocalDevStatusCode::VpnDisconnected as i32,
+                        status: "CHƯA BẬT LOCALDEV VPN".to_string(),
+                        message: format!(
+                            "Không thể kết nối {}:{}. Hãy bật LocalDevVPN hoặc StosVPN. ({})",
+                            self.host, self.port, e
+                        ),
                         host: self.host.clone(),
                         port: self.port,
                         udid: Some(pairing.udid.clone()),
