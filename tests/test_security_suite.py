@@ -73,7 +73,7 @@ class InProcessV3Server:
             "force_update": False,
             "min_required_version": "2.1.0",
             "latest_version": "2.1.0",
-            "download_url": "https://20-10.store/download/3105-latest.ipa",
+            "download_url": "https://tobivn.chickenkiller.com/download/3105-latest.ipa",
             "update_message": "Vui lòng cập nhật phiên bản mới!",
             "enforce_binary_hash": True,
             "preset_policies": {},
@@ -456,7 +456,7 @@ class SecuritySuiteTests(unittest.TestCase):
             bundle_master_hex=cls.bundle_master.hex(),
             spki_primary_hex=hashlib.sha256(b"pin1").hexdigest(),
             spki_backup_hex=hashlib.sha256(b"pin2").hexdigest(),
-            api_host="20-10.store",
+            api_host="tobivn.chickenkiller.com",
             api_path="/api/v3",
             strict=True,
         )
@@ -514,6 +514,7 @@ class SecuritySuiteTests(unittest.TestCase):
         self.assertIn("export_name =", rs_lib)
         self.assertNotIn("KeyAuthManager", (self.stage / "ThreeOneOSFive" / "App.swift").read_text("utf-8"))
         self.assertNotIn("https://phuciosvn.com", (self.stage / "ThreeOneOSFive" / "views" / "KeyGatekeeperView.swift").read_text("utf-8"))
+        self.assertNotIn("https://tobivn.chickenkiller.com", (self.stage / "ThreeOneOSFive" / "views" / "KeyGatekeeperView.swift").read_text("utf-8"))
         self.assertIn("{ _d([", swift_cfg)
         self.assertIn(
             "GeneratedSecurityConfig._d(",
@@ -587,13 +588,13 @@ class SecuritySuiteTests(unittest.TestCase):
             ed25519_pub_hex=self.ed_pub.hex(),
             pepper=f"  {self.pepper}\r\n ",
             bundle_master_hex=self.bundle_master.hex(),
-            api_host=" 20-10.store ",
+            api_host=" tobivn.chickenkiller.com ",
             api_path=" /api/v3 ",
             strict=True,
         )
         self.assertEqual(trim_report["pepper_len"], len(self.pepper))
         self.assertEqual(trim_report["pepper_fp"], self.obf_report["pepper_fp"])
-        self.assertEqual(trim_report["api_host"], "20-10.store")
+        self.assertEqual(trim_report["api_host"], "tobivn.chickenkiller.com")
         self.assertEqual(trim_report["api_path"], "/api/v3")
         gen_rs = (trim_stage / "sec_core" / "src" / "generated_secrets.rs").read_text("utf-8")
         self.assertIn(f"pub const PEPPER_LEN: usize = {len(self.pepper)};", gen_rs)
@@ -707,7 +708,7 @@ class SecuritySuiteTests(unittest.TestCase):
         srv.settings["force_update"] = True
         srv.settings["min_required_version"] = "2.1.0"
         srv.settings["latest_version"] = "2.1.0"
-        srv.settings["download_url"] = "https://20-10.store/new.ipa"
+        srv.settings["download_url"] = "https://tobivn.chickenkiller.com/new.ipa"
 
         # Old version 2.0 gets FORCE_UPDATE + link, NO keys even with valid license key
         _, _, dec = client_build_and_decrypt(
@@ -717,7 +718,7 @@ class SecuritySuiteTests(unittest.TestCase):
         )
         self.assertEqual(dec["code"], "FORCE_UPDATE")
         self.assertTrue(dec["force_update"])
-        self.assertEqual(dec["download_url"], "https://20-10.store/new.ipa")
+        self.assertEqual(dec["download_url"], "https://tobivn.chickenkiller.com/new.ipa")
         self.assertIsNone(dec["ephemeral_session_key"])
         self.assertEqual(dec["bundle_keys"], {})
 

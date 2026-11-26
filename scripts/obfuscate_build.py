@@ -74,6 +74,7 @@ SWIFT_STRING_TARGET_FILES = [
 ]
 
 SENSITIVE_SWIFT_PATTERNS = (
+    "tobivn.chickenkiller.com",
     "20-10.store",
     "phuciosvn.com",
     "api.php",
@@ -242,7 +243,7 @@ def run_obfuscation(
     bundle_master_hex: str,
     spki_primary_hex: str = "00" * 32,
     spki_backup_hex: str = "00" * 32,
-    api_host: str = "20-10.store",
+    api_host: str = "tobivn.chickenkiller.com",
     api_path: str = "/api/v3",
     strict: bool = True,
 ) -> Dict:
@@ -474,7 +475,7 @@ def main() -> None:
     parser.add_argument("--bundle-master", default=os.environ.get("SEC_BUNDLE_MASTER_KEY", ""))
     parser.add_argument("--spki-primary", default=os.environ.get("SEC_SPKI_PIN_PRIMARY", "") or ("00" * 32))
     parser.add_argument("--spki-backup", default=os.environ.get("SEC_SPKI_PIN_BACKUP", "") or ("00" * 32))
-    parser.add_argument("--api-host", default=os.environ.get("SEC_API_HOST", "") or "20-10.store")
+    parser.add_argument("--api-host", default=os.environ.get("SEC_API_HOST", "") or "tobivn.chickenkiller.com")
     parser.add_argument("--api-path", default=os.environ.get("SEC_API_PATH", "") or "/api/v3")
     parser.add_argument("--non-strict", action="store_true")
     parser.add_argument("--marker-out", type=Path, default=None)

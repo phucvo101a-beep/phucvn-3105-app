@@ -80,7 +80,7 @@ jobs:
           /usr/bin/ditto "$GITHUB_WORKSPACE" "$STAGE"
           rm -rf "$STAGE/.git" "$STAGE/serverkey" "$STAGE/serverkey_core" "$STAGE/dist"
 
-          API_HOST="${SEC_API_HOST:-20-10.store}"
+          API_HOST="${SEC_API_HOST:-tobivn.chickenkiller.com}"
           API_PATH="${SEC_API_PATH:-/api/v3}"
 
           # Resolve SPKI pin from live server if secret is unset
@@ -220,7 +220,7 @@ jobs:
           fi
 
           for bin in "$APP/$EXECUTABLE" "$APP/Frameworks/libsec_core.dylib"; do
-            for forbidden in "3105PATCH" "bplist00" "TOBIAIM-VIP-9999" "api.php" "KeyAuthManager" "SecCoreBridge" "20-10.store"; do
+            for forbidden in "3105PATCH" "bplist00" "TOBIAIM-VIP-9999" "api.php" "KeyAuthManager" "SecCoreBridge" "20-10.store" "tobivn.chickenkiller.com"; do
               if strings "$bin" | grep -Fqi "$forbidden"; then
                 echo "::error::Sensitive string '$forbidden' leaked inside $bin!"
                 exit 1

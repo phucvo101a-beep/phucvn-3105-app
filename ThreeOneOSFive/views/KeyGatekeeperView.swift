@@ -50,7 +50,7 @@ final class KeyAuthManager: ObservableObject {
     private var bootstrapGeneration: UInt64 = 0
     private var activationGeneration: UInt64 = 0
     private var isBootstrapping: Bool = false
-    private let supportURLString = "https://20-10.store"
+    private let supportURLString = "https://tobivn.chickenkiller.com"
 
     var activeVerifiedTicket: RuntimeSessionTicket? {
         if case .unlocked(let ticket) = gatePhase, SecCoreBridge.shared.isActiveTicketValid(ticket) {
