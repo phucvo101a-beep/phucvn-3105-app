@@ -191,6 +191,14 @@ struct SettingsView: View {
                                 )
                         }
                         .padding(.vertical, 8)
+
+                        SettingsRowDivider()
+
+                        SettingsValueRow(
+                            symbol: "lock.shield.fill",
+                            title: "Chế độ truy cập dữ liệu",
+                            value: ContainerStore.accessModeDescription
+                        )
                     }
 
                     SettingsGroup(title: "CÔNG CỤ VÀ BẢO TRÌ") {

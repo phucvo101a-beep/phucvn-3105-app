@@ -1259,6 +1259,52 @@ class SecuritySuiteTests(unittest.TestCase):
         self.assertNotIn("isMaintenance ? .secondary", proj_sw)
         self.assertNotIn(": .secondary)", proj_sw)
 
+    # -----------------------------------------------------------------------
+    # SCENARIO 10: Non-JB iOS 27.x Sandbox Safety & USB Diagnostics Integrity
+    # -----------------------------------------------------------------------
+    def test_10_non_jb_sandbox_safety_and_usb_diagnostics(self):
+        bad_query_c = (REPO_ROOT / "ThreeOneOSFive" / "exploit" / "bad_query.c").read_text("utf-8")
+        self.assertNotIn("../", bad_query_c)
+        self.assertNotIn("daemon returned no result (denied?)", bad_query_c)
+        self.assertNotIn("libsystem_containermanager.dylib", bad_query_c)
+        self.assertIn("bad_query_is_within_sandbox", bad_query_c)
+
+        for rel in (
+            "ThreeOneOSFive/helpers/ContainerStore.swift",
+            "ThreeOneOSFive/helpers/PatchProjectModels.swift",
+            "ThreeOneOSFive/views/AppDataBrowserView.swift",
+            "ThreeOneOSFive/views/FileBrowserView.swift",
+            "ThreeOneOSFive/views/CleanerView.swift",
+            "ThreeOneOSFive/kexploit/sandbox_escape.m",
+        ):
+            src = (REPO_ROOT / rel).read_text("utf-8")
+            self.assertNotIn("/var/mobile/Containers/Data/Application", src, f"Hardcoded app container path in {rel}")
+            self.assertNotIn("/var/mobile/Containers/Data/System", src, f"Hardcoded sys container path in {rel}")
+            self.assertNotIn('"/var/mobile"', src, f"Hardcoded /var/mobile path in {rel}")
+
+        container_swift = (REPO_ROOT / "ThreeOneOSFive" / "helpers" / "ContainerStore.swift").read_text("utf-8")
+        self.assertIn("NSHomeDirectory()", container_swift)
+        self.assertIn("FileManager.default.urls(for: .documentDirectory, in: .userDomainMask)", container_swift)
+        self.assertIn("isWithinOwnSandbox", container_swift)
+        self.assertIn("hasPrivilegedContainerAccess", container_swift)
+        self.assertNotIn("shouldUseBadQuery", container_swift)
+
+        utils_swift = (REPO_ROOT / "ThreeOneOSFive" / "helpers" / "Utils.swift").read_text("utf-8")
+        self.assertIn("import OSLog", utils_swift)
+        self.assertIn("3105-Diagnostics", utils_swift)
+        self.assertIn("sanitizeForDiagnostics", utils_swift)
+
+        support_swift = (REPO_ROOT / "ThreeOneOSFive" / "helpers" / "SupportPolicy.swift").read_text("utf-8")
+        self.assertIn("major >= 16 && major <= 27", support_swift)
+
+        info_plist = (REPO_ROOT / "ThreeOneOSFive" / "Info.plist").read_text("utf-8")
+        self.assertIn("<key>UIFileSharingEnabled</key>", info_plist)
+        self.assertIn("<key>LSSupportsOpeningDocumentsInPlace</key>", info_plist)
+
+        usb_script = REPO_ROOT / "scripts" / "usb_inspect.py"
+        self.assertTrue(usb_script.is_file())
+        compile(usb_script.read_text("utf-8"), str(usb_script), "exec")
+
 
 def main():
     parser = argparse.ArgumentParser(description="Run 3105 5-Scenario Security Test Suite")

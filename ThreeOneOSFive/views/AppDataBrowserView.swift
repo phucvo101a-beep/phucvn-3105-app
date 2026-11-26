@@ -159,7 +159,15 @@ struct AppDataBrowserView: View {
 
                 patchesShortcutCard
 
-                systemMobileShortcutCard
+                sandboxShortcutCard
+
+                if let diagnosticsURL = ContainerStore.ownDiagnosticsURL {
+                    diagnosticsShortcutCard(diagnosticsURL)
+                }
+
+                if !ContainerStore.hasPrivilegedContainerAccess() {
+                    sandboxScopeNoticeCard
+                }
 
                 appDataScannerSection
 
@@ -380,13 +388,13 @@ struct AppDataBrowserView: View {
         }
     }
 
-    private var systemMobileShortcutCard: some View {
-        let mobilePath = "/var/mobile"
+    private var sandboxShortcutCard: some View {
+        let sandboxPath = ContainerStore.ownSandboxRootURL.path
         let destination = FileBrowserDestination(
-            containerPath: mobilePath,
-            startPath: mobilePath,
-            title: "Tệp thiết bị (/var/mobile)",
-            bundleID: nil
+            containerPath: sandboxPath,
+            startPath: sandboxPath,
+            title: "Hộp cát ứng dụng (Sandbox)",
+            bundleID: ContainerStore.ownBundleID
         )
 
         return Button {
@@ -395,10 +403,10 @@ struct AppDataBrowserView: View {
             HStack(spacing: 13) {
                 AppRowIcon(systemName: "internaldrive.fill", tint: AppTheme.silverGlow, symbolSize: 19, frameSize: 45)
                 VStack(alignment: .leading, spacing: 4) {
-                    Text("Tệp thiết bị (/var/mobile)")
+                    Text("Hộp cát ứng dụng (Sandbox)")
                         .font(.system(size: 13, weight: .bold, design: .rounded))
                         .foregroundStyle(.white)
-                    Text("Duyệt tệp người dùng và thư mục trên iPhone")
+                    Text("Duyệt Documents, Library & tmp hợp lệ qua API iOS")
                         .font(.system(size: 10, weight: .medium))
                         .foregroundStyle(AppTheme.subduedText)
                 }
@@ -418,6 +426,73 @@ struct AppDataBrowserView: View {
         .contextMenu {
             openInNewTabButton(destination)
         }
+    }
+
+    private func diagnosticsShortcutCard(_ url: URL) -> some View {
+        let destination = FileBrowserDestination(
+            containerPath: url.path,
+            startPath: url.path,
+            title: "Nhật ký & USB Diagnostics",
+            bundleID: ContainerStore.ownBundleID
+        )
+
+        return Button {
+            AppLog.shared.writeDiagnosticsSnapshot()
+            pushDestination(destination)
+        } label: {
+            HStack(spacing: 13) {
+                AppRowIcon(systemName: "cable.connector", tint: AppTheme.info, symbolSize: 19, frameSize: 45)
+                VStack(alignment: .leading, spacing: 4) {
+                    Text("Nhật ký & USB Diagnostics")
+                        .font(.system(size: 13, weight: .bold, design: .rounded))
+                        .foregroundStyle(.white)
+                    Text("Thư mục Documents/3105-Diagnostics đọc trực tiếp qua USB")
+                        .font(.system(size: 10, weight: .medium))
+                        .foregroundStyle(AppTheme.subduedText)
+                }
+                Spacer()
+                Image(systemName: "arrow.up.right")
+                    .font(.system(size: 11, weight: .bold))
+                    .foregroundStyle(AppTheme.info)
+                    .frame(width: 31, height: 31)
+                    .background(AppTheme.info.opacity(0.10), in: Circle())
+            }
+            .padding(13)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .background(cardSurface(tint: AppTheme.info))
+            .contentShape(RoundedRectangle(cornerRadius: 21, style: .continuous))
+        }
+        .buttonStyle(AppPressableStyle())
+        .contextMenu {
+            openInNewTabButton(destination)
+        }
+    }
+
+    private var sandboxScopeNoticeCard: some View {
+        HStack(alignment: .top, spacing: 11) {
+            Image(systemName: "checkmark.shield.fill")
+                .font(.system(size: 15, weight: .bold))
+                .foregroundStyle(AppTheme.success)
+                .padding(.top, 2)
+
+            VStack(alignment: .leading, spacing: 4) {
+                Text("iOS \(AppInfo.osVersion) · Chế độ Sandbox chuẩn (Non-JB)")
+                    .font(.system(size: 12, weight: .bold, design: .rounded))
+                    .foregroundStyle(.white)
+                Text(
+                    localDevBridge.currentStatus.isLive
+                        ? "LocalDev đã kết nối: có thể duyệt app hỗ trợ File Sharing hoặc dev-signed."
+                        : "iOS non-JB chặn app đọc trực tiếp container app khác (đây là cơ chế bảo mật Sandbox, không phải lỗi phiên bản iOS). Hãy dùng Documents, 3105-Diagnostics qua USB hoặc bật LocalDev."
+                )
+                .font(.system(size: 10, weight: .medium))
+                .foregroundStyle(AppTheme.subduedText)
+                .fixedSize(horizontal: false, vertical: true)
+            }
+            Spacer(minLength: 0)
+        }
+        .padding(13)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(cardSurface(tint: AppTheme.success))
     }
 
     private var appDataScannerSection: some View {
@@ -723,117 +798,155 @@ struct AppDataBrowserView: View {
         errorMessage = nil
         let emptyMessage = language.text("browser.empty")
 
-        if LocalDevBridge.shared.currentStatus.isLive {
-            LocalDevBridge.shared.scanApplications()
-        }
-
-        DispatchQueue.global(qos: .userInitiated).async {
-            var localDevApps: [InstalledApp] = []
-            if !LocalDevBridge.shared.installedApps.isEmpty {
-                localDevApps = LocalDevBridge.shared.installedApps.map { lApp in
-                    InstalledApp(
+        let finishWithApps: ([LocalDevApp]) -> Void = { localApps in
+            DispatchQueue.global(qos: .userInitiated).async {
+                let localDevApps: [InstalledApp] = localApps.map { lApp in
+                    let preferredPath: String
+                    if ContainerStore.isWithinOwnSandbox(lApp.container_path ?? "") ||
+                        (ContainerStore.hasPrivilegedContainerAccess() && !(lApp.container_path ?? "").isEmpty) {
+                        preferredPath = lApp.container_path ?? LocalDevVirtualPath.rootPath(bundleID: lApp.bundle_id)
+                    } else {
+                        preferredPath = LocalDevVirtualPath.rootPath(bundleID: lApp.bundle_id)
+                    }
+                    return InstalledApp(
                         bundleID: lApp.bundle_id,
                         name: lApp.display_name,
-                        containerPath: lApp.container_path ?? "/var/mobile/Containers/Data/Application/\(lApp.bundle_id)",
+                        containerPath: preferredPath,
                         version: lApp.version,
                         icon: nil
                     )
                 }
-            }
 
-            let bundleMetadata = ContainerStore.applicationBundleMetadataCatalog()
-            let apiApps = ContainerStore.applyingBundleMetadata(
-                to: ContainerStore.installedAppsFromAPI(),
-                catalog: bundleMetadata
-            )
-            let dynamicIdentifiers = ContainerStore.dynamicAppIdentifiers()
-            let mcmApps = ContainerStore.installedAppsFromMCM(
-                identifiers: dynamicIdentifiers,
-                bundleMetadata: bundleMetadata
-            )
-            let filesystemApps = ContainerStore.containersFromFilesystem()
-            let baseIdentifiedApps = mcmApps + apiApps + localDevApps
-            var result = ContainerDiscoveryMerger.merge(
-                enumerated: filesystemApps,
-                identified: baseIdentifiedApps,
-                path: { $0.containerPath }
-            )
-            result.sort { $0.displayName.localizedCaseInsensitiveCompare($1.displayName) == .orderedAscending }
+                guard ContainerStore.hasPrivilegedContainerAccess() else {
+                    ContainerStore.logSandboxModeNoticeOnce(context: "browser")
+                    let sandboxApps = AppDataCatalogMerger.merge(
+                        identified: [ContainerStore.ownInstalledApp] + localDevApps,
+                        fallback: [],
+                        identifier: { $0.bundleID },
+                        path: { $0.containerPath }
+                    ).filter {
+                        ContainerPresentationPolicy.shouldShow(bundleID: $0.bundleID)
+                    }.sorted {
+                        $0.displayName.localizedCaseInsensitiveCompare($1.displayName) == .orderedAscending
+                    }
 
-            let preliminary = result.filter {
-                ContainerPresentationPolicy.shouldShow(bundleID: $0.bundleID)
-            }
-            DispatchQueue.main.async {
-                guard requestID == reloadGeneration else { return }
-                apps = preliminary
-                isLoading = false
-            }
+                    DispatchQueue.main.async {
+                        guard requestID == reloadGeneration else { return }
+                        apps = sandboxApps
+                        isLoading = false
+                        isResolving = false
+                        if sandboxApps.isEmpty {
+                            errorMessage = emptyMessage
+                        }
+                        AppLog.shared.writeDiagnosticsSnapshot()
+                    }
+                    return
+                }
 
-            let launchServicesIdentifiers = ContainerStore.launchServicesStoreIdentifiers()
-            let mhaIdentifiers = MHAIdentifierCatalog.identifiers(
-                dynamic: dynamicIdentifiers,
-                installed: apiApps.map(\.bundleID),
-                research: ContainerStore.researchAppIdentifiers,
-                custom: bundleMetadata.keys.sorted(),
-                launchServices: launchServicesIdentifiers
-            )
-
-            let mhaApps = ContainerStore.installedAppsFromMHACandidates(
-                identifiers: mhaIdentifiers,
-                bundleMetadata: bundleMetadata
-            ) { discoveredApps in
-                var progressiveResult = AppDataCatalogMerger.merge(
-                    identified: discoveredApps + baseIdentifiedApps,
-                    fallback: [],
-                    identifier: { $0.bundleID },
+                let bundleMetadata = ContainerStore.applicationBundleMetadataCatalog()
+                let apiApps = ContainerStore.applyingBundleMetadata(
+                    to: ContainerStore.installedAppsFromAPI(),
+                    catalog: bundleMetadata
+                )
+                let dynamicIdentifiers = ContainerStore.dynamicAppIdentifiers()
+                let mcmApps = ContainerStore.installedAppsFromMCM(
+                    identifiers: dynamicIdentifiers,
+                    bundleMetadata: bundleMetadata
+                )
+                let filesystemApps = ContainerStore.containersFromFilesystem()
+                let baseIdentifiedApps = mcmApps + apiApps + localDevApps
+                var result = ContainerDiscoveryMerger.merge(
+                    enumerated: filesystemApps,
+                    identified: baseIdentifiedApps,
                     path: { $0.containerPath }
                 )
-                progressiveResult = progressiveResult.filter {
+                result.sort { $0.displayName.localizedCaseInsensitiveCompare($1.displayName) == .orderedAscending }
+
+                let preliminary = result.filter {
                     ContainerPresentationPolicy.shouldShow(bundleID: $0.bundleID)
-                }
-                progressiveResult.sort {
-                    $0.displayName.localizedCaseInsensitiveCompare($1.displayName) == .orderedAscending
                 }
                 DispatchQueue.main.async {
                     guard requestID == reloadGeneration else { return }
-                    apps = progressiveResult
+                    apps = preliminary
+                    isLoading = false
+                }
+
+                let launchServicesIdentifiers = ContainerStore.launchServicesStoreIdentifiers()
+                let mhaIdentifiers = MHAIdentifierCatalog.identifiers(
+                    dynamic: dynamicIdentifiers,
+                    installed: apiApps.map(\.bundleID),
+                    research: ContainerStore.researchAppIdentifiers,
+                    custom: bundleMetadata.keys.sorted(),
+                    launchServices: launchServicesIdentifiers
+                )
+
+                let mhaApps = ContainerStore.installedAppsFromMHACandidates(
+                    identifiers: mhaIdentifiers,
+                    bundleMetadata: bundleMetadata
+                ) { discoveredApps in
+                    var progressiveResult = AppDataCatalogMerger.merge(
+                        identified: discoveredApps + baseIdentifiedApps,
+                        fallback: [],
+                        identifier: { $0.bundleID },
+                        path: { $0.containerPath }
+                    )
+                    progressiveResult = progressiveResult.filter {
+                        ContainerPresentationPolicy.shouldShow(bundleID: $0.bundleID)
+                    }
+                    progressiveResult.sort {
+                        $0.displayName.localizedCaseInsensitiveCompare($1.displayName) == .orderedAscending
+                    }
+                    DispatchQueue.main.async {
+                        guard requestID == reloadGeneration else { return }
+                        apps = progressiveResult
+                    }
+                }
+
+                let allKnownApps = mhaApps + baseIdentifiedApps
+                let identifiedPaths = Set(allKnownApps.map {
+                    ContainerDiscoveryMerger.canonicalPath($0.containerPath)
+                })
+                let unmatchedFilesystemApps = filesystemApps.filter {
+                    !identifiedPaths.contains(ContainerDiscoveryMerger.canonicalPath($0.containerPath))
+                }
+                let inferredFilesystemApps = ContainerStore.inferUnidentifiedApps(
+                    in: unmatchedFilesystemApps,
+                    knownApps: allKnownApps,
+                    launchServicesIdentifiers: Set(launchServicesIdentifiers)
+                ).filter {
+                    ContainerPresentationPolicy.shouldShow(bundleID: $0.bundleID)
+                }
+                result = AppDataCatalogMerger.merge(
+                    identified: allKnownApps,
+                    fallback: inferredFilesystemApps,
+                    identifier: { $0.bundleID },
+                    path: { $0.containerPath }
+                )
+                result = result.filter {
+                    ContainerPresentationPolicy.shouldShow(bundleID: $0.bundleID)
+                }
+                result.sort { $0.displayName.localizedCaseInsensitiveCompare($1.displayName) == .orderedAscending }
+
+                DispatchQueue.main.async {
+                    guard requestID == reloadGeneration else { return }
+                    apps = result
+                    isLoading = false
+                    isResolving = false
+                    if result.isEmpty {
+                        errorMessage = emptyMessage
+                    }
+                    AppLog.shared.writeDiagnosticsSnapshot()
                 }
             }
+        }
 
-            let allKnownApps = mhaApps + baseIdentifiedApps
-            let identifiedPaths = Set(allKnownApps.map {
-                ContainerDiscoveryMerger.canonicalPath($0.containerPath)
-            })
-            let unmatchedFilesystemApps = filesystemApps.filter {
-                !identifiedPaths.contains(ContainerDiscoveryMerger.canonicalPath($0.containerPath))
-            }
-            let inferredFilesystemApps = ContainerStore.inferUnidentifiedApps(
-                in: unmatchedFilesystemApps,
-                knownApps: allKnownApps,
-                launchServicesIdentifiers: Set(launchServicesIdentifiers)
-            ).filter {
-                ContainerPresentationPolicy.shouldShow(bundleID: $0.bundleID)
-            }
-            result = AppDataCatalogMerger.merge(
-                identified: allKnownApps,
-                fallback: inferredFilesystemApps,
-                identifier: { $0.bundleID },
-                path: { $0.containerPath }
-            )
-            result = result.filter {
-                ContainerPresentationPolicy.shouldShow(bundleID: $0.bundleID)
-            }
-            result.sort { $0.displayName.localizedCaseInsensitiveCompare($1.displayName) == .orderedAscending }
-
-            DispatchQueue.main.async {
+        if LocalDevBridge.shared.currentStatus.isLive {
+            LocalDevBridge.shared.scanApplications { scannedApps in
                 guard requestID == reloadGeneration else { return }
-                apps = result
-                isLoading = false
-                isResolving = false
-                if result.isEmpty {
-                    errorMessage = emptyMessage
-                }
+                finishWithApps(scannedApps)
             }
+        } else {
+            finishWithApps(LocalDevBridge.shared.installedApps)
         }
     }
 }

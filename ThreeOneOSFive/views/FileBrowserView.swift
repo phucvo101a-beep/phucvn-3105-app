@@ -1273,20 +1273,49 @@ struct FileBrowserView: View {
         let path = currentPath
         let targetBundleID = bundleID
         DispatchQueue.global(qos: .userInitiated).async {
-            if shouldGrant {
-                var handle: Int64 = -1
-                if ContainerAccessPolicy.shouldAttemptMCM(bundleID: targetBundleID),
-                   let targetBundleID {
-                    var activationError: NSString?
-                    handle = MCMActivateContainer(2, targetBundleID, false, &activationError)
-                    let detail = activationError.map { String($0) } ?? "none"
-                    log("filebrowser: MCM activate \(targetBundleID) -> \(handle), detail=\(detail)")
+            if let parsed = LocalDevVirtualPath.parse(path) {
+                let listing = LocalDevBridge.shared.listDirectoryDetailed(
+                    service: .houseArrest,
+                    bundleID: parsed.bundleID,
+                    path: parsed.remotePath
+                )
+                if !listing.success, let err = listing.error {
+                    log("filebrowser: localdev unavailable \(parsed.bundleID) (\(err))")
                 }
-                if handle < 0 {
-                    handle = ContainerStore.grantContainerAccess(path)
-                    log("filebrowser: traversal grant \(path) -> \(handle)")
+                let remoteEntries = listing.items
+                    .filter { !$0.name.hasPrefix(".") }
+                    .map { item in
+                        FileEntry(
+                            name: item.name,
+                            path: LocalDevVirtualPath.childPath(parent: path, name: item.name),
+                            isDirectory: item.is_dir,
+                            size: item.is_dir ? -1 : item.size
+                        )
+                    }
+                    .sorted {
+                        if $0.isDirectory != $1.isDirectory { return $0.isDirectory }
+                        return $0.name.localizedCaseInsensitiveCompare($1.name) == .orderedAscending
+                    }
+                DispatchQueue.main.async {
+                    guard currentPath == path else { return }
+                    entries = remoteEntries
+                    selectedEntryIDs.formIntersection(Set(remoteEntries.map(\.id)))
+                    isLoadingEntries = false
                 }
+                return
             }
+
+            if shouldGrant,
+               !ContainerStore.isWithinOwnSandbox(path),
+               ContainerStore.hasPrivilegedContainerAccess(),
+               ContainerAccessPolicy.shouldAttemptMCM(bundleID: targetBundleID),
+               let targetBundleID {
+                var activationError: NSString?
+                let handle = MCMActivateContainer(2, targetBundleID, false, &activationError)
+                let detail = activationError.map { String($0) } ?? "none"
+                log("filebrowser: MCM activate \(targetBundleID) -> \(handle), detail=\(detail)")
+            }
+
             let loadedEntries = ContainerStore.listFiles(at: path)
             DispatchQueue.main.async {
                 guard currentPath == path else { return }
@@ -1837,9 +1866,21 @@ struct FileQuickLookView: View {
             }
         }
         .task(id: file.id) {
-            let sourceURL = URL(fileURLWithPath: file.path)
+            let filePath = file.path
+            let fileName = file.name
             let result = await Task.detached(priority: .userInitiated) {
-                Result { try FilePreviewService.makePreviewCopy(of: sourceURL) }
+                Result {
+                    if let parsed = LocalDevVirtualPath.parse(filePath) {
+                        return try FilePreviewService.makeRemotePreviewCopy(
+                            bundleID: parsed.bundleID,
+                            remotePath: parsed.remotePath,
+                            fileName: fileName
+                        )
+                    }
+                    return try FilePreviewService.makePreviewCopy(
+                        of: URL(fileURLWithPath: filePath)
+                    )
+                }
             }.value
             guard !Task.isCancelled else {
                 if case .success(let prepared) = result {
@@ -1892,6 +1933,35 @@ private enum FilePreviewService {
                 withIntermediateDirectories: true
             )
             try FileManager.default.copyItem(at: sourceURL, to: destination)
+            return PreparedFilePreview(fileURL: destination, directoryURL: directory)
+        } catch {
+            try? FileManager.default.removeItem(at: directory)
+            throw error
+        }
+    }
+
+    static func makeRemotePreviewCopy(
+        bundleID: String,
+        remotePath: String,
+        fileName: String
+    ) throws -> PreparedFilePreview {
+        guard let data = LocalDevBridge.shared.readFile(
+            service: .houseArrest,
+            bundleID: bundleID,
+            path: remotePath
+        ) else {
+            throw FileManagerOperationError.sourceMissing
+        }
+        let directory = FileManager.default.temporaryDirectory
+            .appendingPathComponent("3105-Preview", isDirectory: true)
+            .appendingPathComponent(UUID().uuidString, isDirectory: true)
+        let destination = directory.appendingPathComponent(fileName)
+        do {
+            try FileManager.default.createDirectory(
+                at: directory,
+                withIntermediateDirectories: true
+            )
+            try data.write(to: destination, options: .atomic)
             return PreparedFilePreview(fileURL: destination, directoryURL: directory)
         } catch {
             try? FileManager.default.removeItem(at: directory)

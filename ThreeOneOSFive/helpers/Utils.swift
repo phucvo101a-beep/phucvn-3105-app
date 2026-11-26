@@ -2,22 +2,149 @@ import Foundation
 import UIKit
 import Darwin
 import Combine
+import OSLog
 
 // MARK: - Global logger
 class AppLog: ObservableObject {
     static let shared = AppLog()
     @Published var entries: [String] = []
+
+    private static let maxInMemoryEntries = 2_000
+    private static let maxLogFileBytes: UInt64 = 512 * 1_024
+    private let logger = Logger(
+        subsystem: Bundle.main.bundleIdentifier ?? "com.phucvn.3105",
+        category: "runtime"
+    )
+    private let fileQueue = DispatchQueue(label: "com.phucvn.3105.applog.file", qos: .utility)
+
+    var diagnosticsDirectoryURL: URL? {
+        guard let docs = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask).first else {
+            return nil
+        }
+        let dir = docs.appendingPathComponent("3105-Diagnostics", isDirectory: true)
+        try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        return dir
+    }
+
+    var sessionLogFileURL: URL? {
+        diagnosticsDirectoryURL?.appendingPathComponent("session-latest.log")
+    }
+
+    var environmentFileURL: URL? {
+        diagnosticsDirectoryURL?.appendingPathComponent("environment.json")
+    }
+
     func append(_ msg: String) {
-        DispatchQueue.main.async { self.entries.append(msg) }
+        let sanitized = Self.sanitizeForDiagnostics(msg)
+        guard !sanitized.isEmpty else { return }
+
+        let timestamp = Self.isoTimestamp()
+        let fileLine = "[\(timestamp)] \(sanitized)\n"
+        logger.notice("\(sanitized, privacy: .public)")
+
+        fileQueue.async { [weak self] in
+            self?.appendLineToDisk(fileLine)
+        }
+
+        DispatchQueue.main.async {
+            self.entries.append(sanitized)
+            if self.entries.count > Self.maxInMemoryEntries {
+                self.entries.removeFirst(self.entries.count - Self.maxInMemoryEntries)
+            }
+        }
+    }
+
+    func writeDiagnosticsSnapshot(extra: [String: String] = [:]) {
+        let homePath = NSHomeDirectory()
+        let docsPath = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask).first?.path ?? ""
+        let cachesPath = FileManager.default.urls(for: .cachesDirectory, in: .userDomainMask).first?.path ?? ""
+        let fileSharingEnabled = (Bundle.main.object(forInfoDictionaryKey: "UIFileSharingEnabled") as? Bool) ?? false
+        let openInPlaceEnabled = (Bundle.main.object(forInfoDictionaryKey: "LSSupportsOpeningDocumentsInPlace") as? Bool) ?? false
+
+        var payload: [String: Any] = [
+            "generated_at": Self.isoTimestamp(),
+            "bundle_id": Bundle.main.bundleIdentifier ?? "",
+            "app_version": (Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String) ?? "",
+            "app_build": (Bundle.main.object(forInfoDictionaryKey: "CFBundleVersion") as? String) ?? "",
+            "ios_version": AppInfo.osVersion,
+            "ios_build": AppInfo.osBuild,
+            "machine": AppInfo.displayMachineName,
+            "sandbox_home": homePath,
+            "documents_path": docsPath,
+            "caches_path": cachesPath,
+            "ui_file_sharing_enabled": fileSharingEnabled,
+            "open_documents_in_place": openInPlaceEnabled,
+            "access_mode": ContainerStore.accessModeDescription,
+            "privileged_container_access": ContainerStore.hasPrivilegedContainerAccess(),
+            "kernel_exploit_applicable": ExploitSupportPolicy.supportsKernelExploit(
+                major: AppInfo.versionTuple.major,
+                minor: AppInfo.versionTuple.minor,
+                patch: AppInfo.versionTuple.patch
+            ),
+            "localdev_code": LocalDevBridge.shared.currentStatus.code,
+            "localdev_status": LocalDevBridge.shared.currentStatus.status
+        ]
+        for (k, v) in extra {
+            payload[k] = Self.sanitizeForDiagnostics(v)
+        }
+
+        fileQueue.async { [weak self] in
+            guard let url = self?.environmentFileURL,
+                  let data = try? JSONSerialization.data(withJSONObject: payload, options: [.prettyPrinted, .sortedKeys]) else {
+                return
+            }
+            try? data.write(to: url, options: .atomic)
+        }
+    }
+
+    private func appendLineToDisk(_ line: String) {
+        guard let url = sessionLogFileURL,
+              let data = line.data(using: .utf8) else { return }
+
+        let fm = FileManager.default
+        if let attrs = try? fm.attributesOfItem(atPath: url.path),
+           let size = attrs[.size] as? UInt64,
+           size >= Self.maxLogFileBytes,
+           let dir = diagnosticsDirectoryURL {
+            let previousURL = dir.appendingPathComponent("session-previous.log")
+            try? fm.removeItem(at: previousURL)
+            try? fm.moveItem(at: url, to: previousURL)
+        }
+
+        if !fm.fileExists(atPath: url.path) {
+            fm.createFile(atPath: url.path, contents: data, attributes: nil)
+            return
+        }
+
+        guard let handle = try? FileHandle(forWritingTo: url) else { return }
+        defer { try? handle.close() }
+        _ = try? handle.seekToEnd()
+        try? handle.write(contentsOf: data)
+    }
+
+    private static func sanitizeForDiagnostics(_ raw: String) -> String {
+        let trimmed = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return "" }
+        // Never persist potential license keys or runtime session tickets into shared diagnostics.
+        if trimmed.contains("PHUCVN-") || trimmed.localizedCaseInsensitiveContains("ticket=") {
+            return "[3105] [redacted sensitive diagnostic line]"
+        }
+        return trimmed
+    }
+
+    private static func isoTimestamp() -> String {
+        let formatter = ISO8601DateFormatter()
+        formatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+        return formatter.string(from: Date())
     }
 }
+
 func log(_ msg: String) { AppLog.shared.append("[3105] \(msg)") }
 
 // Retain the pipe for the app's lifetime so stdout/stderr stay redirected.
 private var logCapturePipe: Pipe?
 
-// Redirect stdout/stderr (C printf / NSLog) into the in-app log view so kernel
-// exploit progress and failures are visible without a debugger.
+// Redirect stdout/stderr (C printf / NSLog) into the in-app log view and USB diagnostics mirror.
 func setupLogCapture() {
     guard logCapturePipe == nil else { return }  // already set up
     let pipe = Pipe()
@@ -36,9 +163,9 @@ func setupLogCapture() {
         let data = handle.availableData
         guard !data.isEmpty else { return }
         if let text = String(data: data, encoding: .utf8) {
-            let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
-            if !trimmed.isEmpty {
-                DispatchQueue.main.async {
+            for line in text.components(separatedBy: .newlines) {
+                let trimmed = line.trimmingCharacters(in: .whitespacesAndNewlines)
+                if !trimmed.isEmpty {
                     AppLog.shared.append(trimmed)
                 }
             }

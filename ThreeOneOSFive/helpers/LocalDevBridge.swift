@@ -136,6 +136,49 @@ public struct LocalDevApp: Codable, Identifiable {
     }
 }
 
+public struct LocalDevDirItem: Codable, Hashable {
+    public let name: String
+    public let is_dir: Bool
+    public let size: Int64
+}
+
+public struct LocalDevDirListing {
+    public let success: Bool
+    public let mode: String?
+    public let error: String?
+    public let items: [LocalDevDirItem]
+}
+
+public enum LocalDevVirtualPath {
+    public static let schemePrefix = "localdev://"
+
+    public static func isLocalDevPath(_ path: String) -> Bool {
+        path.hasPrefix(schemePrefix)
+    }
+
+    public static func rootPath(bundleID: String) -> String {
+        schemePrefix + bundleID
+    }
+
+    public static func childPath(parent: String, name: String) -> String {
+        let base = parent.hasSuffix("/") ? String(parent.dropLast()) : parent
+        let cleanName = name.hasPrefix("/") ? String(name.dropFirst()) : name
+        return base + "/" + cleanName
+    }
+
+    public static func parse(_ virtualPath: String) -> (bundleID: String, remotePath: String)? {
+        guard virtualPath.hasPrefix(schemePrefix) else { return nil }
+        let remainder = String(virtualPath.dropFirst(schemePrefix.count))
+        guard !remainder.isEmpty else { return nil }
+        if let slashIndex = remainder.firstIndex(of: "/") {
+            let bundleID = String(remainder[..<slashIndex])
+            let sub = String(remainder[slashIndex...])
+            return (bundleID, sub.isEmpty ? "/" : sub)
+        }
+        return (remainder, "/")
+    }
+}
+
 private struct ScanAppsResponse: Codable {
     let success: Bool
     let error: String?
@@ -146,7 +189,9 @@ private struct ListDirResponse: Codable {
     let success: Bool
     let error: String?
     let path: String?
+    let mode: String?
     let entries: [String]?
+    let items: [LocalDevDirItem]?
 }
 
 public final class LocalDevBridge: ObservableObject {
@@ -247,6 +292,7 @@ public final class LocalDevBridge: ObservableObject {
            let status = try? JSONDecoder().decode(LocalDevStatus.self, from: data) {
             DispatchQueue.main.async {
                 self.currentStatus = status
+                AppLog.shared.writeDiagnosticsSnapshot()
             }
         }
     }
@@ -336,6 +382,7 @@ public final class LocalDevBridge: ObservableObject {
                     DispatchQueue.main.async {
                         self.currentStatus = status
                         self.lastError = nil
+                        AppLog.shared.writeDiagnosticsSnapshot()
                     }
                     return true
                 }
@@ -355,6 +402,7 @@ public final class LocalDevBridge: ObservableObject {
                 is_heartbeat_alive: true
             )
             self.lastError = nil
+            AppLog.shared.writeDiagnosticsSnapshot()
         }
         return true
     }
@@ -401,20 +449,32 @@ public final class LocalDevBridge: ObservableObject {
     }
 
     public func listDirectory(service: LocalDevServiceType, bundleID: String?, path: String) -> [String] {
+        listDirectoryDetailed(service: service, bundleID: bundleID, path: path).items.map(\.name)
+    }
+
+    public func listDirectoryDetailed(
+        service: LocalDevServiceType,
+        bundleID: String?,
+        path: String
+    ) -> LocalDevDirListing {
         LocalDevLib.shared.resolveSymbols()
         guard let fnList = LocalDevLib.shared.fnListDir,
               let cStr = fnList(service.rawValue, bundleID, path) else {
-            return []
+            return LocalDevDirListing(success: false, mode: nil, error: "LocalDev chưa sẵn sàng", items: [])
         }
         defer { LocalDevLib.shared.fnFreeString?(cStr) }
 
         let jsonStr = String(cString: cStr)
-        if let data = jsonStr.data(using: .utf8),
-           let resp = try? JSONDecoder().decode(ListDirResponse.self, from: data),
-           let entries = resp.entries {
-            return entries
+        guard let data = jsonStr.data(using: .utf8),
+              let resp = try? JSONDecoder().decode(ListDirResponse.self, from: data) else {
+            return LocalDevDirListing(success: false, mode: nil, error: "Phản hồi LocalDev không hợp lệ", items: [])
         }
-        return []
+
+        if let items = resp.items, !items.isEmpty {
+            return LocalDevDirListing(success: resp.success, mode: resp.mode, error: resp.error, items: items)
+        }
+        let fallbackItems = (resp.entries ?? []).map { LocalDevDirItem(name: $0, is_dir: false, size: -1) }
+        return LocalDevDirListing(success: resp.success, mode: resp.mode, error: resp.error, items: fallbackItems)
     }
 
     public func readFile(service: LocalDevServiceType, bundleID: String?, path: String) -> Data? {

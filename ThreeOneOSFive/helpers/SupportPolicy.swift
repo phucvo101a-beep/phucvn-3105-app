@@ -5,7 +5,7 @@ enum ExploitSupportPolicy {
     static let verifiedIOS17Range = "17.0–17.7.x"
     static let verifiedIOS18Range = "18.0–18.7.10"
     static let verifiedIOS26Range = "26.0–26.6.1"
-    static let verifiedIOS27Range = "27.0–27.2.x"
+    static let verifiedIOS27Range = "27.0–27.x (Sandbox / LocalDev)"
 
     static let verifiedIOS27Builds: [(beta: Int, publicBeta: Int?, build: String)] = [
         (1, nil, "24A5355q"),
@@ -39,14 +39,11 @@ enum ExploitSupportPolicy {
         return false
     }
 
+    /// App compatibility check (Sandbox + Patch Workspace + LocalDev + USB diagnostics).
+    /// Non-jailbroken iOS 27.x is supported via standard Sandbox / Documents / LocalDev flows;
+    /// sandbox restrictions on other apps' containers must never be confused with an unsupported iOS version.
     static func isSupported(major: Int, minor: Int, patch: Int, build: String) -> Bool {
-        if major >= 16 && major <= 27 {
-            if major == 27 {
-                return minor <= 2
-            }
-            return true
-        }
-
-        return false
+        guard minor >= 0, patch >= 0 else { return false }
+        return major >= 16 && major <= 27
     }
 }

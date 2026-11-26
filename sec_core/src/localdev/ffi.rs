@@ -117,31 +117,57 @@ pub unsafe extern "C" fn localdev_list_dir(
         ""
     };
 
-    let res = with_manager(|mgr| {
+    let res = with_manager(|mgr| -> Result<(Vec<String>, Vec<super::house_arrest::HouseArrestDirItem>, String), String> {
         let pairing = mgr.active_pairing.as_ref().ok_or_else(|| "Chưa có pairing file".to_string())?;
 
         if service_type == SERVICE_TYPE_HOUSE_ARREST {
             if b_id.is_empty() {
                 return Err("bundle_id is required for HouseArrest".to_string());
             }
-            HouseArrestClient::list_dir(&mgr.host, mgr.port, pairing, b_id, path_str)
+            HouseArrestClient::list_dir_detailed(&mgr.host, mgr.port, pairing, b_id, path_str)
         } else {
-            let (mut afc, _source) = AfcClient::connect_device_afc(&mgr.host, mgr.port, pairing)?;
+            let (mut afc, source) = AfcClient::connect_device_afc(&mgr.host, mgr.port, pairing)?;
             let entries = afc.list_dir(path_str)?;
-            Ok(entries)
+            let prefix = path_str.trim_end_matches('/');
+            let mut items = Vec::with_capacity(entries.len());
+            for name in &entries {
+                let full = if prefix.is_empty() {
+                    format!("/{}", name)
+                } else {
+                    format!("{}/{}", prefix, name)
+                };
+                let info = afc.get_file_info(&full).unwrap_or_default();
+                let is_dir = info.get("st_ifmt").map(|v| v == "S_IFDIR").unwrap_or(false);
+                let size = if is_dir {
+                    -1
+                } else {
+                    info.get("st_size")
+                        .and_then(|s| s.parse::<i64>().ok())
+                        .unwrap_or(0)
+                };
+                items.push(super::house_arrest::HouseArrestDirItem {
+                    name: name.clone(),
+                    is_dir,
+                    size,
+                });
+            }
+            Ok((entries, items, source))
         }
     });
 
     match res {
-        Ok(entries) => to_json_cstr(json!({
+        Ok((entries, items, mode)) => to_json_cstr(json!({
             "success": true,
             "path": path_str,
-            "entries": entries
+            "mode": mode,
+            "entries": entries,
+            "items": items
         })),
         Err(e) => to_json_cstr(json!({
             "success": false,
             "error": e,
-            "entries": []
+            "entries": [],
+            "items": []
         })),
     }
 }

@@ -496,12 +496,18 @@ struct CleanerView: View {
                         ContainerPresentationPolicy.shouldShow(bundleID: $0)
                     },
                     activateContainer: { application in
-                    var activationError: NSString?
+                        if application.bundleID == ContainerStore.ownBundleID {
+                            return ContainerStore.ownSandboxRootURL.path
+                        }
+                        guard ContainerStore.hasPrivilegedContainerAccess() else {
+                            return nil
+                        }
+                        var activationError: NSString?
                         return MCMActivateContainerPath(
-                        2,
+                            2,
                             application.bundleID,
-                        false,
-                        &activationError
+                            false,
+                            &activationError
                         )
                     },
                     isValidContainerPath: ContainerStore.isApplicationContainerPath,
@@ -529,10 +535,23 @@ struct CleanerView: View {
                 publish()
             }
 
+            let ownApp = ContainerStore.ownInstalledApp
+            guard ContainerStore.hasPrivilegedContainerAccess() else {
+                ContainerStore.logSandboxModeNoticeOnce(context: "cleaner")
+                scanNewApps([ownApp])
+                publish(force: true)
+                DispatchQueue.main.async {
+                    guard scanID == requestID else { return }
+                    isScanning = false
+                    log("cleaner: sandbox scan complete bundles=\(processedCount) reclaimableApps=\(discoveredRecords.count)")
+                }
+                return
+            }
+
             let apiApps = ContainerStore.installedAppsFromAPI()
             let dynamicIdentifiers = ContainerStore.dynamicAppIdentifiers()
             let mcmApps = ContainerStore.installedAppsFromMCM(identifiers: dynamicIdentifiers)
-            scanNewApps(apiApps + mcmApps)
+            scanNewApps([ownApp] + apiApps + mcmApps)
 
             let launchServicesIdentifiers = ContainerStore.launchServicesStoreIdentifiers()
             let candidates = MHAIdentifierCatalog.identifiers(

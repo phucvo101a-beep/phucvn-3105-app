@@ -7,9 +7,17 @@ use super::afc_client::AfcClient;
 use super::pairing::PairingFile;
 use super::plist_util::PlistValue;
 use super::tunnel::{read_plist, send_plist, LockdownClient};
+use serde::Serialize;
 use std::collections::HashMap;
 
 pub const ERR_SANDBOX_LOCKED_APPSTORE: &str = "SANDBOX_LOCKED_APPSTORE";
+
+#[derive(Debug, Clone, Serialize)]
+pub struct HouseArrestDirItem {
+    pub name: String,
+    pub is_dir: bool,
+    pub size: i64,
+}
 
 pub struct HouseArrestClient;
 
@@ -63,6 +71,7 @@ impl HouseArrestClient {
     }
 
     /// Lists directory inside target application sandbox
+    #[allow(dead_code)]
     pub fn list_dir(
         ip: &str,
         port: u16,
@@ -72,6 +81,48 @@ impl HouseArrestClient {
     ) -> Result<Vec<String>, String> {
         let (mut afc, _mode) = Self::connect_app_container(ip, port, pairing, bundle_id)?;
         afc.list_dir(path)
+    }
+
+    /// Lists directory entries with metadata (directory flag & size) and granted mode
+    pub fn list_dir_detailed(
+        ip: &str,
+        port: u16,
+        pairing: &PairingFile,
+        bundle_id: &str,
+        path: &str,
+    ) -> Result<(Vec<String>, Vec<HouseArrestDirItem>, String), String> {
+        let (mut afc, mode) = Self::connect_app_container(ip, port, pairing, bundle_id)?;
+        let effective_path = if mode == "VendDocuments" && (path.is_empty() || path == "/") {
+            "/Documents"
+        } else {
+            path
+        };
+        let entries = afc.list_dir(effective_path)?;
+        let mut items = Vec::with_capacity(entries.len());
+        let prefix = effective_path.trim_end_matches('/');
+
+        for name in &entries {
+            let full = if prefix.is_empty() {
+                format!("/{}", name)
+            } else {
+                format!("{}/{}", prefix, name)
+            };
+            let info = afc.get_file_info(&full).unwrap_or_default();
+            let is_dir = info.get("st_ifmt").map(|v| v == "S_IFDIR").unwrap_or(false);
+            let size = if is_dir {
+                -1
+            } else {
+                info.get("st_size")
+                    .and_then(|s| s.parse::<i64>().ok())
+                    .unwrap_or(0)
+            };
+            items.push(HouseArrestDirItem {
+                name: name.clone(),
+                is_dir,
+                size,
+            });
+        }
+        Ok((entries, items, mode))
     }
 
     /// Reads file bytes from target application sandbox

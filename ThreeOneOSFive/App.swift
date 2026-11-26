@@ -12,6 +12,7 @@ struct ThreeOneOSFiveApp: App {
         setupLogCapture()
         _ = LocalDevBridge.shared
         log("app: 3105 x PHUCVN launching — iOS \(AppInfo.osVersion) (\(AppInfo.osBuild)) \(AppInfo.machineName)")
+        AppLog.shared.writeDiagnosticsSnapshot()
     }
 
     private var language: AppLanguage { .vietnamese }
@@ -189,6 +190,7 @@ class AppState: ObservableObject {
         unsupportedMessage = supported ? nil : "iOS \(AppInfo.osVersion) (\(AppInfo.osBuild))"
         if let unsupportedMessage {
             exploitStatus = .unsupported(unsupportedMessage)
+            AppLog.shared.writeDiagnosticsSnapshot()
             return
         }
 
@@ -198,7 +200,10 @@ class AppState: ObservableObject {
             patch: v.patch,
             build: AppInfo.osBuild
         )
-        guard applicable else { return }
+        guard applicable else {
+            AppLog.shared.writeDiagnosticsSnapshot()
+            return
+        }
 
         refreshKernelExploitStatus()
         maybeAutoRunKernelExploit()

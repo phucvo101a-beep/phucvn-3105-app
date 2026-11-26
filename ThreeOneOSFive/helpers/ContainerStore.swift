@@ -62,19 +62,15 @@ struct FileEntry: Identifiable, Hashable {
     }
 }
 
+enum ContainerAccessEnvironment: Equatable {
+    case appSandboxOnly(iosVersion: String)
+    case localDevTunnel(udid: String?)
+    case privilegedSandboxAccess
+}
+
 // MARK: - Store
 
 enum ContainerStore {
-    static let appDataRoot = "/var/mobile/Containers/Data/Application"
-    static let systemDataRoot = "/var/mobile/Containers/Data/System"
-    private static var shouldUseBadQuery: Bool {
-        ProcessInfo.processInfo.operatingSystemVersion.majorVersion >= 26
-    }
-    private static let applicationBundleRoots: [(path: String, nested: Bool)] = [
-        ("/var/containers/Bundle/Application", true),
-        ("/Applications", false),
-        ("/System/Applications", false)
-    ]
     static let researchAppIdentifiers = [
         "com.apple.mobilesafari", "com.apple.mobilenotes", "com.apple.Maps",
         "com.apple.facetime", "com.apple.iBooks", "com.apple.podcasts",
@@ -90,10 +86,187 @@ enum ContainerStore {
         "com.apple.compass", "com.apple.Magnifier", "com.apple.DocumentsApp"
     ]
 
+    private static let privilegedLock = NSLock()
+    private static var didLogSandboxNotice = false
+
+    // MARK: - Standard iOS Sandbox Roots
+
+    static var ownBundleID: String {
+        Bundle.main.bundleIdentifier ?? "com.phucvn.3105"
+    }
+
+    static var ownSandboxRootURL: URL {
+        URL(fileURLWithPath: NSHomeDirectory(), isDirectory: true).standardizedFileURL
+    }
+
+    static var ownDocumentsURL: URL? {
+        FileManager.default.urls(for: .documentDirectory, in: .userDomainMask).first?.standardizedFileURL
+    }
+
+    static var ownApplicationSupportURL: URL? {
+        FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first?.standardizedFileURL
+    }
+
+    static var ownCachesURL: URL? {
+        FileManager.default.urls(for: .cachesDirectory, in: .userDomainMask).first?.standardizedFileURL
+    }
+
+    static var ownTemporaryURL: URL {
+        FileManager.default.temporaryDirectory.standardizedFileURL
+    }
+
+    static var ownDiagnosticsURL: URL? {
+        guard let docs = ownDocumentsURL else { return nil }
+        let dir = docs.appendingPathComponent("3105-Diagnostics", isDirectory: true)
+        try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        return dir
+    }
+
+    static var ownInstalledApp: InstalledApp {
+        let info = Bundle.main.infoDictionary ?? [:]
+        let localized = Bundle.main.localizedInfoDictionary ?? [:]
+        let displayName = (localized["CFBundleDisplayName"] as? String)
+            ?? (info["CFBundleDisplayName"] as? String)
+            ?? (info["CFBundleName"] as? String)
+            ?? AppBrand.name
+        let version = (info["CFBundleShortVersionString"] as? String) ?? ""
+        return InstalledApp(
+            bundleID: ownBundleID,
+            name: displayName,
+            containerPath: ownSandboxRootURL.path,
+            version: version,
+            icon: iconForBundleID(ownBundleID)
+        )
+    }
+
+    static func appGroupContainerURLs(identifiers: [String] = []) -> [URL] {
+        var groupIDs = Set(identifiers)
+        if let declared = Bundle.main.object(forInfoDictionaryKey: "AppGroupIdentifiers") as? [String] {
+            groupIDs.formUnion(declared)
+        }
+        return groupIDs.sorted().compactMap { id in
+            FileManager.default.containerURL(forSecurityApplicationGroupIdentifier: id)?.standardizedFileURL
+        }
+    }
+
+    /// Dynamically derives the parent container directory from NSHomeDirectory()
+    /// without hardcoding any fixed application container root path.
+    static var derivedContainersParentPath: String? {
+        let resolvedHome = ownSandboxRootURL.resolvingSymlinksInPath().standardizedFileURL
+        guard UUID(uuidString: resolvedHome.lastPathComponent) != nil else { return nil }
+        let parent = resolvedHome.deletingLastPathComponent().path
+        return parent.isEmpty ? nil : parent
+    }
+
+    static var derivedBundleParentPath: String? {
+        let resolvedBundle = Bundle.main.bundleURL.resolvingSymlinksInPath().standardizedFileURL
+        let uuidDir = resolvedBundle.deletingLastPathComponent()
+        guard UUID(uuidString: uuidDir.lastPathComponent) != nil else { return nil }
+        let parent = uuidDir.deletingLastPathComponent().path
+        return parent.isEmpty ? nil : parent
+    }
+
+    static func isWithinOwnSandbox(_ path: String, appGroupIdentifiers: [String] = []) -> Bool {
+        let candidate = canonicalResolvedPath(path)
+        guard !candidate.isEmpty else { return false }
+
+        var allowedRoots = [canonicalResolvedPath(ownSandboxRootURL.path)]
+        for groupURL in appGroupContainerURLs(identifiers: appGroupIdentifiers) {
+            allowedRoots.append(canonicalResolvedPath(groupURL.path))
+        }
+
+        for root in allowedRoots where !root.isEmpty {
+            if candidate == root || candidate.hasPrefix(root + "/") {
+                return true
+            }
+        }
+        return false
+    }
+
+    static func hasPrivilegedContainerAccess() -> Bool {
+#if targetEnvironment(simulator)
+        if ProcessInfo.processInfo.arguments.contains("--simulate-access") {
+            return true
+        }
+#endif
+        let v = ProcessInfo.processInfo.operatingSystemVersion
+        if ExploitSupportPolicy.supportsKernelExploit(
+            major: v.majorVersion,
+            minor: v.minorVersion,
+            patch: v.patchVersion
+        ), KernelExploit.hasSandboxAccess() {
+            return true
+        }
+
+        // Non-jailbroken standard iOS apps cannot read the parent container directory
+        // or enumerate external app containers via LSApplicationWorkspace.
+        if let parent = derivedContainersParentPath,
+           FileManager.default.isReadableFile(atPath: parent) {
+            let entries = (try? FileManager.default.contentsOfDirectory(atPath: parent)) ?? []
+            if entries.count > 1 {
+                return true
+            }
+        }
+        return false
+    }
+
+    static func currentAccessEnvironment() -> ContainerAccessEnvironment {
+        if hasPrivilegedContainerAccess() {
+            return .privilegedSandboxAccess
+        }
+        if LocalDevBridge.shared.currentStatus.isLive {
+            return .localDevTunnel(udid: LocalDevBridge.shared.currentStatus.udid)
+        }
+        return .appSandboxOnly(iosVersion: AppInfo.osVersion)
+    }
+
+    static var accessModeDescription: String {
+        switch currentAccessEnvironment() {
+        case .privilegedSandboxAccess:
+            return "Privileged Container Access"
+        case .localDevTunnel:
+            return "Sandbox + LocalDev Tunnel (LIVE)"
+        case .appSandboxOnly:
+            return "App Sandbox (Non-JB)"
+        }
+    }
+
+    static func logSandboxModeNoticeOnce(context: String) {
+        privilegedLock.lock()
+        let shouldLog = !didLogSandboxNotice
+        didLogSandboxNotice = true
+        privilegedLock.unlock()
+
+        guard shouldLog else { return }
+        log(
+            "\(context): iOS \(AppInfo.osVersion) (\(AppInfo.osBuild)) chạy trong App Sandbox (non-JB) — " +
+            "giới hạn an toàn trong container của \(ownBundleID) / Documents / LocalDev (không phải lỗi phiên bản iOS)"
+        )
+    }
+
+    private static func canonicalResolvedPath(_ rawPath: String) -> String {
+        let trimmed = rawPath.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty, trimmed.hasPrefix("/") else { return "" }
+        let resolved = URL(fileURLWithPath: trimmed).resolvingSymlinksInPath().standardizedFileURL.path
+        return ContainerDiscoveryMerger.canonicalPath(resolved)
+    }
+
+    // MARK: - Container Resolution
+
     static func resolveAppContainerPath(bundleID: String) -> String? {
         guard (try? PatchPathValidator.canonicalBundleIdentifier(bundleID)) == bundleID else {
             return nil
         }
+
+        if bundleID == ownBundleID {
+            return ownSandboxRootURL.path
+        }
+
+        guard hasPrivilegedContainerAccess() else {
+            logSandboxModeNoticeOnce(context: "resolve")
+            return nil
+        }
+
         var lookupError: NSString?
         if let path = MCMActivateContainerPath(2, bundleID, false, &lookupError),
            isApplicationContainerPath(path) {
@@ -101,12 +274,8 @@ enum ContainerStore {
             return path
         }
         let detail = lookupError.map(String.init) ?? "unavailable"
-        log("patch: MHA-C2 could not resolve \(bundleID), detail=\(detail)")
+        log("patch: MHA-C2 unavailable for \(bundleID), detail=\(detail)")
 
-        // Fallback for iOS builds where MCM refuses to hand out sandbox
-        // tokens (e.g. iOS 18.1.x): scan the app-data root with the inode
-        // walk and read each container's MCM metadata plist directly. The
-        // raw reads only succeed when the sandbox escape is active.
         if let scanned = resolveAppContainerPathByMetadataScan(bundleID: bundleID) {
             log("patch: filesystem metadata scan resolved \(bundleID)")
             return scanned
@@ -115,14 +284,15 @@ enum ContainerStore {
     }
 
     static func resolveAppContainerPathByMetadataScan(bundleID: String) -> String? {
-        // iOS < 26: kernel R/W is enough, no need to require full sandbox escape
-        if KernelExploit.requiresSandboxEscape, !KernelExploit.hasSandboxAccess() {
-            log("patch: metadata scan skipped — sandbox access not active")
+        if bundleID == ownBundleID {
+            return ownSandboxRootURL.path
+        }
+        guard hasPrivilegedContainerAccess(),
+              let appRoot = derivedContainersParentPath else {
             return nil
         }
-        let dirs = enumerateDirectories(path: appDataRoot)
+        let dirs = enumerateDirectories(path: appRoot)
         guard !dirs.isEmpty else {
-            log("patch: metadata scan unavailable — no containers enumerated")
             return nil
         }
         for dir in dirs {
@@ -139,21 +309,29 @@ enum ContainerStore {
     // MARK: Primary — MobileInstallation / LSApplicationWorkspace
 
     static func installedAppsFromAPI() -> [InstalledApp] {
+        guard hasPrivilegedContainerAccess() else {
+            logSandboxModeNoticeOnce(context: "browser")
+            return [ownInstalledApp]
+        }
+
         let raw = installedAppInfo() as? [String: [String: Any]] ?? [:]
         var apps: [InstalledApp] = []
         var missingContainer = 0
         for (bundleID, info) in raw {
             var containerPath = info["container"] as? String ?? ""
             if containerPath.isEmpty {
-                var lookupError: NSString?
-                if let resolved = MCMActivateContainerPath(2, bundleID, false, &lookupError),
-                   isApplicationContainerPath(resolved) {
-                    containerPath = resolved
+                if bundleID == ownBundleID {
+                    containerPath = ownSandboxRootURL.path
                 } else {
-                    missingContainer += 1
+                    var lookupError: NSString?
+                    if let resolved = MCMActivateContainerPath(2, bundleID, false, &lookupError),
+                       isApplicationContainerPath(resolved) {
+                        containerPath = resolved
+                    } else {
+                        missingContainer += 1
+                    }
                 }
             }
-            // Skip entries we cannot browse — empty path is dropped by mergers anyway.
             guard !containerPath.isEmpty else { continue }
             apps.append(InstalledApp(
                 bundleID: bundleID,
@@ -163,16 +341,33 @@ enum ContainerStore {
                 icon: info["icon"] as? UIImage
             ))
         }
+        if !apps.contains(where: { $0.bundleID == ownBundleID }) {
+            apps.append(ownInstalledApp)
+        }
         log("browser: LS/API apps=\(apps.count) raw=\(raw.count) missingContainer=\(missingContainer)")
         return apps
     }
 
     static func applicationBundleMetadataCatalog() -> [String: ApplicationBundleMetadata] {
         var catalog: [String: ApplicationBundleMetadata] = [:]
-        for root in applicationBundleRoots {
-            for metadata in applicationBundleMetadata(at: root.path, nested: root.nested) {
-                catalog[metadata.bundleID] = metadata
-            }
+
+        // Always include own app metadata using standard Bundle API.
+        if let infoURL = Bundle.main.url(forResource: "Info", withExtension: "plist"),
+           let data = try? Data(contentsOf: infoURL),
+           let ownMetadata = ApplicationBundleMetadataReader.metadata(
+               from: data,
+               localizedInfo: Bundle.main.localizedInfoDictionary
+           ) {
+            catalog[ownMetadata.bundleID] = ownMetadata
+        }
+
+        guard hasPrivilegedContainerAccess(),
+              let bundleParent = derivedBundleParentPath else {
+            return catalog
+        }
+
+        for metadata in applicationBundleMetadata(at: bundleParent, nested: true) {
+            catalog[metadata.bundleID] = metadata
         }
         log("browser: app-bundle metadata resolved \(catalog.count) names")
         return catalog
@@ -198,6 +393,9 @@ enum ContainerStore {
     }
 
     static func dynamicAppIdentifiers() -> [String] {
+        guard hasPrivilegedContainerAccess() else {
+            return [ownBundleID]
+        }
         var enumerationError: NSString?
         let identifiers = MCMEnumerateIdentifiersForClass(2, 1_024, &enumerationError)
         let enumerationDetail = enumerationError.map { String($0) } ?? "none"
@@ -209,8 +407,11 @@ enum ContainerStore {
         identifiers: [String]? = nil,
         bundleMetadata: [String: ApplicationBundleMetadata] = [:]
     ) -> [InstalledApp] {
-        let identifiers = identifiers ?? dynamicAppIdentifiers()
+        guard hasPrivilegedContainerAccess() else {
+            return [ownInstalledApp]
+        }
 
+        let identifiers = identifiers ?? dynamicAppIdentifiers()
         var apps: [InstalledApp] = []
         for (index, bundleID) in identifiers.enumerated() {
             var lookupError: NSString?
@@ -245,8 +446,12 @@ enum ContainerStore {
         bundleMetadata: [String: ApplicationBundleMetadata] = [:],
         progress: (([InstalledApp]) -> Void)? = nil
     ) -> [InstalledApp] {
+        guard hasPrivilegedContainerAccess() else {
+            let ownOnly = [ownInstalledApp]
+            progress?(ownOnly)
+            return ownOnly
+        }
         guard !identifiers.isEmpty else {
-            log("browser: MHA catalog returned no bundle candidates")
             return []
         }
 
@@ -283,8 +488,6 @@ enum ContainerStore {
             if apps.count <= 5 {
                 log("browser: MHA-C2 resolved \(bundleID) -> \(containerPath)")
             }
-            // Publish at most a few times per second. The old per-8-app callback
-            // made SwiftUI repeatedly diff and redraw the whole list during scans.
             if apps.count.isMultiple(of: 32) {
                 let now = ProcessInfo.processInfo.systemUptime
                 if now - lastProgressPublication >= 0.35 {
@@ -303,14 +506,8 @@ enum ContainerStore {
         at rootPath: String,
         nested: Bool
     ) -> [ApplicationBundleMetadata] {
-        let handle = grantContainerAccess(rootPath)
-        defer {
-            if handle >= 0 { bad_query_release(handle) }
-        }
-
         let fileManager = FileManager.default
         guard let rootEntries = try? fileManager.contentsOfDirectory(atPath: rootPath) else {
-            log("browser: app-bundle metadata unavailable root=\(rootPath) grant=\(handle)")
             return []
         }
 
@@ -348,6 +545,10 @@ enum ContainerStore {
     }
 
     static func launchServicesStoreIdentifiers() -> [String] {
+        guard hasPrivilegedContainerAccess() else {
+            return [ownBundleID]
+        }
+
         var cachePaths: [String] = []
         var seenCachePaths = Set<String>()
 
@@ -357,7 +558,6 @@ enum ContainerStore {
             cachePaths.append(path)
         }
 
-        var leasedCachePaths = Set<String>()
         var serviceLookupError: NSString?
         if let servicePath = MCMActivateContainerPath(
             10,
@@ -365,55 +565,14 @@ enum ContainerStore {
             false,
             &serviceLookupError
         ) {
-            let cachePath = (servicePath as NSString).appendingPathComponent("Library/Caches")
-            addCachePath(cachePath)
-            leasedCachePaths.insert(ContainerDiscoveryMerger.canonicalPath(cachePath))
-        } else if shouldUseBadQuery {
-            let detail = serviceLookupError.map { String($0) } ?? "no path"
-            log("browser: MCM com.apple.lsd activation unavailable detail=\(detail)")
+            addCachePath((servicePath as NSString).appendingPathComponent("Library/Caches"))
         }
-
-        let traversedSystemDirectories = enumerateDirectoriesWithTraversalGrant(path: systemDataRoot)
-        let systemDirectories = traversedSystemDirectories.isEmpty
-            ? enumerateDirectories(path: systemDataRoot)
-            : traversedSystemDirectories
-        for directory in systemDirectories {
-            // Attempt the raw metadata read even without a traversal grant:
-            // it succeeds when the sandbox escape is active, which is the
-            // only path left when MCM/bad_query grants are denied.
-            guard readContainerMetadata(containerPath: directory)?.bundleID == "com.apple.lsd" else {
-                continue
-            }
-            addCachePath((directory as NSString).appendingPathComponent("Library/Caches"))
-        }
-
-        // Older and Simulator layouts keep the same store outside the MCM
-        // service-container layout. They are harmless fallbacks on device.
-        addCachePath("/var/db/lsd")
-        addCachePath("/var/mobile/Library/Caches")
 
         var identifiers: [String] = []
         var seenIdentifiers = Set<String>()
         let maximumCandidateCount = 65_536
 
         for cachePath in cachePaths where identifiers.count < maximumCandidateCount {
-            let hasLease = leasedCachePaths.contains(
-                ContainerDiscoveryMerger.canonicalPath(cachePath)
-            )
-            let handle: Int64
-            if hasLease || !shouldUseBadQuery {
-                handle = -1
-            } else {
-                handle = grantContainerAccess(cachePath)
-                if handle < 0 {
-                    log("browser: LaunchServices traversal grant failed \(cachePath) -> \(handle)")
-                    continue
-                }
-            }
-            defer {
-                if handle >= 0 { bad_query_release(handle) }
-            }
-
             let names = (try? FileManager.default.contentsOfDirectory(atPath: cachePath)) ?? []
             for name in names where identifiers.count < maximumCandidateCount {
                 guard name.hasPrefix("com.apple.LaunchServices-"),
@@ -432,7 +591,6 @@ enum ContainerStore {
                 for identifier in extracted where seenIdentifiers.insert(identifier).inserted {
                     identifiers.append(identifier)
                 }
-                log("browser: LaunchServices store \(name) bytes=\(data.count) candidates=\(identifiers.count)")
             }
         }
 
@@ -441,10 +599,24 @@ enum ContainerStore {
     }
 
     static func isApplicationContainerPath(_ path: String) -> Bool {
-        let canonicalRoot = ContainerDiscoveryMerger.canonicalPath(appDataRoot)
-        let canonicalPath = ContainerDiscoveryMerger.canonicalPath(path)
-        guard canonicalPath.hasPrefix(canonicalRoot + "/") else { return false }
-        return UUID(uuidString: (canonicalPath as NSString).lastPathComponent) != nil
+        let canonical = canonicalResolvedPath(path)
+        guard !canonical.isEmpty else { return false }
+
+        let ownCanonical = canonicalResolvedPath(ownSandboxRootURL.path)
+        if canonical == ownCanonical {
+            return true
+        }
+        for groupURL in appGroupContainerURLs() where canonical == canonicalResolvedPath(groupURL.path) {
+            return true
+        }
+
+        let lastComponent = (canonical as NSString).lastPathComponent
+        guard UUID(uuidString: lastComponent) != nil else { return false }
+        if let derivedParent = derivedContainersParentPath {
+            let parent = (canonical as NSString).deletingLastPathComponent
+            return parent == canonicalResolvedPath(derivedParent)
+        }
+        return false
     }
 
     // MARK: Filesystem discovery
@@ -452,73 +624,50 @@ enum ContainerStore {
     static func enumerateDirectories(path: String, maxInode: Int64 = 2_000_000) -> [String] {
         let clean = path.hasSuffix("/") ? String(path.dropLast()) : path
         guard clean.hasPrefix("/") else { return [] }
+        guard isWithinOwnSandbox(clean) || hasPrivilegedContainerAccess() else {
+            return []
+        }
 
         if let names = try? FileManager.default.contentsOfDirectory(atPath: clean), !names.isEmpty {
             return names.map { (clean as NSString).appendingPathComponent($0) }
         }
 
-        var pathC = clean.utf8CString.map { Int8($0) }
-        guard let result = bad_query_list(&pathC, maxInode) else {
-            log("enumerate: NULL for \(clean)")
-            return []
+        if isWithinOwnSandbox(clean) {
+            var pathC = clean.utf8CString.map { Int8($0) }
+            guard let result = bad_query_list(&pathC, maxInode) else {
+                return []
+            }
+            defer { free(result) }
+            return String(cString: result).components(separatedBy: "\n").filter { !$0.isEmpty }
         }
-        defer { free(result) }
-        let list = String(cString: result).components(separatedBy: "\n").filter { !$0.isEmpty }
-        if !list.isEmpty {
-            log("enumerate: inode fallback for \(clean) -> \(list.count) entries")
-        } else {
-            log("enumerate: FileManager+inode unavailable for \(clean)")
-        }
-        return list
+        return []
     }
 
     static func enumerateDirectoriesWithTraversalGrant(path: String) -> [String] {
-        if !shouldUseBadQuery {
-            if let names = try? FileManager.default.contentsOfDirectory(atPath: path), !names.isEmpty {
-                return names.map { (path as NSString).appendingPathComponent($0) }
-            }
-            return enumerateDirectories(path: path)
-        }
-
-        let handle = grantContainerAccess(path)
-        if handle >= 0 {
-            defer { bad_query_release(handle) }
-            if let names = try? FileManager.default.contentsOfDirectory(atPath: path), !names.isEmpty {
-                return names.map { (path as NSString).appendingPathComponent($0) }
-            }
-        } else {
-            log("browser: root traversal grant failed \(path) -> \(handle)")
-        }
-
-        return enumerateDirectories(path: path)
+        enumerateDirectories(path: path)
     }
 
     static func readContainerMetadata(containerPath: String) -> ContainerMetadata? {
-        let metadataPath = metadataPath(for: containerPath)
-
-        var data: Data?
-        if let fd = fopen(metadataPath, "r") {
-            var buffer = [UInt8](repeating: 0, count: 65536)
-            var bytes: [UInt8] = []
-            while true {
-                let n = fread(&buffer, 1, buffer.count, fd)
-                if n <= 0 { break }
-                bytes.append(contentsOf: buffer[0..<n])
-            }
-            fclose(fd)
-            if !bytes.isEmpty { data = Data(bytes) }
+        guard isWithinOwnSandbox(containerPath) || hasPrivilegedContainerAccess() else {
+            return nil
         }
-        if data == nil { data = try? Data(contentsOf: URL(fileURLWithPath: metadataPath)) }
-
-        guard let validData = data,
-              let plist = try? PropertyListSerialization.propertyList(from: validData, options: [], format: nil) as? [String: Any] else {
+        let metadataPath = metadataPath(for: containerPath)
+        guard FileManager.default.isReadableFile(atPath: metadataPath),
+              let validData = try? Data(contentsOf: URL(fileURLWithPath: metadataPath)),
+              let plist = try? PropertyListSerialization.propertyList(
+                  from: validData,
+                  options: [],
+                  format: nil
+              ) as? [String: Any] else {
             return nil
         }
 
         let bundleID = plist["MCMMetadataIdentifier"] as? String ?? ""
         var displayName = ""
         if let info = plist["MCMMetadataInfo"] as? [String: Any] {
-            displayName = (info["CFBundleDisplayName"] as? String) ?? (info["CFBundleName"] as? String) ?? ""
+            displayName = (info["CFBundleDisplayName"] as? String)
+                ?? (info["CFBundleName"] as? String)
+                ?? ""
         }
         return ContainerMetadata(bundleID: bundleID, displayName: displayName)
     }
@@ -530,22 +679,19 @@ enum ContainerStore {
     }
 
     static func grantContainerAccess(_ containerPath: String) -> Int64 {
-        guard shouldUseBadQuery else { return -1 }
-        let clean = containerPath.hasSuffix("/") ? String(containerPath.dropLast()) : containerPath
-        var pathC = clean.utf8CString.map { Int8($0) }
-        return bad_query(&pathC, true, nil, false)
+        // Parent-directory traversal via containermanagerd is permanently disabled.
+        // Own sandbox paths are accessed directly via standard FileManager APIs.
+        _ = containerPath
+        return -1
     }
 
     static func containersFromFilesystem() -> [InstalledApp] {
-        let grantedDirectories = enumerateDirectoriesWithTraversalGrant(path: appDataRoot)
-        let dirs: [String]
-        if grantedDirectories.isEmpty {
-            dirs = enumerateDirectories(path: appDataRoot)
-            log("browser: filesystem root=\(appDataRoot) inode fallback enumerated \(dirs.count) containers")
-        } else {
-            dirs = grantedDirectories
-            log("browser: filesystem root=\(appDataRoot) traversal enumerated \(dirs.count) containers")
+        guard hasPrivilegedContainerAccess(),
+              let appRoot = derivedContainersParentPath else {
+            return [ownInstalledApp]
         }
+
+        let dirs = enumerateDirectories(path: appRoot)
         let apps = dirs.compactMap { dir -> InstalledApp? in
             let uuid = (dir as NSString).lastPathComponent
             guard UUID(uuidString: uuid) != nil else { return nil }
@@ -568,10 +714,10 @@ enum ContainerStore {
         launchServicesIdentifiers: Set<String>
     ) -> InstalledApp? {
         guard UUID(uuidString: fallback.bundleID) != nil else { return fallback }
+        guard isWithinOwnSandbox(fallback.containerPath) || hasPrivilegedContainerAccess() else {
+            return nil
+        }
 
-        // Read the MCM metadata plist directly. With the sandbox escape
-        // active the raw read succeeds even when every MCM/bad_query grant
-        // is denied; without it the read simply fails and we fall through.
         if let metadata = readContainerMetadata(containerPath: fallback.containerPath) {
             let bundleID = metadata.bundleID.trimmingCharacters(in: .whitespacesAndNewlines)
             if ContainerBundleCandidateResolver.isValidBundleIdentifier(bundleID),
@@ -590,16 +736,12 @@ enum ContainerStore {
             }
         }
 
-        let handle = grantContainerAccess(fallback.containerPath)
-        defer {
-            if handle >= 0 { bad_query_release(handle) }
-        }
-
+        let fm = FileManager.default
         let libraryPath = (fallback.containerPath as NSString).appendingPathComponent("Library")
         let savedStatePath = (libraryPath as NSString).appendingPathComponent("Saved Application State")
         let preferencesPath = (libraryPath as NSString).appendingPathComponent("Preferences")
-        let savedStates = (try? FileManager.default.contentsOfDirectory(atPath: savedStatePath)) ?? []
-        let preferences = (try? FileManager.default.contentsOfDirectory(atPath: preferencesPath)) ?? []
+        let savedStates = (try? fm.contentsOfDirectory(atPath: savedStatePath)) ?? []
+        let preferences = (try? fm.contentsOfDirectory(atPath: preferencesPath)) ?? []
         let strongCandidates = ContainerBundleCandidateResolver.candidates(
             savedStateNames: savedStates,
             preferenceFileNames: []
@@ -669,7 +811,7 @@ enum ContainerStore {
             (libraryPath as NSString).appendingPathComponent("WebKit")
         ]
         let artifactNames = artifactPaths.flatMap {
-            (try? FileManager.default.contentsOfDirectory(atPath: $0)) ?? []
+            (try? fm.contentsOfDirectory(atPath: $0)) ?? []
         }
         let artifactCandidates = ContainerBundleCandidateResolver.candidates(
             savedStateNames: [],
@@ -680,9 +822,6 @@ enum ContainerStore {
             return app
         }
 
-        let uuid = (fallback.containerPath as NSString).lastPathComponent
-        let preview = (candidates + artifactCandidates).prefix(6).joined(separator: ",")
-        log("browser: unresolved \(uuid) metadata=unavailable savedStates=\(savedStates.count) preferences=\(preferences.count) artifacts=\(artifactNames.count) candidates=[\(preview)]")
         return nil
     }
 
@@ -691,17 +830,23 @@ enum ContainerStore {
         knownApps: [InstalledApp],
         launchServicesIdentifiers: Set<String> = []
     ) -> [InstalledApp] {
-        let knownByBundleID = Dictionary(knownApps.map { ($0.bundleID, $0) }, uniquingKeysWith: { first, _ in first })
+        guard !apps.isEmpty else { return [] }
+        let knownByBundleID = Dictionary(
+            knownApps.map { ($0.bundleID, $0) },
+            uniquingKeysWith: { first, _ in first }
+        )
         var inferredCount = 0
-        let result = apps.enumerated().map { index, app -> InstalledApp in
-            guard UUID(uuidString: app.bundleID) != nil,
-                  let inferred = autoreleasepool(invoking: {
-                      inferredApp(
-                        for: app,
-                        knownAppsByBundleID: knownByBundleID,
-                        launchServicesIdentifiers: launchServicesIdentifiers
-                      )
-                  }) else {
+        var skippedRestrictedCount = 0
+        let result = apps.map { app -> InstalledApp in
+            guard UUID(uuidString: app.bundleID) != nil else { return app }
+            guard let inferred = autoreleasepool(invoking: {
+                inferredApp(
+                    for: app,
+                    knownAppsByBundleID: knownByBundleID,
+                    launchServicesIdentifiers: launchServicesIdentifiers
+                )
+            }) else {
+                skippedRestrictedCount += 1
                 return app
             }
             inferredCount += 1
@@ -710,17 +855,23 @@ enum ContainerStore {
             }
             return inferred
         }
-        let unresolvedCount = result.filter { UUID(uuidString: $0.bundleID) != nil }.count
-        log("browser: inferred identities for \(inferredCount)/\(apps.count) merged containers; unresolved=\(unresolvedCount)")
+        if inferredCount > 0 || skippedRestrictedCount > 0 {
+            log("browser: inferred=\(inferredCount)/\(apps.count) skipped_restricted=\(skippedRestrictedCount)")
+        }
         return result
     }
 
     // MARK: File browsing
 
     static func listFiles(at path: String) -> [FileEntry] {
+        guard isWithinOwnSandbox(path) || hasPrivilegedContainerAccess() else {
+            log("listFiles: sandbox protected path skipped (\(path))")
+            return []
+        }
+
         let fm = FileManager.default
         guard let items = try? fm.contentsOfDirectory(atPath: path) else {
-            log("listFiles: FAILED for \(path) errno=\(errno)")
+            log("listFiles: unavailable for \(path) errno=\(errno)")
             return []
         }
         var entries: [FileEntry] = []
@@ -756,6 +907,9 @@ enum ContainerStore {
     }
 
     static func readTextFile(at path: String, limit: Int = 200_000) -> String {
+        guard isWithinOwnSandbox(path) || hasPrivilegedContainerAccess() else {
+            return "Sandbox restricted path."
+        }
         guard let data = try? Data(contentsOf: URL(fileURLWithPath: path)) else {
             return "Unable to read file."
         }

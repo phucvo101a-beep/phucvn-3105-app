@@ -143,10 +143,10 @@ fn parse_app_record(dict: &HashMap<String, PlistValue>) -> Option<LocalDevAppInf
         .unwrap_or(false);
 
     // Categorize access level:
-    // 1. Sideloaded / Dev apps -> FullContainer
+    // 1. Sideloaded / Dev apps with get-task-allow -> FullContainer
     // 2. Apps with UIFileSharingEnabled -> DocumentsOnly
     // 3. Locked App Store apps -> SandboxLocked
-    let access_type = if is_developer_signed || container_path.is_some() {
+    let access_type = if is_developer_signed {
         "FullContainer".to_string()
     } else if file_sharing_enabled {
         "DocumentsOnly".to_string()
