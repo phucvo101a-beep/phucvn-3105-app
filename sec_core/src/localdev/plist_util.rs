@@ -610,11 +610,15 @@ pub fn serialize_xml_dict(dict: &HashMap<String, PlistValue>) -> String {
     let mut xml = String::from("<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n");
     xml.push_str("<!DOCTYPE plist PUBLIC \"-//Apple//DTD PLIST 1.0//EN\" \"http://www.apple.com/DTDs/PropertyList-1.0.dtd\">\n");
     xml.push_str("<plist version=\"1.0\">\n<dict>\n");
-    for (k, v) in dict {
-        xml.push_str(&format!("  <key>{}</key>\n", escape_xml(k)));
-        serialize_value_xml(&mut xml, v, 2);
+    let mut keys: Vec<&String> = dict.keys().collect();
+    keys.sort();
+    for k in keys {
+        if let Some(v) = dict.get(k) {
+            xml.push_str(&format!("  <key>{}</key>\n", escape_xml(k)));
+            serialize_value_xml(&mut xml, v, 1);
+        }
     }
-    xml.push_str("</dict>\n</plist>");
+    xml.push_str("</dict>\n</plist>\n");
     xml
 }
 
@@ -649,9 +653,13 @@ fn serialize_value_xml(out: &mut String, val: &PlistValue, indent: usize) {
         }
         PlistValue::Dictionary(dict) => {
             out.push_str(&format!("{}<dict>\n", ind));
-            for (k, v) in dict {
-                out.push_str(&format!("{}  <key>{}</key>\n", ind, escape_xml(k)));
-                serialize_value_xml(out, v, indent + 1);
+            let mut keys: Vec<&String> = dict.keys().collect();
+            keys.sort();
+            for k in keys {
+                if let Some(v) = dict.get(k) {
+                    out.push_str(&format!("{}  <key>{}</key>\n", ind, escape_xml(k)));
+                    serialize_value_xml(out, v, indent + 1);
+                }
             }
             out.push_str(&format!("{}</dict>\n", ind));
         }

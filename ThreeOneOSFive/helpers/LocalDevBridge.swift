@@ -27,6 +27,7 @@ private func localdevSwiftNwPrewarmTrampoline(_ hostPtr: UnsafePointer<CChar>?, 
         targetHosts: hosts,
         port: targetPort,
         force: true,
+        openTcpProbe: true,
         timeoutMs: 1200
     )
 }
@@ -784,12 +785,61 @@ public final class LocalDevBridge: ObservableObject {
         return false
     }
 
-    /// Scans active `utun` interfaces via `getifaddrs()` (`IFF_UP | IFF_RUNNING`, IPv4 + `ifa_dstaddr`)
-    /// and orders tunnel endpoints: `utun dstaddr` -> `utun` peer / `10.7.0.1` & `10.7.0.0` -> `127.0.0.1` fallback.
+    private static func extractIPv6Bytes(from saPtr: UnsafeMutablePointer<sockaddr>?) -> [UInt8]? {
+        guard let saPtr, saPtr.pointee.sa_family == sa_family_t(AF_INET6) else { return nil }
+        var sin6 = sockaddr_in6()
+        let copyLen = saPtr.pointee.sa_len > 0
+            ? min(Int(saPtr.pointee.sa_len), MemoryLayout<sockaddr_in6>.size)
+            : MemoryLayout<sockaddr_in6>.size
+        Darwin.memcpy(&sin6, saPtr, copyLen)
+        return withUnsafeBytes(of: sin6.sin6_addr) { Array($0) }
+    }
+
+    private static func formatIPv6(_ rawBytes: [UInt8], ifaceScope: String? = nil) -> String? {
+        guard rawBytes.count == 16 else { return nil }
+        var clean = rawBytes
+        let isLinkLocal = (clean[0] == 0xFE && (clean[1] & 0xC0) == 0x80)
+        // Strip Darwin KAME embedded scope index bytes [2..3] before formatting link-local address
+        if isLinkLocal {
+            clean[2] = 0
+            clean[3] = 0
+        }
+        var addr = in6_addr()
+        withUnsafeMutableBytes(of: &addr) { dst in
+            clean.withUnsafeBytes { src in
+                if let d = dst.baseAddress, let s = src.baseAddress {
+                    Darwin.memcpy(d, s, 16)
+                }
+            }
+        }
+        var buf = [CChar](repeating: 0, count: Int(INET6_ADDRSTRLEN))
+        guard Darwin.inet_ntop(AF_INET6, &addr, &buf, socklen_t(buf.count)) != nil else {
+            return nil
+        }
+        let baseStr = String(cString: buf)
+        if isLinkLocal, let scope = ifaceScope, !scope.isEmpty {
+            return "\(baseStr)%\(scope)"
+        }
+        return baseStr
+    }
+
+    private static func isTunnelOrPrivateIPv6(_ b: [UInt8]) -> Bool {
+        guard b.count == 16 else { return false }
+        let isAllZero = b.allSatisfy { $0 == 0 }
+        let isLoopback = b[0..<15].allSatisfy { $0 == 0 } && b[15] == 1
+        if isAllZero || isLoopback { return false }
+        let isULA = (b[0] & 0xFE) == 0xFC // fc00::/7 includes fd... LocalDev/CDTunnel ULA
+        let isLinkLocal = b[0] == 0xFE && (b[1] & 0xC0) == 0x80
+        return isULA || isLinkLocal
+    }
+
+    /// Scans active `utun` interfaces via `getifaddrs()` (`IFF_UP | IFF_RUNNING`, IPv4 + IPv6 `fd...`/`fe80::%utunX` + `ifa_dstaddr`)
+    /// and orders tunnel endpoints: `utun` IPv4 `dstaddr` -> `utun` peer / `10.7.0.1` & `10.7.0.0` -> `utun` IPv6 -> `127.0.0.1` fallback.
     @discardableResult
     public func detectTunnelEndpoints(port: UInt16 = 62078) -> [LocalDevTunnelEndpoint] {
         var dstEndpoints: [LocalDevTunnelEndpoint] = []
         var gatewayEndpoints: [LocalDevTunnelEndpoint] = []
+        var ipv6Endpoints: [LocalDevTunnelEndpoint] = []
         var preferred107Iface: String? = nil
         var utunSummaries: [String] = []
 
@@ -807,6 +857,50 @@ public final class LocalDevBridge: ObservableObject {
                 guard isUpRunning, !isLoopback, let cName = ifa.ifa_name else { continue }
                 let name = String(cString: cName)
                 guard name.hasPrefix("utun") else { continue }
+
+                if let sa = ifa.ifa_addr, sa.pointee.sa_family == sa_family_t(AF_INET6) {
+                    if let localV6 = Self.extractIPv6Bytes(from: sa), Self.isTunnelOrPrivateIPv6(localV6) {
+                        let isULA = (localV6[0] & 0xFE) == 0xFC
+                        if let localV6Str = Self.formatIPv6(localV6, ifaceScope: name) {
+                            utunSummaries.append("\(name)(v6:\(localV6Str))")
+                        }
+                        if (flags & IFF_POINTOPOINT) != 0,
+                           let dstV6 = Self.extractIPv6Bytes(from: ifa.ifa_dstaddr),
+                           Self.isTunnelOrPrivateIPv6(dstV6),
+                           dstV6 != localV6,
+                           let dstV6Str = Self.formatIPv6(dstV6, ifaceScope: name) {
+                            ipv6Endpoints.append(LocalDevTunnelEndpoint(
+                                host: dstV6Str,
+                                port: port,
+                                iface: name,
+                                source: isULA ? "utun-v6-ula-dst" : "utun-v6-ll-dst"
+                            ))
+                        }
+                        if isULA && (localV6[14] != 0 || localV6[15] != 1) {
+                            var peerV6 = localV6
+                            peerV6[14] = 0
+                            peerV6[15] = 1
+                            if let peerV6Str = Self.formatIPv6(peerV6, ifaceScope: name) {
+                                ipv6Endpoints.append(LocalDevTunnelEndpoint(
+                                    host: peerV6Str,
+                                    port: port,
+                                    iface: name,
+                                    source: "utun-v6-ula-peer"
+                                ))
+                            }
+                        }
+                        if let localV6Str = Self.formatIPv6(localV6, ifaceScope: name) {
+                            ipv6Endpoints.append(LocalDevTunnelEndpoint(
+                                host: localV6Str,
+                                port: port,
+                                iface: name,
+                                source: isULA ? "utun-v6-ula" : "utun-v6-ll"
+                            ))
+                        }
+                    }
+                    continue
+                }
+
                 guard let localIP = Self.extractIPv4HostOrder(from: ifa.ifa_addr),
                       Self.isPrivateOrTunnelIPv4(localIP) else { continue }
 
@@ -870,12 +964,14 @@ public final class LocalDevBridge: ObservableObject {
         // Prioritize LocalDevVPN 10.7.x endpoints ahead of non-10.7 system `utun` interfaces
         dstEndpoints.sort { ($0.host.hasPrefix("10.7.") ? 0 : 1) < ($1.host.hasPrefix("10.7.") ? 0 : 1) }
         gatewayEndpoints.sort { ($0.host.hasPrefix("10.7.") ? 0 : 1) < ($1.host.hasPrefix("10.7.") ? 0 : 1) }
+        ipv6Endpoints.sort { ($0.host.hasPrefix("fd") ? 0 : 1) < ($1.host.hasPrefix("fd") ? 0 : 1) }
 
         var rawOrdered: [LocalDevTunnelEndpoint] = []
         rawOrdered.append(contentsOf: dstEndpoints)
         rawOrdered.append(contentsOf: gatewayEndpoints)
         rawOrdered.append(LocalDevTunnelEndpoint(host: "10.7.0.1", port: port, iface: preferred107Iface, source: "standard-localdev"))
         rawOrdered.append(LocalDevTunnelEndpoint(host: "10.7.0.0", port: port, iface: preferred107Iface, source: "standard-localdev"))
+        rawOrdered.append(contentsOf: ipv6Endpoints)
         rawOrdered.append(LocalDevTunnelEndpoint(host: "127.0.0.1", port: port, iface: "lo0", source: "loopback-fallback"))
 
         var deduplicated: [LocalDevTunnelEndpoint] = []
@@ -926,12 +1022,14 @@ public final class LocalDevBridge: ObservableObject {
         log("localdev: code=\(status.code) [\(status.status)] — \(status.message)")
     }
 
-    /// Pre-warms iOS Local Network NECP policy using `Network.framework` (`NWPathMonitor` + `NWListener` + `NWBrowser` on declared `NSBonjourServices` + `NWConnection` toward discovered `utun`/LocalDev targets) and waits until `.ready`, denial, or bounded timeout (~1.5s) before Rust opens sockets.
+    /// Pre-warms iOS Local Network NECP policy using `Network.framework` (`NWPathMonitor` + `NWListener` + `NWBrowser` on declared `NSBonjourServices`).
+    /// Only opens an active TCP `NWConnection` probe when `openTcpProbe == true` (avoiding throwaway connect+RST on port `62078` before Rust handshake).
     @discardableResult
     public func prewarmLocalNetworkSynchronously(
         targetHosts: [String]? = nil,
         port: UInt16 = 62078,
         force: Bool = false,
+        openTcpProbe: Bool = false,
         timeoutMs: Int = 1500
     ) -> Int32 {
         let now = ProcessInfo.processInfo.systemUptime
@@ -1059,6 +1157,9 @@ public final class LocalDevBridge: ObservableObject {
                         if serviceType == "_apple-mobdev2._tcp" || serviceType == "_remotepairing._tcp" {
                             log("localdev: NWBrowser(\(serviceType)) ready")
                         }
+                        if !openTcpProbe && !denied {
+                            settle(1, false, port, nil)
+                        }
                     case .waiting(let err):
                         if case .posix(let code) = err, code == .EPERM {
                             log("localdev: NWBrowser(\(serviceType)) waiting EPERM")
@@ -1082,8 +1183,8 @@ public final class LocalDevBridge: ObservableObject {
             }
             self.activeProbeBrowsers = browsers
 
-            // 4. NWConnection pre-warm probes toward prioritized dynamic `utun` / LocalDev hosts
-            if let nwPort = NWEndpoint.Port(rawValue: port) {
+            // 4. NWConnection TCP probe only when explicitly requested (`openTcpProbe == true`) so normal refresh doesn't abort sockets on 62078
+            if openTcpProbe, let nwPort = NWEndpoint.Port(rawValue: port) {
                 var conns: [NWConnection] = []
                 for probeHost in probeTargets {
                     let tcpOptions = NWProtocolTCP.Options()
@@ -1204,6 +1305,7 @@ public final class LocalDevBridge: ObservableObject {
                 targetHosts: targets.isEmpty ? ["10.7.0.1", "10.7.0.0"] : targets,
                 port: 62078,
                 force: true,
+                openTcpProbe: true,
                 timeoutMs: 1500
             )
             self.refreshStatusOnWorkerQueue(forcePrewarm: false, precomputedCandidates: candidates)

@@ -7,7 +7,7 @@ use std::collections::HashMap;
 use std::ffi::{c_char, CString};
 use std::fmt;
 use std::io::{self, Read, Write};
-use std::net::{SocketAddr, TcpStream};
+use std::net::{Ipv6Addr, SocketAddr, SocketAddrV6, TcpStream};
 #[cfg(unix)]
 use std::os::unix::io::{FromRawFd, RawFd};
 #[cfg(unix)]
@@ -531,6 +531,44 @@ fn is_permission_denied_io(err: &io::Error) -> bool {
         || matches!(err.raw_os_error(), Some(1) | Some(13))
 }
 
+fn format_endpoint_label(ip: &str, port: u16) -> String {
+    if ip.contains(':') {
+        format!("[{}]:{}", ip, port)
+    } else {
+        format!("{}:{}", ip, port)
+    }
+}
+
+fn resolve_socket_addr(ip: &str, port: u16, stage: LockdownStage) -> Result<SocketAddr, LockdownError> {
+    if let Some((addr_part, zone)) = ip.split_once('%') {
+        let v6: Ipv6Addr = addr_part.parse().map_err(|e| {
+            LockdownError::new(
+                LockdownErrorKind::ProtocolError,
+                stage,
+                format!("Invalid IPv6 address {}: {}", ip, e),
+            )
+        })?;
+        #[cfg(unix)]
+        let scope_id = if let Ok(c_zone) = CString::new(zone) {
+            unsafe { libc::if_nametoindex(c_zone.as_ptr()) }
+        } else {
+            0
+        };
+        #[cfg(not(unix))]
+        let scope_id = zone.parse::<u32>().unwrap_or(0);
+        return Ok(SocketAddr::V6(SocketAddrV6::new(v6, port, 0, scope_id)));
+    }
+
+    let addr_str = format_endpoint_label(ip, port);
+    addr_str.parse().map_err(|e| {
+        LockdownError::new(
+            LockdownErrorKind::ProtocolError,
+            stage,
+            format!("Invalid IP address {}: {}", addr_str, e),
+        )
+    })
+}
+
 fn connect_transport(
     ip: &str,
     port: u16,
@@ -538,14 +576,8 @@ fn connect_transport(
     stage: LockdownStage,
     prefer_relay_first: bool,
 ) -> Result<(TransportStream, bool), LockdownError> {
-    let addr_str = format!("{}:{}", ip, port);
-    let addr: SocketAddr = addr_str.parse().map_err(|e| {
-        LockdownError::new(
-            LockdownErrorKind::ProtocolError,
-            stage,
-            format!("Invalid IP address {}: {}", addr_str, e),
-        )
-    })?;
+    let addr_str = format_endpoint_label(ip, port);
+    let addr = resolve_socket_addr(ip, port, stage)?;
 
     if prefer_relay_first {
         if let Some(relay_res) = invoke_nw_relay_connect(ip, port, timeout, stage) {
@@ -672,6 +704,35 @@ impl LockdownClient {
     }
 
     fn connect_once(ip: &str, port: u16, pairing: &PairingFile) -> Result<Self, LockdownError> {
+        match Self::connect_with_mode(ip, port, pairing, true) {
+            Ok(client) => Ok(client),
+            // If peer resets directly at `QueryType` (or plaintext pre-auth `GetValue`) over LocalDevVPN 62078,
+            // reopen once skipping `QueryType` and negotiating `StartSession` directly over Lockdownd TCP.
+            Err(first_err)
+                if matches!(
+                    first_err.stage,
+                    LockdownStage::QueryType | LockdownStage::GetValue
+                ) && matches!(
+                    first_err.kind,
+                    LockdownErrorKind::SocketReset | LockdownErrorKind::ProtocolError
+                ) =>
+            {
+                match Self::connect_with_mode(ip, port, pairing, false) {
+                    Ok(client) => Ok(client),
+                    Err(_) => Err(first_err),
+                }
+            }
+            Err(err) => Err(err),
+        }
+    }
+
+    fn connect_with_mode(
+        ip: &str,
+        port: u16,
+        pairing: &PairingFile,
+        run_query_type: bool,
+    ) -> Result<Self, LockdownError> {
+        // Direct Lockdownd over TCP (NO 16-byte `usbmuxd` header on port 62078)
         let (mut plain_transport, used_nw_relay) = connect_transport(
             ip,
             port,
@@ -681,23 +742,55 @@ impl LockdownClient {
         )?;
         plain_transport.set_timeouts(HANDSHAKE_IO_TIMEOUT_SECS, HANDSHAKE_IO_TIMEOUT_SECS);
 
-        // 1. QueryType handshake
-        let mut query = HashMap::new();
-        query.insert("Request".to_string(), PlistValue::String("QueryType".to_string()));
-        send_plist_for_stage(&mut plain_transport, &query, LockdownStage::QueryType)?;
+        let mut early_udid: Option<String> = None;
 
-        let query_resp = read_plist_for_stage(&mut plain_transport, LockdownStage::QueryType)?;
-        if let Some(err) = query_resp.get_string("Error") {
-            return Err(LockdownError::new(
-                LockdownErrorKind::ProtocolError,
-                LockdownStage::QueryType,
-                format!("Lockdown QueryType rejected: {}", err),
-            ));
+        if run_query_type {
+            // 1. QueryType handshake (with standard Label attribute, coalesced 4-byte BE length + XML plist)
+            let mut query = HashMap::new();
+            query.insert("Label".to_string(), PlistValue::String("3105".to_string()));
+            query.insert(
+                "Request".to_string(),
+                PlistValue::String("QueryType".to_string()),
+            );
+            send_plist_for_stage(&mut plain_transport, &query, LockdownStage::QueryType)?;
+
+            let query_resp = read_plist_for_stage(&mut plain_transport, LockdownStage::QueryType)?;
+            if let Some(err) = query_resp.get_string("Error") {
+                return Err(LockdownError::new(
+                    LockdownErrorKind::ProtocolError,
+                    LockdownStage::QueryType,
+                    format!("Lockdown QueryType rejected: {}", err),
+                ));
+            }
+
+            // 2. Plaintext GetValue(UniqueDeviceID) probe per Lockdownd flow; ignore non-fatal auth deferral
+            let mut pre_udid_req = HashMap::new();
+            pre_udid_req.insert("Label".to_string(), PlistValue::String("3105".to_string()));
+            pre_udid_req.insert("Request".to_string(), PlistValue::String("GetValue".to_string()));
+            pre_udid_req.insert(
+                "Key".to_string(),
+                PlistValue::String("UniqueDeviceID".to_string()),
+            );
+            if send_plist_for_stage(&mut plain_transport, &pre_udid_req, LockdownStage::GetValue).is_ok() {
+                if let Ok(resp) = read_plist_for_stage(&mut plain_transport, LockdownStage::GetValue) {
+                    if let Some(v) = resp.get_string("Value").filter(|s| !s.is_empty()) {
+                        early_udid = Some(v);
+                    }
+                }
+            }
         }
 
-        // 2. StartSession over plaintext (iOS lockdownd negotiates EnableSessionSSL here)
+        // 3. StartSession over plaintext (iOS lockdownd negotiates EnableSessionSSL here)
         let mut session_req = HashMap::new();
-        session_req.insert("Request".to_string(), PlistValue::String("StartSession".to_string()));
+        session_req.insert("Label".to_string(), PlistValue::String("3105".to_string()));
+        session_req.insert(
+            "ProtocolVersion".to_string(),
+            PlistValue::String("2".to_string()),
+        );
+        session_req.insert(
+            "Request".to_string(),
+            PlistValue::String("StartSession".to_string()),
+        );
         session_req.insert("HostID".to_string(), PlistValue::String(pairing.host_id.clone()));
         session_req.insert(
             "SystemBUID".to_string(),
@@ -733,7 +826,7 @@ impl LockdownClient {
             .and_then(|v| v.as_bool())
             .unwrap_or(false);
 
-        // 3. Upgrade TCP/relay socket to mutual-auth TLS when EnableSessionSSL is true
+        // 4. Upgrade TCP/relay socket to mutual-auth TLS when EnableSessionSSL is true
         let mut stream = if enable_ssl {
             let tls = build_tls_stream(plain_transport, pairing, LockdownStage::TlsUpgrade)?;
             LockdownStream::Tls(Box::new(tls))
@@ -741,8 +834,9 @@ impl LockdownClient {
             LockdownStream::Plain(plain_transport)
         };
 
-        // 4. Encrypted GetValue(UniqueDeviceID) completes the lazy TLS handshake safely
+        // 5. Encrypted GetValue(UniqueDeviceID) completes the TLS handshake and verifies session
         let mut udid_req = HashMap::new();
+        udid_req.insert("Label".to_string(), PlistValue::String("3105".to_string()));
         udid_req.insert("Request".to_string(), PlistValue::String("GetValue".to_string()));
         udid_req.insert("Key".to_string(), PlistValue::String("UniqueDeviceID".to_string()));
         send_plist_for_stage(&mut stream, &udid_req, LockdownStage::GetValue)?;
@@ -760,7 +854,10 @@ impl LockdownClient {
                 format!("Lockdown GetValue rejected: {}", err),
             ));
         }
-        let device_udid = udid_resp.get_string("Value").filter(|s| !s.is_empty());
+        let device_udid = udid_resp
+            .get_string("Value")
+            .filter(|s| !s.is_empty())
+            .or(early_udid);
 
         Ok(Self {
             ip: ip.to_string(),
@@ -786,6 +883,7 @@ impl LockdownClient {
             .ok_or_else(|| "Lockdown not connected".to_string())?;
 
         let mut req = HashMap::new();
+        req.insert("Label".to_string(), PlistValue::String("3105".to_string()));
         req.insert("Request".to_string(), PlistValue::String("StartService".to_string()));
         req.insert("Service".to_string(), PlistValue::String(service_name.to_string()));
         send_plist_for_stage(stream, &req, LockdownStage::StartService)
@@ -834,8 +932,39 @@ impl LockdownClient {
     }
 }
 
+/// Probes RSD (port 58783 HTTP/2 RemoteXPC preface) and RemotePairing (port 49152) across active IPv4/IPv6 endpoints.
+pub fn probe_rsd_and_remotepairing(hosts: &[String]) -> Vec<String> {
+    let timeout = Duration::from_millis(700);
+    let mut findings = Vec::new();
+    // Standard RFC 7540 HTTP/2 client connection preface + empty SETTINGS frame
+    const H2_PREFACE_SETTINGS: &[u8] = b"PRI * HTTP/2.0\r\n\r\nSM\r\n\r\n\x00\x00\x00\x04\x00\x00\x00\x00\x00";
+
+    for host in hosts.iter().take(4) {
+        if let Ok((mut stream, _)) = connect_transport(host, 58783, timeout, LockdownStage::Protocol, false) {
+            stream.set_timeouts(1, 1);
+            let mut h2_status = "TCP_OPEN".to_string();
+            if stream.write_all(H2_PREFACE_SETTINGS).is_ok() && stream.flush().is_ok() {
+                let mut hdr = [0u8; 9];
+                if let Ok(n) = stream.read(&mut hdr) {
+                    if n >= 9 && hdr[3] == 0x04 {
+                        h2_status = "HTTP2_SETTINGS_OK".to_string();
+                    } else if n > 0 {
+                        h2_status = format!("RESP_{}B", n);
+                    }
+                }
+            }
+            findings.push(format!("{} -> RSD:58783={}", format_endpoint_label(host, 58783), h2_status));
+        }
+
+        if let Ok((_stream, _)) = connect_transport(host, 49152, timeout, LockdownStage::Protocol, false) {
+            findings.push(format!("{} -> RemotePairing:49152=OPEN", format_endpoint_label(host, 49152)));
+        }
+    }
+    findings
+}
+
 // ==============================================================================
-// 4-BYTE BIG-ENDIAN PACKET FRAMING (safe non-panicking read/write with stage info)
+// 4-BYTE BIG-ENDIAN PACKET FRAMING (atomic length+payload write, safe read)
 // ==============================================================================
 
 fn send_plist_for_stage<W: Write>(
@@ -846,8 +975,10 @@ fn send_plist_for_stage<W: Write>(
     let xml = serialize_xml_dict(dict);
     let bytes = xml.as_bytes();
     let len = bytes.len() as u32;
-    write_all_safe(stream, &len.to_be_bytes(), stage, "Write length failed")?;
-    write_all_safe(stream, bytes, stage, "Write payload failed")?;
+    let mut frame = Vec::with_capacity(4 + bytes.len());
+    frame.extend_from_slice(&len.to_be_bytes());
+    frame.extend_from_slice(bytes);
+    write_all_safe(stream, &frame, stage, "Write packet failed")?;
     Ok(())
 }
 

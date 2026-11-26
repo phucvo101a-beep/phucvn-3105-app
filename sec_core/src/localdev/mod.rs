@@ -221,7 +221,19 @@ impl LocalDevManager {
                     let _ = std::fs::remove_file(dir.join("pairing.plist"));
                     let _ = std::fs::write(dir.join("remote_pairing.plist"), data);
                 }
-                Ok(remote_pairing_unsupported_report(self.host.clone(), self.port))
+                let probe_hosts: Vec<String> = self
+                    .effective_candidates()
+                    .into_iter()
+                    .filter(|c| c.host != "127.0.0.1")
+                    .map(|c| c.host)
+                    .collect();
+                let rsd_notes = tunnel::probe_rsd_and_remotepairing(&probe_hosts);
+                Ok(remote_pairing_unsupported_report(
+                    self.host.clone(),
+                    self.port,
+                    self.active_iface.clone(),
+                    &rsd_notes,
+                ))
             }
             Err(err) => Err(err),
         }
@@ -237,7 +249,19 @@ impl LocalDevManager {
             if remote_path.exists() && !has_saved {
                 self.active_pairing = None;
                 self.heartbeat.stop();
-                return Ok(remote_pairing_unsupported_report(self.host.clone(), self.port));
+                let probe_hosts: Vec<String> = self
+                    .effective_candidates()
+                    .into_iter()
+                    .filter(|c| c.host != "127.0.0.1")
+                    .map(|c| c.host)
+                    .collect();
+                let rsd_notes = tunnel::probe_rsd_and_remotepairing(&probe_hosts);
+                return Ok(remote_pairing_unsupported_report(
+                    self.host.clone(),
+                    self.port,
+                    self.active_iface.clone(),
+                    &rsd_notes,
+                ));
             }
             if !has_saved {
                 self.active_pairing = None;
@@ -248,7 +272,19 @@ impl LocalDevManager {
                         Ok(loaded) => self.active_pairing = Some(loaded),
                         Err(err) if err.starts_with("REMOTE_PAIRING_UNSUPPORTED:") => {
                             self.heartbeat.stop();
-                            return Ok(remote_pairing_unsupported_report(self.host.clone(), self.port));
+                            let probe_hosts: Vec<String> = self
+                                .effective_candidates()
+                                .into_iter()
+                                .filter(|c| c.host != "127.0.0.1")
+                                .map(|c| c.host)
+                                .collect();
+                            let rsd_notes = tunnel::probe_rsd_and_remotepairing(&probe_hosts);
+                            return Ok(remote_pairing_unsupported_report(
+                                self.host.clone(),
+                                self.port,
+                                self.active_iface.clone(),
+                                &rsd_notes,
+                            ));
                         }
                         Err(err) => {
                             self.heartbeat.stop();
@@ -337,10 +373,26 @@ impl LocalDevManager {
             }
         }
 
+        let probe_hosts: Vec<String> = self
+            .effective_candidates()
+            .into_iter()
+            .filter(|c| c.host != "127.0.0.1")
+            .map(|c| c.host)
+            .collect();
+        let rsd_notes = if attempts
+            .iter()
+            .any(|a| matches!(a.err.kind, LockdownErrorKind::SocketReset | LockdownErrorKind::ProtocolError))
+        {
+            tunnel::probe_rsd_and_remotepairing(&probe_hosts)
+        } else {
+            Vec::new()
+        };
+
         Ok(build_multi_failure_report(
             &attempts,
             self.local_network_state,
             &pairing.udid,
+            &rsd_notes,
         ))
     }
 
@@ -388,6 +440,7 @@ fn build_multi_failure_report(
     attempts: &[EndpointAttempt],
     local_network_state: i32,
     udid: &str,
+    rsd_notes: &[String],
 ) -> LocalDevStatusReport {
     let summary = format_attempts_summary(attempts);
     let fallback = EndpointAttempt {
@@ -437,12 +490,17 @@ fn build_multi_failure_report(
             .as_deref()
             .map(|i| format!(" ({})", i))
             .unwrap_or_default();
+        let rsd_suffix = if rsd_notes.is_empty() {
+            String::new()
+        } else {
+            format!(" | Dò RSD/RP: [{}]", rsd_notes.join(", "))
+        };
         return LocalDevStatusReport {
             code: LocalDevStatusCode::TunnelReset as i32,
             status: "SOCKET/DAEMON RESET KHI BẮT TAY".to_string(),
             message: format!(
-                "Socket {}:{}{} bị ngắt ở bước [{}] ({}). Thử: [{}]. Sandbox & Nhật ký USB vẫn hoạt động bình thường.",
-                a.cand.host, a.cand.port, via, a.err.stage, a.err.detail, summary
+                "Socket {}:{}{} bị ngắt ở bước [{}] ({}). Thử: [{}]{}. Trên iOS 27.2.1 hãy kiểm tra tệp pairing Lockdown (HostCertificate/HostID còn hiệu lực) hoặc cấu hình LocalDevVPN; Sandbox & Nhật ký USB vẫn hoạt động bình thường.",
+                a.cand.host, a.cand.port, via, a.err.stage, a.err.detail, summary, rsd_suffix
             ),
             host: a.cand.host.clone(),
             port: a.cand.port,
@@ -543,14 +601,27 @@ fn build_multi_failure_report(
     }
 }
 
-fn remote_pairing_unsupported_report(host: String, port: u16) -> LocalDevStatusReport {
+fn remote_pairing_unsupported_report(
+    host: String,
+    port: u16,
+    iface: Option<String>,
+    rsd_notes: &[String],
+) -> LocalDevStatusReport {
+    let rsd_info = if rsd_notes.is_empty() {
+        "Chưa phát hiện cổng RSD:58783/RP:49152 mở sẵn trên utun".to_string()
+    } else {
+        format!("Dò tunnel: [{}]", rsd_notes.join(", "))
+    };
     LocalDevStatusReport {
         code: LocalDevStatusCode::RemotePairingUnsupported as i32,
-        status: "CHƯA HỖ TRỢ REMOTE PAIRING".to_string(),
-        message: "File pairing này thuộc chuẩn Remote Pairing (idevice pair v1.2.0: public_key / private_key / identifier / alt_irk). Core libsec_core.dylib hiện chỉ hỗ trợ USB Lockdown X.509 cổ điển (HostCertificate & HostID) qua cổng 62078. Hãy tạo/nhập tệp .mobiledevicepairing chuẩn Lockdown, hoặc tắt LocalDev để dùng thẳng Sandbox & Nhật ký USB.".to_string(),
+        status: "REMOTE PAIRING / CHƯA CÓ X.509 LOCKDOWN".to_string(),
+        message: format!(
+            "Đã nhận diện file Remote Pairing (public_key/private_key/identifier/alt_irk). {} — Core libsec_core.dylib hiện kết nối AFC/HouseArrest qua Direct Lockdown X.509 (`HostCertificate` + `HostPrivateKey` trên cổng 62078), chưa bao gồm đầy đủ ngăn xếp TLS-PSK/CDTunnel/RemoteXPC HTTP2 cho RPPairing. Hãy xuất pairing chuẩn Lockdown X.509 hoặc tắt LocalDev để dùng thẳng Sandbox & Nhật ký USB.",
+            rsd_info
+        ),
         host,
         port,
-        interface_name: None,
+        interface_name: iface,
         udid: None,
         is_heartbeat_alive: false,
     }

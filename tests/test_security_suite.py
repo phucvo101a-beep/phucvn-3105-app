@@ -1315,8 +1315,13 @@ class SecuritySuiteTests(unittest.TestCase):
             "NW_RELAY_CONNECT_CB",
             "EPERM_PREWARM_RETRY_COUNT",
             "TransportStream::Relay",
+            "resolve_socket_addr",
+            "probe_rsd_and_remotepairing",
         ):
             self.assertIn(needle, tunnel_rs)
+
+        plist_rs = (REPO_ROOT / "sec_core" / "src" / "localdev" / "plist_util.rs").read_text("utf-8")
+        self.assertIn("keys.sort()", plist_rs)
 
         ffi_rs = (REPO_ROOT / "sec_core" / "src" / "localdev" / "ffi.rs").read_text("utf-8")
         self.assertIn("localdev_register_nw_callbacks", ffi_rs)
@@ -1329,6 +1334,7 @@ class SecuritySuiteTests(unittest.TestCase):
             "NWBrowser",
             "getifaddrs",
             "IFF_POINTOPOINT",
+            "AF_INET6",
             "detectTunnelEndpoints",
             "10.7.0.1",
             "10.7.0.0",
