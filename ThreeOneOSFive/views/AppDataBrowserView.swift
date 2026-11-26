@@ -140,18 +140,22 @@ struct AppDataBrowserView: View {
                     .padding(.top, 9)
                     .padding(.bottom, 2)
 
-                LocalDevStatusCard()
-                    .padding(.bottom, 2)
-
-                if !apps.isEmpty {
-                    appSearchField
-                        .padding(.bottom, 2)
-                }
-
                 if horizontalSizeClass == .regular {
                     FilesTabStrip(session: $tabSession)
                         .padding(.bottom, 2)
                 }
+
+                // MARK: - Section 1: Independent Own-Sandbox & USB Diagnostics (always available)
+                VStack(alignment: .leading, spacing: 2) {
+                    Text("DỮ LIỆU NỘI BỘ & HỘP CÁT (SANDBOX)")
+                        .font(.system(size: 10, weight: .heavy, design: .rounded))
+                        .tracking(1.25)
+                        .foregroundStyle(AppTheme.success)
+                    Text("Luôn khả dụng qua API iOS chuẩn — độc lập hoàn toàn với LocalDev & Pairing")
+                        .font(.system(size: 10, weight: .medium))
+                        .foregroundStyle(AppTheme.subduedText)
+                }
+                .padding(.horizontal, 3)
 
                 if let workspaceURL {
                     workspaceCard(workspaceURL)
@@ -167,6 +171,27 @@ struct AppDataBrowserView: View {
 
                 if !ContainerStore.hasPrivilegedContainerAccess() {
                     sandboxScopeNoticeCard
+                }
+
+                // MARK: - Section 2: Optional LocalDev / Pairing Tunnel Extension
+                VStack(alignment: .leading, spacing: 2) {
+                    Text("KẾT NỐI MỞ RỘNG LOCALDEV (TÙY CHỌN VPN / PAIRING)")
+                        .font(.system(size: 10, weight: .heavy, design: .rounded))
+                        .tracking(1.25)
+                        .foregroundStyle(AppTheme.accentSoft)
+                    Text("Chỉ cần khi duyệt Documents / container ngoài app; lỗi ở đây không ảnh hưởng Sandbox hay Nhật ký USB")
+                        .font(.system(size: 10, weight: .medium))
+                        .foregroundStyle(AppTheme.subduedText)
+                }
+                .padding(.horizontal, 3)
+                .padding(.top, 8)
+
+                LocalDevStatusCard()
+                    .padding(.bottom, 2)
+
+                if !apps.isEmpty {
+                    appSearchField
+                        .padding(.bottom, 2)
                 }
 
                 appDataScannerSection
@@ -940,13 +965,14 @@ struct AppDataBrowserView: View {
             }
         }
 
-        if LocalDevBridge.shared.currentStatus.isLive {
+        if LocalDevBridge.shared.currentStatusSnapshot.isLive {
             LocalDevBridge.shared.scanApplications { scannedApps in
                 guard requestID == reloadGeneration else { return }
                 finishWithApps(scannedApps)
             }
         } else {
-            finishWithApps(LocalDevBridge.shared.installedApps)
+            // Keep own-Sandbox app discovery completely functional even if LocalDev/Pairing has failed.
+            finishWithApps([])
         }
     }
 }

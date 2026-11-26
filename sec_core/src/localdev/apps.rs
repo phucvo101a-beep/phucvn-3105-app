@@ -40,9 +40,6 @@ impl AppScanner {
         let mut last_err = String::new();
 
         for target_ip in candidate_ips {
-            if !LockdownClient::test_tunnel_reachability(target_ip, port) {
-                continue;
-            }
             match LockdownClient::connect(target_ip, port, pairing) {
                 Ok(client) => {
                     lockdown_client = Some(client);

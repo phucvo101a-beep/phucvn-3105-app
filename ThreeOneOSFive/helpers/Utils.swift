@@ -61,6 +61,7 @@ class AppLog: ObservableObject {
         let fileSharingEnabled = (Bundle.main.object(forInfoDictionaryKey: "UIFileSharingEnabled") as? Bool) ?? false
         let openInPlaceEnabled = (Bundle.main.object(forInfoDictionaryKey: "LSSupportsOpeningDocumentsInPlace") as? Bool) ?? false
 
+        let ldSnapshot = LocalDevBridge.shared.currentStatusSnapshot
         var payload: [String: Any] = [
             "generated_at": Self.isoTimestamp(),
             "bundle_id": Bundle.main.bundleIdentifier ?? "",
@@ -81,8 +82,9 @@ class AppLog: ObservableObject {
                 minor: AppInfo.versionTuple.minor,
                 patch: AppInfo.versionTuple.patch
             ),
-            "localdev_code": LocalDevBridge.shared.currentStatus.code,
-            "localdev_status": LocalDevBridge.shared.currentStatus.status
+            "localdev_code": ldSnapshot.code,
+            "localdev_status": ldSnapshot.status,
+            "localdev_message": Self.sanitizeForDiagnostics(ldSnapshot.message)
         ]
         for (k, v) in extra {
             payload[k] = Self.sanitizeForDiagnostics(v)

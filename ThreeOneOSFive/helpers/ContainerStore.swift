@@ -214,8 +214,9 @@ enum ContainerStore {
         if hasPrivilegedContainerAccess() {
             return .privilegedSandboxAccess
         }
-        if LocalDevBridge.shared.currentStatus.isLive {
-            return .localDevTunnel(udid: LocalDevBridge.shared.currentStatus.udid)
+        let snapshot = LocalDevBridge.shared.currentStatusSnapshot
+        if snapshot.isLive {
+            return .localDevTunnel(udid: snapshot.udid)
         }
         return .appSandboxOnly(iosVersion: AppInfo.osVersion)
     }

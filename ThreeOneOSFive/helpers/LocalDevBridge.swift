@@ -94,6 +94,7 @@ public enum LocalDevCode: Int {
     case vpnDisconnected = 3
     case localNetworkDenied = 4
     case pairingExpiredOrCorrupt = 5
+    case tunnelReset = 6
 }
 
 public struct LocalDevStatus: Codable {
@@ -208,6 +209,7 @@ public final class LocalDevBridge: ObservableObject {
     )
     @Published public var installedApps: [LocalDevApp] = []
     @Published public var isScanning: Bool = false
+    @Published public var isCheckingStatus: Bool = false
     @Published public var lastError: String?
 
     private var storageDirectory: URL {
@@ -219,8 +221,38 @@ public final class LocalDevBridge: ObservableObject {
 
     private var isCoreInitialized = false
     private let coreInitLock = NSLock()
+    private let statusLock = NSLock()
+    private var _threadSafeStatus: LocalDevStatus = LocalDevStatus(
+        code: LocalDevCode.missingPairing.rawValue,
+        status: "CHƯA CÓ PAIRING FILE",
+        message: "Chưa nạp file ghép nối .mobiledevicepairing",
+        host: "10.7.0.1",
+        port: 62078,
+        udid: nil,
+        is_heartbeat_alive: false
+    )
+    private var isRefreshInFlight = false
     private let workerQueue = DispatchQueue(label: "com.phucvn.3105.localdev.worker", qos: .userInitiated)
     private var lastLoggedStatusKey: String = ""
+
+    public var currentStatusSnapshot: LocalDevStatus {
+        statusLock.lock()
+        defer { statusLock.unlock() }
+        return _threadSafeStatus
+    }
+
+    private func publishStatus(_ status: LocalDevStatus, lastError: String? = nil) {
+        statusLock.lock()
+        _threadSafeStatus = status
+        statusLock.unlock()
+        logStatusIfChanged(status)
+        DispatchQueue.main.async {
+            self.currentStatus = status
+            self.lastError = lastError
+            self.isCheckingStatus = false
+            AppLog.shared.writeDiagnosticsSnapshot()
+        }
+    }
 
     private init() {
         initCore()
@@ -309,25 +341,76 @@ public final class LocalDevBridge: ObservableObject {
     }
 
     public func refreshStatus() {
+        statusLock.lock()
+        if isRefreshInFlight {
+            statusLock.unlock()
+            return
+        }
+        isRefreshInFlight = true
+        statusLock.unlock()
+
+        DispatchQueue.main.async {
+            self.isCheckingStatus = true
+        }
+
         workerQueue.async { [weak self] in
             guard let self else { return }
+            defer {
+                self.statusLock.lock()
+                self.isRefreshInFlight = false
+                self.statusLock.unlock()
+            }
             self.ensureCoreInitialized()
             guard let fnStatus = LocalDevLib.shared.fnStatus,
-                  let cStr = fnStatus() else { return }
+                  let cStr = fnStatus() else {
+                DispatchQueue.main.async { self.isCheckingStatus = false }
+                return
+            }
             defer { LocalDevLib.shared.fnFreeString?(cStr) }
             let jsonStr = String(cString: cStr)
 
             if let data = jsonStr.data(using: .utf8),
                let status = try? JSONDecoder().decode(LocalDevStatus.self, from: data) {
-                self.logStatusIfChanged(status)
-                DispatchQueue.main.async {
-                    self.currentStatus = status
-                    if status.isLive {
-                        self.lastError = nil
-                    }
-                    AppLog.shared.writeDiagnosticsSnapshot()
+                let preservedError = (status.isLive || status.code == LocalDevCode.missingPairing.rawValue) ? nil : self.lastError
+                self.publishStatus(status, lastError: preservedError)
+            } else {
+                DispatchQueue.main.async { self.isCheckingStatus = false }
+            }
+        }
+    }
+
+    /// Removes only `.localdev` pairing artifacts without touching Sandbox `Documents`, `Patches`, or `3105-Diagnostics`.
+    public func clearSavedPairing() {
+        DispatchQueue.main.async {
+            self.isCheckingStatus = true
+        }
+        workerQueue.async { [weak self] in
+            guard let self else { return }
+            self.ensureCoreInitialized()
+            let dir = self.storageDirectory
+            for name in ["pairing.plist", "pairing.mobiledevicepairing"] {
+                try? FileManager.default.removeItem(at: dir.appendingPathComponent(name))
+            }
+            if let fnStatus = LocalDevLib.shared.fnStatus,
+               let cStr = fnStatus() {
+                defer { LocalDevLib.shared.fnFreeString?(cStr) }
+                let jsonStr = String(cString: cStr)
+                if let data = jsonStr.data(using: .utf8),
+                   let status = try? JSONDecoder().decode(LocalDevStatus.self, from: data) {
+                    self.publishStatus(status, lastError: nil)
+                    return
                 }
             }
+            let emptyStatus = LocalDevStatus(
+                code: LocalDevCode.missingPairing.rawValue,
+                status: "CHƯA CÓ PAIRING FILE",
+                message: "Đã xóa tệp pairing đã lưu. Bạn vẫn có thể duyệt Sandbox & Nhật ký USB bình thường.",
+                host: "10.7.0.1",
+                port: 62078,
+                udid: nil,
+                is_heartbeat_alive: false
+            )
+            self.publishStatus(emptyStatus, lastError: nil)
         }
     }
 
@@ -406,6 +489,9 @@ public final class LocalDevBridge: ObservableObject {
 
         // 2. Also forward to Rust core on workerQueue so TLS handshake never blocks UI
         let fallbackUDID = parsedUDID ?? filename
+        DispatchQueue.main.async {
+            self.isCheckingStatus = true
+        }
         workerQueue.async { [weak self] in
             guard let self else { return }
             self.ensureCoreInitialized()
@@ -416,31 +502,23 @@ public final class LocalDevBridge: ObservableObject {
                     let jsonStr = String(cString: cStr)
                     if let respData = jsonStr.data(using: .utf8),
                        let status = try? JSONDecoder().decode(LocalDevStatus.self, from: respData) {
-                        self.logStatusIfChanged(status)
-                        DispatchQueue.main.async {
-                            self.currentStatus = status
-                            self.lastError = status.isLive ? nil : status.message
-                            AppLog.shared.writeDiagnosticsSnapshot()
-                        }
+                        self.publishStatus(status, lastError: nil)
                         return
                     }
                 }
             }
 
             // 3. Simulator / preview fallback when libsec_core.dylib is not attached
-            DispatchQueue.main.async {
-                self.currentStatus = LocalDevStatus(
-                    code: LocalDevCode.live.rawValue,
-                    status: "ĐÃ KẾT NỐI LOCALDEV (LIVE)",
-                    message: "Ghép nối thiết bị thành công! Sẵn sàng quét dữ liệu.",
-                    host: "10.7.0.1",
-                    port: 62078,
-                    udid: fallbackUDID,
-                    is_heartbeat_alive: true
-                )
-                self.lastError = nil
-                AppLog.shared.writeDiagnosticsSnapshot()
-            }
+            let simStatus = LocalDevStatus(
+                code: LocalDevCode.live.rawValue,
+                status: "ĐÃ KẾT NỐI LOCALDEV (LIVE)",
+                message: "Ghép nối thiết bị thành công! Sẵn sàng quét dữ liệu.",
+                host: "10.7.0.1",
+                port: 62078,
+                udid: fallbackUDID,
+                is_heartbeat_alive: true
+            )
+            self.publishStatus(simStatus, lastError: nil)
         }
         return true
     }

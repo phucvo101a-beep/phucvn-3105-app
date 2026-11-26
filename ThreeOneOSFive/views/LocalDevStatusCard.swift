@@ -4,7 +4,6 @@ import UniformTypeIdentifiers
 public struct LocalDevStatusCard: View {
     @ObservedObject private var bridge = LocalDevBridge.shared
     @State private var showFilePicker = false
-    @State private var isChecking = false
 
     public init() {}
 
@@ -15,6 +14,7 @@ public struct LocalDevStatusCard: View {
         case 3: return Color.orange
         case 4: return Color.red
         case 5: return Color.red
+        case 6: return Color.yellow
         default: return Color.secondary
         }
     }
@@ -26,6 +26,7 @@ public struct LocalDevStatusCard: View {
         case 3: return "network.badge.shield.half.filled"
         case 4: return "hand.raised.fill"
         case 5: return "exclamationmark.triangle.fill"
+        case 6: return "bolt.slash.fill"
         default: return "questionmark.circle"
         }
     }
@@ -62,14 +63,11 @@ public struct LocalDevStatusCard: View {
                 Spacer()
 
                 Button {
-                    isChecking = true
                     bridge.refreshStatus()
-                    DispatchQueue.main.asyncAfter(deadline: .now() + 0.6) {
-                        isChecking = false
-                    }
                 } label: {
-                    if isChecking {
+                    if bridge.isCheckingStatus {
                         ProgressView().controlSize(.mini).tint(AppTheme.accent)
+                            .frame(width: 28, height: 28)
                     } else {
                         Image(systemName: "arrow.clockwise")
                             .font(.system(size: 13, weight: .bold))
@@ -78,6 +76,7 @@ public struct LocalDevStatusCard: View {
                             .background(AppTheme.accent.opacity(0.12), in: Circle())
                     }
                 }
+                .disabled(bridge.isCheckingStatus)
                 .buttonStyle(AppPressableStyle())
                 .accessibilityLabel("Kiểm tra lại kết nối")
             }
@@ -87,6 +86,21 @@ public struct LocalDevStatusCard: View {
                 .font(.system(size: 11, weight: .medium))
                 .foregroundStyle(Color.white.opacity(0.85))
                 .fixedSize(horizontal: false, vertical: true)
+
+            if !bridge.currentStatus.isLive {
+                HStack(alignment: .top, spacing: 6) {
+                    Image(systemName: "checkmark.circle.fill")
+                        .font(.system(size: 10, weight: .bold))
+                        .foregroundStyle(AppTheme.success)
+                    Text("Độc lập: Hộp cát Sandbox (Documents, Library, tmp), Kho bản vá & Nhật ký USB vẫn dùng bình thường.")
+                        .font(.system(size: 10, weight: .medium))
+                        .foregroundStyle(Color.white.opacity(0.75))
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+                .padding(.horizontal, 9)
+                .padding(.vertical, 6)
+                .background(AppTheme.success.opacity(0.10), in: RoundedRectangle(cornerRadius: 8, style: .continuous))
+            }
 
             if let err = bridge.lastError, !err.isEmpty {
                 HStack(alignment: .top, spacing: 6) {
@@ -144,7 +158,7 @@ public struct LocalDevStatusCard: View {
                         HStack(spacing: 6) {
                             Image(systemName: bridge.currentStatus.code == 1 ? "checkmark.circle.fill" : "doc.badge.plus")
                                 .font(.system(size: 11, weight: .bold))
-                            Text(bridge.currentStatus.code == 1 ? "Đổi Pairing" : "Chọn Pairing")
+                            Text(bridge.currentStatus.code == 2 ? "Chọn Pairing" : "Đổi Pairing")
                                 .font(.system(size: 11, weight: .bold))
                         }
                         .foregroundStyle(.white)
@@ -157,6 +171,25 @@ public struct LocalDevStatusCard: View {
                                 .strokeBorder(Color.white.opacity(0.18), lineWidth: 1)
                         }
                     }
+                    .buttonStyle(AppPressableStyle())
+                }
+
+                if bridge.currentStatus.code != LocalDevCode.missingPairing.rawValue {
+                    Button {
+                        bridge.clearSavedPairing()
+                    } label: {
+                        HStack(spacing: 5) {
+                            Image(systemName: "trash")
+                                .font(.system(size: 10, weight: .bold))
+                            Text("Xóa Pairing đã lưu")
+                                .font(.system(size: 10.5, weight: .semibold))
+                        }
+                        .foregroundStyle(Color.white.opacity(0.75))
+                        .frame(maxWidth: .infinity)
+                        .padding(.vertical, 6)
+                        .background(Color.white.opacity(0.06), in: RoundedRectangle(cornerRadius: 9, style: .continuous))
+                    }
+                    .disabled(bridge.isCheckingStatus)
                     .buttonStyle(AppPressableStyle())
                 }
 
