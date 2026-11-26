@@ -4,10 +4,15 @@
 use super::pairing::PairingFile;
 use super::plist_util::{parse_plist, serialize_xml_dict, PlistValue};
 use std::collections::HashMap;
+use std::ffi::{c_char, CString};
 use std::fmt;
 use std::io::{self, Read, Write};
 use std::net::{SocketAddr, TcpStream};
-use std::sync::Arc;
+#[cfg(unix)]
+use std::os::unix::io::{FromRawFd, RawFd};
+#[cfg(unix)]
+use std::os::unix::net::UnixStream;
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use rustls::client::danger::{HandshakeSignatureValid, ServerCertVerified, ServerCertVerifier};
@@ -17,7 +22,7 @@ use rustls::{
     StreamOwned,
 };
 
-pub const DEFAULT_LOCALDEV_IP: &str = "10.7.0.1";
+pub const DEFAULT_LOCALDEV_IP: &str = "127.0.0.1";
 pub const DEFAULT_LOCKDOWN_PORT: u16 = 62078;
 pub const REACHABILITY_TIMEOUT_MS: u64 = 1500;
 pub const HANDSHAKE_CONNECT_TIMEOUT_MS: u64 = 2200;
@@ -25,7 +30,74 @@ pub const HANDSHAKE_IO_TIMEOUT_SECS: u64 = 5;
 pub const SERVICE_CONNECT_TIMEOUT_SECS: u64 = 4;
 pub const MAX_HANDSHAKE_ATTEMPTS: usize = 2;
 pub const HANDSHAKE_RETRY_BACKOFF_MS: u64 = 180;
+pub const EPERM_PREWARM_RETRY_COUNT: usize = 3;
+pub const EPERM_RETRY_BACKOFF_MS: u64 = 250;
 const MAX_PLIST_PACKET_BYTES: usize = 16 * 1024 * 1024;
+
+pub type LocalDevNwPrewarmFn = extern "C" fn(host: *const c_char, port: u16) -> i32;
+pub type LocalDevNwRelayConnectFn =
+    extern "C" fn(host: *const c_char, port: u16, timeout_ms: u32, err_out: *mut i32) -> i32;
+
+static NW_PREWARM_CB: Mutex<Option<LocalDevNwPrewarmFn>> = Mutex::new(None);
+static NW_RELAY_CONNECT_CB: Mutex<Option<LocalDevNwRelayConnectFn>> = Mutex::new(None);
+
+pub fn register_nw_callbacks(
+    prewarm_cb: Option<LocalDevNwPrewarmFn>,
+    relay_connect_cb: Option<LocalDevNwRelayConnectFn>,
+) {
+    if let Ok(mut guard) = NW_PREWARM_CB.lock() {
+        *guard = prewarm_cb;
+    }
+    if let Ok(mut guard) = NW_RELAY_CONNECT_CB.lock() {
+        *guard = relay_connect_cb;
+    }
+}
+
+fn invoke_nw_prewarm(ip: &str, port: u16) -> Option<i32> {
+    let cb = NW_PREWARM_CB.lock().ok().and_then(|g| *g)?;
+    let c_host = CString::new(ip).ok()?;
+    Some(cb(c_host.as_ptr(), port))
+}
+
+fn invoke_nw_relay_connect(
+    ip: &str,
+    port: u16,
+    timeout: Duration,
+    stage: LockdownStage,
+) -> Option<Result<TransportStream, LockdownError>> {
+    let cb = NW_RELAY_CONNECT_CB.lock().ok().and_then(|g| *g)?;
+    let c_host = match CString::new(ip) {
+        Ok(s) => s,
+        Err(e) => {
+            return Some(Err(LockdownError::new(
+                LockdownErrorKind::ProtocolError,
+                stage,
+                format!("Invalid relay target '{}': {}", ip, e),
+            )));
+        }
+    };
+    let timeout_ms = timeout.as_millis().clamp(250, 15_000) as u32;
+    let mut raw_errno: i32 = 0;
+    let fd = cb(c_host.as_ptr(), port, timeout_ms, &mut raw_errno);
+    if fd >= 0 {
+        #[cfg(unix)]
+        {
+            let stream = unsafe { UnixStream::from_raw_fd(fd as RawFd) };
+            return Some(Ok(TransportStream::Relay(stream)));
+        }
+        #[cfg(not(unix))]
+        {
+            let _ = fd;
+        }
+    }
+    let code = if raw_errno > 0 { raw_errno } else { 1 };
+    let io_err = io::Error::from_raw_os_error(code);
+    Some(Err(classify_io_error(
+        io_err,
+        stage,
+        &format!("Failed to connect to LocalDevVPN at {}:{} via NWConnection", ip, port),
+    )))
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum LockdownStage {
@@ -106,7 +178,8 @@ fn classify_io_error(err: io::Error, stage: LockdownStage, prefix: &str) -> Lock
     } else if matches!(
         err.kind(),
         io::ErrorKind::WouldBlock | io::ErrorKind::TimedOut
-    ) || lower.contains("timed out")
+    ) || matches!(raw, Some(60) | Some(110))
+        || lower.contains("timed out")
     {
         LockdownErrorKind::Timeout
     } else if err.kind() == io::ErrorKind::InvalidData
@@ -264,30 +337,80 @@ impl ServerCertVerifier for DeviceCertVerifier {
     }
 }
 
-/// Active TLS stream over raw TCP stream
-pub type TlsStream = StreamOwned<ClientConnection, TcpStream>;
+/// Low-level socket transport supporting both direct POSIX TCP and Swift NWConnection relay
+pub enum TransportStream {
+    Tcp(TcpStream),
+    #[cfg(unix)]
+    Relay(UnixStream),
+}
+
+impl TransportStream {
+    pub fn set_timeouts(&self, read_secs: u64, write_secs: u64) {
+        match self {
+            TransportStream::Tcp(tcp) => {
+                tcp.set_read_timeout(Some(Duration::from_secs(read_secs))).ok();
+                tcp.set_write_timeout(Some(Duration::from_secs(write_secs))).ok();
+            }
+            #[cfg(unix)]
+            TransportStream::Relay(unix) => {
+                unix.set_read_timeout(Some(Duration::from_secs(read_secs))).ok();
+                unix.set_write_timeout(Some(Duration::from_secs(write_secs))).ok();
+            }
+        }
+    }
+}
+
+impl Read for TransportStream {
+    fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+        match self {
+            TransportStream::Tcp(tcp) => tcp.read(buf),
+            #[cfg(unix)]
+            TransportStream::Relay(unix) => unix.read(buf),
+        }
+    }
+}
+
+impl Write for TransportStream {
+    fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+        match self {
+            TransportStream::Tcp(tcp) => tcp.write(buf),
+            #[cfg(unix)]
+            TransportStream::Relay(unix) => unix.write(buf),
+        }
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        match self {
+            TransportStream::Tcp(tcp) => tcp.flush(),
+            #[cfg(unix)]
+            TransportStream::Relay(unix) => unix.flush(),
+        }
+    }
+}
+
+/// Active TLS stream over unified transport stream
+pub type TlsStream = StreamOwned<ClientConnection, TransportStream>;
 
 /// Unified transport stream for lockdownd and child services (`EnableServiceSSL` aware)
 pub enum LockdownStream {
-    Plain(TcpStream),
+    Plain(TransportStream),
     Tls(Box<TlsStream>),
 }
 
 impl LockdownStream {
     pub fn set_timeouts(&self, read_secs: u64, write_secs: u64) {
-        let tcp = match self {
-            LockdownStream::Plain(tcp) => tcp,
+        let transport = match self {
+            LockdownStream::Plain(t) => t,
             LockdownStream::Tls(tls) => tls.get_ref(),
         };
-        tcp.set_read_timeout(Some(Duration::from_secs(read_secs))).ok();
-        tcp.set_write_timeout(Some(Duration::from_secs(write_secs))).ok();
+        transport.set_timeouts(read_secs, write_secs);
     }
 }
 
 impl Read for LockdownStream {
     fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
         match self {
-            LockdownStream::Plain(tcp) => tcp.read(buf),
+            LockdownStream::Plain(t) => t.read(buf),
             LockdownStream::Tls(tls) => tls.read(buf),
         }
     }
@@ -296,21 +419,21 @@ impl Read for LockdownStream {
 impl Write for LockdownStream {
     fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
         match self {
-            LockdownStream::Plain(tcp) => tcp.write(buf),
+            LockdownStream::Plain(t) => t.write(buf),
             LockdownStream::Tls(tls) => tls.write(buf),
         }
     }
 
     fn flush(&mut self) -> io::Result<()> {
         match self {
-            LockdownStream::Plain(tcp) => tcp.flush(),
+            LockdownStream::Plain(t) => t.flush(),
             LockdownStream::Tls(tls) => tls.flush(),
         }
     }
 }
 
 fn build_tls_stream(
-    tcp: TcpStream,
+    transport: TransportStream,
     pairing: &PairingFile,
     stage: LockdownStage,
 ) -> Result<TlsStream, LockdownError> {
@@ -359,7 +482,84 @@ fn build_tls_stream(
         )
     })?;
 
-    Ok(StreamOwned::new(conn, tcp))
+    Ok(StreamOwned::new(conn, transport))
+}
+
+fn is_permission_denied_io(err: &io::Error) -> bool {
+    err.kind() == io::ErrorKind::PermissionDenied
+        || matches!(err.raw_os_error(), Some(1) | Some(13))
+}
+
+fn connect_transport(
+    ip: &str,
+    port: u16,
+    timeout: Duration,
+    stage: LockdownStage,
+    prefer_relay_first: bool,
+) -> Result<(TransportStream, bool), LockdownError> {
+    let addr_str = format!("{}:{}", ip, port);
+    let addr: SocketAddr = addr_str.parse().map_err(|e| {
+        LockdownError::new(
+            LockdownErrorKind::ProtocolError,
+            stage,
+            format!("Invalid IP address {}: {}", addr_str, e),
+        )
+    })?;
+
+    if prefer_relay_first {
+        if let Some(relay_res) = invoke_nw_relay_connect(ip, port, timeout, stage) {
+            return relay_res.map(|s| (s, true));
+        }
+    }
+
+    match TcpStream::connect_timeout(&addr, timeout) {
+        Ok(tcp) => {
+            tcp.set_nodelay(true).ok();
+            Ok((TransportStream::Tcp(tcp), false))
+        }
+        Err(first_err) if is_permission_denied_io(&first_err) => {
+            // iOS 27.2.1 NECP may deny POSIX BSD sockets with EPERM before Network.framework pre-warm
+            let _ = invoke_nw_prewarm(ip, port);
+
+            let mut last_err = first_err;
+            for _attempt in 0..EPERM_PREWARM_RETRY_COUNT {
+                std::thread::sleep(Duration::from_millis(EPERM_RETRY_BACKOFF_MS));
+                match TcpStream::connect_timeout(&addr, timeout) {
+                    Ok(tcp) => {
+                        tcp.set_nodelay(true).ok();
+                        return Ok((TransportStream::Tcp(tcp), false));
+                    }
+                    Err(err) if is_permission_denied_io(&err) => {
+                        last_err = err;
+                    }
+                    Err(other_err) => {
+                        return Err(classify_io_error(
+                            other_err,
+                            stage,
+                            &format!("Failed to connect to LocalDevVPN at {}", addr_str),
+                        ));
+                    }
+                }
+            }
+
+            // If POSIX socket still hits EPERM / os error 1 after 3x250ms retry,
+            // route traffic seamlessly through Swift Network.framework NWConnection relay.
+            if let Some(relay_res) = invoke_nw_relay_connect(ip, port, timeout, stage) {
+                return relay_res.map(|s| (s, true));
+            }
+
+            Err(classify_io_error(
+                last_err,
+                stage,
+                &format!("Failed to connect to LocalDevVPN at {}", addr_str),
+            ))
+        }
+        Err(other_err) => Err(classify_io_error(
+            other_err,
+            stage,
+            &format!("Failed to connect to LocalDevVPN at {}", addr_str),
+        )),
+    }
 }
 
 fn is_pairing_rejection_error(err: &str) -> bool {
@@ -380,17 +580,20 @@ pub struct LockdownClient {
     pub device_udid: Option<String>,
     pub stream: Option<LockdownStream>,
     pub pairing: PairingFile,
+    pub used_nw_relay: bool,
 }
 
 impl LockdownClient {
     /// Tests TCP reachability to loopback tunnel without performing full handshake
     pub fn test_tunnel_reachability(ip: &str, port: u16) -> bool {
-        let addr_str = format!("{}:{}", ip, port);
-        if let Ok(addr) = addr_str.parse::<SocketAddr>() {
-            TcpStream::connect_timeout(&addr, Duration::from_millis(REACHABILITY_TIMEOUT_MS)).is_ok()
-        } else {
-            false
-        }
+        connect_transport(
+            ip,
+            port,
+            Duration::from_millis(REACHABILITY_TIMEOUT_MS),
+            LockdownStage::TcpConnect,
+            false,
+        )
+        .is_ok()
     }
 
     /// Connects with bounded retry (`max_attempts`) for transient VPN/tunnel resets after TCP open
@@ -428,38 +631,21 @@ impl LockdownClient {
     }
 
     fn connect_once(ip: &str, port: u16, pairing: &PairingFile) -> Result<Self, LockdownError> {
-        let addr_str = format!("{}:{}", ip, port);
-        let addr: SocketAddr = addr_str.parse().map_err(|e| {
-            LockdownError::new(
-                LockdownErrorKind::ProtocolError,
-                LockdownStage::TcpConnect,
-                format!("Invalid IP address {}: {}", addr_str, e),
-            )
-        })?;
-
-        let mut plain_tcp =
-            TcpStream::connect_timeout(&addr, Duration::from_millis(HANDSHAKE_CONNECT_TIMEOUT_MS))
-                .map_err(|e| {
-                    classify_io_error(
-                        e,
-                        LockdownStage::TcpConnect,
-                        &format!("Failed to connect to LocalDevVPN at {}", addr_str),
-                    )
-                })?;
-
-        plain_tcp
-            .set_read_timeout(Some(Duration::from_secs(HANDSHAKE_IO_TIMEOUT_SECS)))
-            .ok();
-        plain_tcp
-            .set_write_timeout(Some(Duration::from_secs(HANDSHAKE_IO_TIMEOUT_SECS)))
-            .ok();
+        let (mut plain_transport, used_nw_relay) = connect_transport(
+            ip,
+            port,
+            Duration::from_millis(HANDSHAKE_CONNECT_TIMEOUT_MS),
+            LockdownStage::TcpConnect,
+            false,
+        )?;
+        plain_transport.set_timeouts(HANDSHAKE_IO_TIMEOUT_SECS, HANDSHAKE_IO_TIMEOUT_SECS);
 
         // 1. QueryType handshake
         let mut query = HashMap::new();
         query.insert("Request".to_string(), PlistValue::String("QueryType".to_string()));
-        send_plist_for_stage(&mut plain_tcp, &query, LockdownStage::QueryType)?;
+        send_plist_for_stage(&mut plain_transport, &query, LockdownStage::QueryType)?;
 
-        let query_resp = read_plist_for_stage(&mut plain_tcp, LockdownStage::QueryType)?;
+        let query_resp = read_plist_for_stage(&mut plain_transport, LockdownStage::QueryType)?;
         if let Some(err) = query_resp.get_string("Error") {
             return Err(LockdownError::new(
                 LockdownErrorKind::ProtocolError,
@@ -476,9 +662,9 @@ impl LockdownClient {
             "SystemBUID".to_string(),
             PlistValue::String(pairing.system_buid.clone()),
         );
-        send_plist_for_stage(&mut plain_tcp, &session_req, LockdownStage::StartSession)?;
+        send_plist_for_stage(&mut plain_transport, &session_req, LockdownStage::StartSession)?;
 
-        let session_resp = read_plist_for_stage(&mut plain_tcp, LockdownStage::StartSession)?;
+        let session_resp = read_plist_for_stage(&mut plain_transport, LockdownStage::StartSession)?;
         if let Some(err) = session_resp.get_string("Error") {
             let kind = if is_pairing_rejection_error(&err) {
                 LockdownErrorKind::PairingRejected
@@ -506,12 +692,12 @@ impl LockdownClient {
             .and_then(|v| v.as_bool())
             .unwrap_or(false);
 
-        // 3. Upgrade TCP socket to mutual-auth TLS when EnableSessionSSL is true
+        // 3. Upgrade TCP/relay socket to mutual-auth TLS when EnableSessionSSL is true
         let mut stream = if enable_ssl {
-            let tls = build_tls_stream(plain_tcp, pairing, LockdownStage::TlsUpgrade)?;
+            let tls = build_tls_stream(plain_transport, pairing, LockdownStage::TlsUpgrade)?;
             LockdownStream::Tls(Box::new(tls))
         } else {
-            LockdownStream::Plain(plain_tcp)
+            LockdownStream::Plain(plain_transport)
         };
 
         // 4. Encrypted GetValue(UniqueDeviceID) completes the lazy TLS handshake safely
@@ -542,6 +728,7 @@ impl LockdownClient {
             device_udid,
             stream: Some(stream),
             pairing: pairing.clone(),
+            used_nw_relay,
         })
     }
 
@@ -584,24 +771,21 @@ impl LockdownClient {
             .and_then(|v| v.as_bool())
             .unwrap_or(false);
 
-        let addr_str = format!("{}:{}", self.ip, service_port);
-        let addr: SocketAddr = addr_str
-            .parse()
-            .map_err(|e| format!("Invalid address: {}", e))?;
-        let tcp = TcpStream::connect_timeout(&addr, Duration::from_secs(SERVICE_CONNECT_TIMEOUT_SECS))
-            .map_err(|e| {
-                format!(
-                    "Failed to connect to service '{}' at {}: {}",
-                    service_name, addr_str, e
-                )
-            })?;
+        let (service_transport, _) = connect_transport(
+            &self.ip,
+            service_port,
+            Duration::from_secs(SERVICE_CONNECT_TIMEOUT_SECS),
+            LockdownStage::StartService,
+            self.used_nw_relay,
+        )
+        .map_err(|e| format!("Failed to connect to service '{}': {}", service_name, e))?;
 
         let service_stream = if enable_ssl {
-            let tls = build_tls_stream(tcp, &self.pairing, LockdownStage::StartService)
+            let tls = build_tls_stream(service_transport, &self.pairing, LockdownStage::StartService)
                 .map_err(|e| e.to_string())?;
             LockdownStream::Tls(Box::new(tls))
         } else {
-            LockdownStream::Plain(tcp)
+            LockdownStream::Plain(service_transport)
         };
         service_stream.set_timeouts(15, 15);
 

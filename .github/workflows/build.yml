@@ -47,8 +47,17 @@ jobs:
           plutil -lint ThreeOneOSFive/Info.plist
           plutil -lint ThreeOneOSFive.xcodeproj/project.pbxproj
           python3 - <<'PY'
-          import json, sys
+          import json, plistlib, sys
           from pathlib import Path
+          with open("ThreeOneOSFive/Info.plist", "rb") as f:
+              info = plistlib.load(f)
+          if not str(info.get("NSLocalNetworkUsageDescription", "")).strip():
+              sys.exit("Missing NSLocalNetworkUsageDescription in ThreeOneOSFive/Info.plist")
+          bonjour = set(info.get("NSBonjourServices", []))
+          required_bonjour = {"_apple-mobdev2._tcp", "_remotepairing._tcp", "_lockdown._tcp", "_localdev._tcp"}
+          missing = sorted(required_bonjour - bonjour)
+          if missing:
+              sys.exit(f"Missing NSBonjourServices in Info.plist: {missing}")
           root = Path("ThreeOneOSFive/Assets.xcassets")
           for path in sorted(root.rglob("Contents.json")):
               data = json.loads(path.read_text(encoding="utf-8-sig"))
@@ -56,7 +65,7 @@ jobs:
                   fn = item.get("filename")
                   if fn and not (path.parent / fn).is_file():
                       sys.exit(f"Missing image asset: {path.parent / fn}")
-          print("Assets verified.")
+          print("Assets and Local Network Info.plist keys verified.")
           PY
 
       - name: Prepare Staging Copy & Inject Obfuscated Security Build Pass
@@ -277,6 +286,19 @@ jobs:
           /usr/bin/zip -qry "$OUTPUT" Payload
           /usr/bin/unzip -tq "$OUTPUT"
           /usr/bin/unzip -l "$OUTPUT" | grep -q 'Payload/3105.app/Frameworks/libsec_core.dylib'
+          OUTPUT_IPA="$OUTPUT" python3 - <<'PY'
+          import os, plistlib, sys, zipfile
+          with zipfile.ZipFile(os.environ["OUTPUT_IPA"], "r") as zf:
+              with zf.open("Payload/3105.app/Info.plist") as pf:
+                  info = plistlib.load(pf)
+          if not str(info.get("NSLocalNetworkUsageDescription", "")).strip():
+              sys.exit("Packaged Info.plist lost NSLocalNetworkUsageDescription")
+          bonjour = set(info.get("NSBonjourServices", []))
+          required = {"_apple-mobdev2._tcp", "_remotepairing._tcp", "_lockdown._tcp", "_localdev._tcp"}
+          if not required.issubset(bonjour):
+              sys.exit(f"Packaged Info.plist missing NSBonjourServices: {sorted(required - bonjour)}")
+          print("Packaged IPA Info.plist Local Network keys verified.")
+          PY
           ls -lh "$OUTPUT"
 
       - name: Register Build Hashes with Server Key

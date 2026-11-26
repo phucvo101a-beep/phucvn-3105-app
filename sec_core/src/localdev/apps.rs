@@ -30,7 +30,7 @@ impl AppScanner {
         pairing: &PairingFile,
     ) -> Result<Vec<LocalDevAppInfo>, String> {
         let mut candidate_ips = vec![ip];
-        for fallback in ["10.7.1.1", "10.7.0.1", "127.0.0.1"] {
+        for fallback in ["127.0.0.1", "10.7.0.1", "10.7.1.1"] {
             if !candidate_ips.contains(&fallback) {
                 candidate_ips.push(fallback);
             }

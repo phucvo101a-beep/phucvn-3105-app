@@ -1300,6 +1300,38 @@ class SecuritySuiteTests(unittest.TestCase):
         info_plist = (REPO_ROOT / "ThreeOneOSFive" / "Info.plist").read_text("utf-8")
         self.assertIn("<key>UIFileSharingEnabled</key>", info_plist)
         self.assertIn("<key>LSSupportsOpeningDocumentsInPlace</key>", info_plist)
+        self.assertIn("<key>NSLocalNetworkUsageDescription</key>", info_plist)
+        for svc in ("_apple-mobdev2._tcp", "_remotepairing._tcp", "_lockdown._tcp", "_localdev._tcp"):
+            self.assertIn(f"<string>{svc}</string>", info_plist)
+
+        build_ipa_py = (REPO_ROOT / "build_ipa.py").read_text("utf-8")
+        self.assertIn("verify_ipa_local_network_plist", build_ipa_py)
+        compile(build_ipa_py, str(REPO_ROOT / "build_ipa.py"), "exec")
+
+        tunnel_rs = (REPO_ROOT / "sec_core" / "src" / "localdev" / "tunnel.rs").read_text("utf-8")
+        for needle in (
+            "connect_transport",
+            "NW_PREWARM_CB",
+            "NW_RELAY_CONNECT_CB",
+            "EPERM_PREWARM_RETRY_COUNT",
+            "TransportStream::Relay",
+        ):
+            self.assertIn(needle, tunnel_rs)
+
+        ffi_rs = (REPO_ROOT / "sec_core" / "src" / "localdev" / "ffi.rs").read_text("utf-8")
+        self.assertIn("localdev_register_nw_callbacks", ffi_rs)
+
+        ld_swift = (REPO_ROOT / "ThreeOneOSFive" / "helpers" / "LocalDevBridge.swift").read_text("utf-8")
+        for needle in (
+            "NWConnectionRelaySession",
+            "NWPathMonitor",
+            "NWBrowser",
+            "127.0.0.1",
+            "willEnterForegroundNotification",
+            "localdev_register_nw_callbacks",
+        ):
+            self.assertIn(needle, ld_swift)
+        self.assertNotIn("sendUDPLocalBroadcastProbe", ld_swift)
 
         usb_script = REPO_ROOT / "scripts" / "usb_inspect.py"
         self.assertTrue(usb_script.is_file())

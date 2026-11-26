@@ -120,7 +120,7 @@ impl LocalDevManager {
 
     fn candidate_ips(&self) -> Vec<String> {
         let mut ips = vec![self.host.clone()];
-        for fallback in ["10.7.0.1", "10.7.1.1", "127.0.0.1"] {
+        for fallback in ["127.0.0.1", "10.7.0.1", "10.7.1.1"] {
             if !ips.iter().any(|existing| existing == fallback) {
                 ips.push(fallback.to_string());
             }

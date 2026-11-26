@@ -41,6 +41,17 @@ pub unsafe extern "C" fn localdev_init(
     0
 }
 
+/// Registers Swift Network.framework callbacks (`NWBrowser`/`NWConnection` pre-warm + relay proxy)
+/// so iOS 26/27 NECP policy blocks (`EPERM / os error 1`) can be unlocked and relayed seamlessly
+#[no_mangle]
+pub unsafe extern "C" fn localdev_register_nw_callbacks(
+    prewarm_cb: Option<super::tunnel::LocalDevNwPrewarmFn>,
+    relay_connect_cb: Option<super::tunnel::LocalDevNwRelayConnectFn>,
+) -> i32 {
+    super::tunnel::register_nw_callbacks(prewarm_cb, relay_connect_cb);
+    0
+}
+
 /// Imports raw bytes of a .mobiledevicepairing or .plist file
 /// Returns JSON status report string
 #[no_mangle]

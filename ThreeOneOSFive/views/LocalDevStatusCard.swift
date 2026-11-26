@@ -332,5 +332,10 @@ public struct LocalDevStatusCard: View {
                 bridge.handleAppDidBecomeActive()
             }
         }
+        .onReceive(NotificationCenter.default.publisher(for: UIApplication.willEnterForegroundNotification)) { _ in
+            if bridge.isModuleEnabled {
+                bridge.handleAppDidBecomeActive()
+            }
+        }
     }
 }
