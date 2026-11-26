@@ -621,10 +621,13 @@ pub fn handle_v3_request(
                 || rec.status.eq_ignore_ascii_case("disabled")
                 || rec.status.eq_ignore_ascii_case("revoked")
             {
-                return Ok(KeyCheckOutcome::Fail(
-                    "KEY_REVOKED",
-                    "Mã Key này đã bị khóa hoặc thu hồi!".to_string(),
-                ));
+                let reason = rec.ban_reason.trim();
+                let msg = if reason.is_empty() {
+                    "Mã Key này đã bị khóa hoặc thu hồi!".to_string()
+                } else {
+                    format!("Mã Key này đã bị khóa/cấm! Lý do: {reason}")
+                };
+                return Ok(KeyCheckOutcome::Fail("KEY_REVOKED", msg));
             }
 
             if !rec.bound_packages.is_empty() && !rec.bound_packages.contains(&req.pkg) {

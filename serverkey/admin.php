@@ -111,7 +111,15 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['action']) && $_POST['
     }
 }
 
+function isKeyAccessibleToActor(array $k, string $actor, bool $isMasterAdmin): bool {
+    if ($isMasterAdmin) {
+        return true;
+    }
+    return strcasecmp(trim((string)($k['created_by'] ?? '')), trim($actor)) === 0;
+}
+
 $isLoggedIn = !empty($_SESSION['admin_logged_in']);
+$isMasterAdmin = false;
 if ($isLoggedIn) {
     $sessCheck = verifyCurrentAdminSession($settings, $clientDevInfo);
     if (empty($sessCheck['valid'])) {
@@ -125,16 +133,30 @@ if ($isLoggedIn) {
         if (!empty($sessCheck['reason'])) {
             $error = $sessCheck['reason'];
         }
+    } else {
+        $isMasterAdmin = !empty($_SESSION['admin_is_master']);
     }
 }
 
 // Xử lý các thao tác quản trị khi đã đăng nhập (Bắt buộc CSRF Token)
 if ($isLoggedIn && $_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['action'])) {
     $act = $_POST['action'];
-    $actor = $_SESSION['admin_current_user'] ?? 'admin';
+    $actor = (string)($_SESSION['admin_current_user'] ?? 'admin');
     if (!verifyCsrfToken($_POST['csrf_token'] ?? '')) {
         $_SESSION['flash_error'] = 'Lỗi xác thực CSRF Token! Vui lòng thao tác lại.';
         header('Location: admin.php');
+        exit;
+    }
+
+    $masterOnlyActions = [
+        'add_user', 'delete_user', 'toggle_status', 'reset_hwid', 'kick_user_session', 'extend_user',
+        'update_settings', 'reset_master_hwid', 'update_security_policy', 'upsert_package_policy',
+        'delete_package_policy', 'save_preset_policies', 'add_build_manifest',
+        'toggle_manifest_revoke', 'delete_manifest', 'unban_device',
+    ];
+    if (!$isMasterAdmin && in_array($act, $masterOnlyActions, true)) {
+        $_SESSION['flash_error'] = 'Chỉ tài khoản Master Admin mới có quyền thực hiện thao tác quản trị hệ thống này!';
+        header('Location: admin.php?tab=keysTab');
         exit;
     }
 
@@ -148,6 +170,8 @@ if ($isLoggedIn && $_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['action
 
         if (empty($uName) || empty($uPass)) {
             $error = 'Vui lòng nhập đầy đủ tên tài khoản và mật khẩu!';
+        } elseif (strcasecmp($uName, getMasterAdminUsername($settings)) === 0) {
+            $error = 'Tên tài khoản này trùng với tài khoản Master Admin!';
         } elseif (findUserByUsername($uName)) {
             $error = 'Tài khoản "' . htmlspecialchars($uName) . '" đã tồn tại!';
         } else {
@@ -164,6 +188,9 @@ if ($isLoggedIn && $_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['action
                 'active_session_token' => '',
                 'active_ua_hash' => '',
                 'is_active' => true,
+                'ban_reason' => '',
+                'banned_at' => '',
+                'banned_by' => '',
                 'expiry_date' => $expiry,
                 'created_at' => date('Y-m-d H:i:s'),
                 'api_key' => '',
@@ -177,44 +204,77 @@ if ($isLoggedIn && $_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['action
         }
     }
 
-    // 2. Xóa tài khoản
+    // 2. Xóa tài khoản (tự động khóa cấm toàn bộ key do tài khoản này tạo theo lý do ban/xóa)
     elseif ($act === 'delete_user') {
         $uName = strtolower(trim($_POST['username'] ?? ''));
-        withLockedJson(USERS_FILE, [], function (&$users, &$dirty) use ($uName) {
+        $banReasonInput = trim((string)($_POST['ban_reason'] ?? ''));
+        $delResult = withLockedJson(USERS_FILE, [], function (&$users, &$dirty) use ($uName) {
             $newUsers = [];
+            $existingBanReason = '';
+            $removed = false;
             foreach ($users as $u) {
                 if (strtolower(trim((string)($u['username'] ?? ''))) !== $uName) {
                     $newUsers[] = $u;
                 } else {
+                    $removed = true;
+                    $existingBanReason = trim((string)($u['ban_reason'] ?? ''));
                     $dirty = true;
                 }
             }
             $users = $newUsers;
-            return true;
+            return ['removed' => $removed, 'existing_reason' => $existingBanReason];
         });
-        addLog('admin', $actor, "Đã xóa tài khoản: {$uName}");
-        $msg = "Đã xóa tài khoản: {$uName}";
+        if (!empty($delResult['removed'])) {
+            $effectiveReason = $banReasonInput !== ''
+                ? $banReasonInput
+                : ($delResult['existing_reason'] !== '' ? $delResult['existing_reason'] : "Tài khoản {$uName} đã bị xóa / cấm sử dụng");
+            $bannedKeyCount = cascadeBanCreatorKeys($uName, $effectiveReason, $actor);
+            addLog('admin', $actor, "Xóa tài khoản {$uName} & khóa cấm {$bannedKeyCount} key (Lý do: {$effectiveReason})");
+            $msg = "Đã xóa tài khoản {$uName} và khóa cấm {$bannedKeyCount} key do tài khoản này tạo (Lý do: {$effectiveReason}).";
+        } else {
+            $error = 'Không tìm thấy tài khoản cần xóa!';
+        }
     }
 
-    // 3. Khóa / Mở khóa tài khoản
+    // 3. Khóa / Ban hoặc Mở khóa tài khoản (ban sẽ tự động khóa cấm toàn bộ key tài khoản đó tạo theo đúng lý do)
     elseif ($act === 'toggle_status') {
         $uName = strtolower(trim($_POST['username'] ?? ''));
-        $toggled = withLockedJson(USERS_FILE, [], function (&$users, &$dirty) use ($uName) {
+        $banReasonInput = trim((string)($_POST['ban_reason'] ?? ''));
+        $nowStr = date('Y-m-d H:i:s');
+        $toggleRes = withLockedJson(USERS_FILE, [], function (&$users, &$dirty) use ($uName, $banReasonInput, $actor, $nowStr) {
             foreach ($users as $i => $u) {
                 if (strtolower(trim((string)($u['username'] ?? ''))) === $uName) {
-                    $users[$i]['is_active'] = empty($u['is_active']);
-                    if (empty($users[$i]['is_active'])) {
+                    $nextActive = empty($u['is_active']);
+                    $users[$i]['is_active'] = $nextActive;
+                    if (!$nextActive) {
+                        $effectiveReason = $banReasonInput !== '' ? $banReasonInput : 'Tài khoản đã bị Admin khóa / cấm';
                         $users[$i]['active_session_token'] = '';
+                        $users[$i]['ban_reason'] = $effectiveReason;
+                        $users[$i]['banned_at'] = $nowStr;
+                        $users[$i]['banned_by'] = $actor;
+                        $dirty = true;
+                        return ['active' => false, 'reason' => $effectiveReason];
                     }
+                    $users[$i]['ban_reason'] = '';
+                    $users[$i]['banned_at'] = '';
+                    $users[$i]['banned_by'] = '';
                     $dirty = true;
-                    return $users[$i]['is_active'] ? 'Kích hoạt' : 'Khóa';
+                    return ['active' => true, 'reason' => ''];
                 }
             }
             return null;
         });
-        if ($toggled !== null) {
-            addLog('admin', $actor, "Thay đổi trạng thái tài khoản {$uName}: {$toggled}");
-            $msg = "Đã {$toggled} tài khoản: {$uName}";
+        if (is_array($toggleRes)) {
+            if (empty($toggleRes['active'])) {
+                $effectiveReason = (string)$toggleRes['reason'];
+                $bannedKeyCount = cascadeBanCreatorKeys($uName, $effectiveReason, $actor);
+                addLog('admin', $actor, "Ban/Khóa tài khoản {$uName} & {$bannedKeyCount} key (Lý do: {$effectiveReason})");
+                $msg = "Đã khóa tài khoản {$uName} (Lý do: {$effectiveReason}) và khóa cấm {$bannedKeyCount} key do tài khoản này tạo.";
+            } else {
+                $restoredKeyCount = cascadeRestoreCreatorKeys($uName);
+                addLog('admin', $actor, "Mở khóa tài khoản {$uName} & mở lại {$restoredKeyCount} key");
+                $msg = "Đã mở khóa tài khoản {$uName} và mở lại {$restoredKeyCount} key bị khóa theo lệnh ban trước đó.";
+            }
         }
     }
 
@@ -297,28 +357,31 @@ if ($isLoggedIn && $_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['action
         elseif ($duration === '30d') $prefix = '30D-';
         elseif ($duration === 'permanent') $prefix = 'LIFE-';
 
-        $keys = getKeys();
-        $createdKeys = [];
-        for ($k = 0; $k < $qty; $k++) {
-            $keyCode = 'PHUCVN-' . $prefix . strtoupper(substr(bin2hex(random_bytes(3)), 0, 4) . '-' . substr(bin2hex(random_bytes(3)), 0, 4));
-            $keys[] = [
-                'key' => $keyCode,
-                'duration' => $duration, // 1h, 1d, 7d, 30d, permanent
-                'role' => $role,
-                'status' => 'active',
-                'max_devices' => $maxDevices,
-                'devices' => [],
-                'expiry_date' => null,
-                'expiry_ts' => 0,
-                'is_used' => false,
-                'used_by' => null,
-                'used_at' => null,
-                'created_by' => $actor,
-                'created_at' => date('Y-m-d H:i:s')
-            ];
-            $createdKeys[] = $keyCode;
-        }
-        saveKeys($keys);
+        $createdKeys = withLockedJson(KEYS_FILE, [], function (&$keys, &$dirty) use ($qty, $prefix, $duration, $role, $maxDevices, $actor) {
+            $batch = [];
+            for ($k = 0; $k < $qty; $k++) {
+                $keyCode = 'PHUCVN-' . $prefix . strtoupper(substr(bin2hex(random_bytes(3)), 0, 4) . '-' . substr(bin2hex(random_bytes(3)), 0, 4));
+                $keys[] = [
+                    'key' => $keyCode,
+                    'duration' => $duration, // 1h, 1d, 7d, 30d, permanent
+                    'role' => $role,
+                    'status' => 'active',
+                    'ban_reason' => '',
+                    'max_devices' => $maxDevices,
+                    'devices' => [],
+                    'expiry_date' => null,
+                    'expiry_ts' => 0,
+                    'is_used' => false,
+                    'used_by' => null,
+                    'used_at' => null,
+                    'created_by' => $actor,
+                    'created_at' => date('Y-m-d H:i:s')
+                ];
+                $batch[] = $keyCode;
+            }
+            $dirty = true;
+            return $batch;
+        });
         $durName = formatDurationLabel($duration);
         $devName = ($maxDevices === 0) ? 'Không giới hạn thiết bị' : "{$maxDevices} thiết bị";
         addLog('admin', $actor, "Tạo {$qty} Key bản quyền mới loại {$durName} (Giới hạn: {$devName})");
@@ -336,122 +399,196 @@ if ($isLoggedIn && $_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['action
     // 7. Xóa Key bản quyền
     elseif ($act === 'delete_key') {
         $keyCode = strtoupper(trim($_POST['key'] ?? ''));
-        $keys = getKeys();
-        $newKeys = [];
-        foreach ($keys as $k) {
-            if (strtoupper($k['key']) !== $keyCode) {
+        $delOutcome = withLockedJson(KEYS_FILE, [], function (&$keys, &$dirty) use ($keyCode, $actor, $isMasterAdmin) {
+            $newKeys = [];
+            $found = false;
+            foreach ($keys as $k) {
+                if (strtoupper($k['key'] ?? '') === $keyCode) {
+                    $found = true;
+                    if (!isKeyAccessibleToActor($k, $actor, $isMasterAdmin)) {
+                        return 'forbidden';
+                    }
+                    $dirty = true;
+                    continue;
+                }
                 $newKeys[] = $k;
             }
+            if ($found) {
+                $keys = $newKeys;
+                return 'deleted';
+            }
+            return 'missing';
+        });
+        if ($delOutcome === 'forbidden') {
+            $error = 'Bạn không có quyền xóa Key của tài khoản khác!';
+        } elseif ($delOutcome === 'deleted') {
+            addLog('admin', $actor, "Đã xóa Key: {$keyCode}");
+            $msg = "Đã xóa Key: {$keyCode}";
         }
-        saveKeys($newKeys);
-        $msg = "Đã xóa Key: {$keyCode}";
     }
 
     // 7a. Khóa / Mở khóa Key
     elseif ($act === 'toggle_key_status') {
         $keyCode = strtoupper(trim($_POST['key'] ?? ''));
-        $keys = getKeys();
-        foreach ($keys as &$k) {
-            if (strtoupper($k['key']) === $keyCode) {
-                $cur = strtolower((string)($k['status'] ?? 'active'));
-                $next = ($cur === 'revoked' || $cur === 'banned') ? 'active' : 'revoked';
-                $k['status'] = $next;
-                addLog('admin', $actor, "Đổi trạng thái Key {$keyCode} -> {$next}");
-                $msg = "Đã chuyển trạng thái Key {$keyCode} sang: " . ($next === 'active' ? 'HOẠT ĐỘNG' : 'ĐÃ KHÓA');
-                break;
+        $keyBanReason = trim((string)($_POST['ban_reason'] ?? ''));
+        $nowStr = date('Y-m-d H:i:s');
+        $toggleOutcome = withLockedJson(KEYS_FILE, [], function (&$keys, &$dirty) use ($keyCode, $keyBanReason, $actor, $isMasterAdmin, $nowStr) {
+            foreach ($keys as &$k) {
+                if (strtoupper($k['key'] ?? '') === $keyCode) {
+                    if (!isKeyAccessibleToActor($k, $actor, $isMasterAdmin)) {
+                        return ['status' => 'forbidden'];
+                    }
+                    $cur = strtolower((string)($k['status'] ?? 'active'));
+                    $wasLocked = in_array($cur, ['revoked', 'banned', 'disabled'], true);
+                    $next = $wasLocked ? 'active' : 'banned';
+                    $k['status'] = $next;
+                    if ($next === 'active') {
+                        $k['ban_reason'] = '';
+                        unset($k['banned_by'], $k['banned_at'], $k['banned_by_account_action']);
+                    } else {
+                        $k['ban_reason'] = $keyBanReason !== '' ? $keyBanReason : 'Khóa bởi quản trị viên';
+                        $k['banned_by'] = $actor;
+                        $k['banned_at'] = $nowStr;
+                        $k['banned_by_account_action'] = false;
+                    }
+                    $dirty = true;
+                    return ['status' => $next, 'reason' => (string)($k['ban_reason'] ?? '')];
+                }
             }
+            unset($k);
+            return ['status' => 'missing'];
+        });
+        if ($toggleOutcome['status'] === 'forbidden') {
+            $error = 'Bạn không có quyền khóa/mở khóa Key của tài khoản khác!';
+        } elseif (in_array($toggleOutcome['status'], ['active', 'banned'], true)) {
+            $next = $toggleOutcome['status'];
+            $reasonSuffix = ($next === 'banned' && $toggleOutcome['reason'] !== '') ? " (Lý do: {$toggleOutcome['reason']})" : '';
+            addLog('admin', $actor, "Đổi trạng thái Key {$keyCode} -> {$next}{$reasonSuffix}");
+            $msg = "Đã chuyển trạng thái Key {$keyCode} sang: " . ($next === 'active' ? 'HOẠT ĐỘNG' : 'ĐÃ KHÓA' . $reasonSuffix);
         }
-        unset($k);
-        saveKeys($keys);
     }
 
     // 7b. Reset toàn bộ Key (xóa thiết bị, làm mới thời hạn, cho phép đổi máy)
     elseif ($act === 'reset_key' || $act === 'reset_key_hwid') {
         $keyCode = strtoupper(trim($_POST['key'] ?? ''));
-        $keys = getKeys();
-        foreach ($keys as &$k) {
-            if (strtoupper($k['key']) === $keyCode) {
-                $k['devices'] = [];
-                $k['used_by'] = null;
-                $k['is_used'] = false;
-                $k['used_at'] = null;
-                $k['activated_at'] = null;
-                $k['expiry_date'] = null;
-                $k['expiry_ts'] = 0;
-                $k['expires_at'] = null;
-                $k['status'] = 'active';
-                $k['is_banned'] = false;
-                addLog('admin', $actor, "Reset toàn bộ Key {$keyCode} về trạng thái ban đầu");
-                $msg = "Đã Reset thành công Key: {$keyCode}! Key đã trở về trạng thái mới (chưa sử dụng, xóa toàn bộ thiết bị).";
-                break;
+        $resetOutcome = withLockedJson(KEYS_FILE, [], function (&$keys, &$dirty) use ($keyCode, $actor, $isMasterAdmin) {
+            foreach ($keys as &$k) {
+                if (strtoupper($k['key'] ?? '') === $keyCode) {
+                    if (!isKeyAccessibleToActor($k, $actor, $isMasterAdmin)) {
+                        return 'forbidden';
+                    }
+                    $k['devices'] = [];
+                    $k['used_by'] = null;
+                    $k['is_used'] = false;
+                    $k['used_at'] = null;
+                    $k['activated_at'] = null;
+                    $k['expiry_date'] = null;
+                    $k['expiry_ts'] = 0;
+                    $k['expires_at'] = null;
+                    $k['status'] = 'active';
+                    $k['is_banned'] = false;
+                    $k['ban_reason'] = '';
+                    unset($k['banned_by'], $k['banned_at'], $k['banned_by_account_action']);
+                    $dirty = true;
+                    return 'ok';
+                }
             }
+            unset($k);
+            return 'missing';
+        });
+        if ($resetOutcome === 'forbidden') {
+            $error = 'Bạn không có quyền reset Key của tài khoản khác!';
+        } elseif ($resetOutcome === 'ok') {
+            addLog('admin', $actor, "Reset toàn bộ Key {$keyCode} về trạng thái ban đầu");
+            $msg = "Đã Reset thành công Key: {$keyCode}! Key đã trở về trạng thái mới (chưa sử dụng, xóa toàn bộ thiết bị).";
         }
-        unset($k);
-        saveKeys($keys);
     }
 
-    // 7b2. Reset toàn bộ thiết bị của TẤT CẢ các Key
+    // 7b2. Reset toàn bộ thiết bị (Master reset toàn bộ, tài khoản phụ chỉ reset key của chính mình)
     elseif ($act === 'reset_all_keys') {
-        $keys = getKeys();
-        $count = 0;
-        foreach ($keys as &$k) {
-            if (!empty($k['devices']) || !empty($k['is_used'])) {
-                $k['devices'] = [];
-                $k['used_by'] = null;
-                $k['is_used'] = false;
-                $count++;
+        $count = withLockedJson(KEYS_FILE, [], function (&$keys, &$dirty) use ($actor, $isMasterAdmin) {
+            $cnt = 0;
+            foreach ($keys as &$k) {
+                if (!isKeyAccessibleToActor($k, $actor, $isMasterAdmin)) {
+                    continue;
+                }
+                if (!empty($k['devices']) || !empty($k['is_used'])) {
+                    $k['devices'] = [];
+                    $k['used_by'] = null;
+                    $k['is_used'] = false;
+                    $cnt++;
+                    $dirty = true;
+                }
             }
-        }
-        unset($k);
-        saveKeys($keys);
-        addLog('admin', 'admin', "Reset toàn bộ thiết bị của {$count} key");
-        $msg = "Đã Reset thiết bị cho toàn bộ {$count} Key thành công! Khách hàng có thể đổi máy tự do.";
+            unset($k);
+            return $cnt;
+        });
+        addLog('admin', $actor, "Reset toàn bộ thiết bị của {$count} key");
+        $msg = "Đã Reset thiết bị cho {$count} Key thành công! Khách hàng có thể đổi máy tự do.";
     }
 
     // 7c. Xóa 1 thiết bị cụ thể khỏi Key (Kick thiết bị để nhường chỗ)
     elseif ($act === 'remove_key_device') {
         $keyCode = strtoupper(trim($_POST['key'] ?? ''));
         $hwidToRemove = trim($_POST['hwid'] ?? '');
-        $keys = getKeys();
-        foreach ($keys as &$k) {
-            if (strtoupper($k['key']) === $keyCode) {
-                $newDevs = [];
-                $devList = $k['devices'] ?? [];
-                foreach ($devList as $dev) {
-                    if (strcasecmp(trim($dev['hwid']), $hwidToRemove) !== 0) {
-                        $newDevs[] = $dev;
+        $remOutcome = withLockedJson(KEYS_FILE, [], function (&$keys, &$dirty) use ($keyCode, $hwidToRemove, $actor, $isMasterAdmin) {
+            foreach ($keys as &$k) {
+                if (strtoupper($k['key'] ?? '') === $keyCode) {
+                    if (!isKeyAccessibleToActor($k, $actor, $isMasterAdmin)) {
+                        return 'forbidden';
                     }
+                    $newDevs = [];
+                    $devList = $k['devices'] ?? [];
+                    foreach ($devList as $dev) {
+                        if (strcasecmp(trim((string)($dev['hwid'] ?? '')), $hwidToRemove) !== 0) {
+                            $newDevs[] = $dev;
+                        }
+                    }
+                    $k['devices'] = $newDevs;
+                    $k['used_by'] = !empty($newDevs) ? implode(', ', array_column($newDevs, 'hwid')) : null;
+                    if (empty($newDevs)) {
+                        $k['is_used'] = false;
+                    }
+                    $dirty = true;
+                    return 'ok';
                 }
-                $k['devices'] = $newDevs;
-                $k['used_by'] = !empty($newDevs) ? implode(', ', array_column($newDevs, 'hwid')) : null;
-                if (empty($newDevs)) {
-                    $k['is_used'] = false;
-                }
-                addLog('admin', 'admin', "Đã gỡ thiết bị {$hwidToRemove} khỏi Key {$keyCode}");
-                $msg = "Đã gỡ thiết bị ({$hwidToRemove}) khỏi Key: {$keyCode} thành công!";
-                break;
             }
+            unset($k);
+            return 'missing';
+        });
+        if ($remOutcome === 'forbidden') {
+            $error = 'Bạn không có quyền thao tác thiết bị trên Key của tài khoản khác!';
+        } elseif ($remOutcome === 'ok') {
+            addLog('admin', $actor, "Đã gỡ thiết bị {$hwidToRemove} khỏi Key {$keyCode}");
+            $msg = "Đã gỡ thiết bị ({$hwidToRemove}) khỏi Key: {$keyCode} thành công!";
         }
-        unset($k);
-        saveKeys($keys);
     }
 
     // 7d. Cập nhật số thiết bị tối đa cho Key đã có
     elseif ($act === 'update_key_max_devices') {
         $keyCode = strtoupper(trim($_POST['key'] ?? ''));
         $newMax = max(0, intval($_POST['max_devices'] ?? 1));
-        $keys = getKeys();
-        foreach ($keys as &$k) {
-            if (strtoupper($k['key']) === $keyCode) {
-                $k['max_devices'] = $newMax;
-                $devName = ($newMax === 0) ? 'Không giới hạn thiết bị' : "{$newMax} thiết bị";
-                addLog('admin', 'admin', "Cập nhật giới hạn thiết bị Key {$keyCode} -> {$devName}");
-                $msg = "Đã cập nhật giới hạn thiết bị cho Key {$keyCode} thành: {$devName}!";
-                break;
+        $maxOutcome = withLockedJson(KEYS_FILE, [], function (&$keys, &$dirty) use ($keyCode, $newMax, $actor, $isMasterAdmin) {
+            foreach ($keys as &$k) {
+                if (strtoupper($k['key'] ?? '') === $keyCode) {
+                    if (!isKeyAccessibleToActor($k, $actor, $isMasterAdmin)) {
+                        return 'forbidden';
+                    }
+                    $k['max_devices'] = $newMax;
+                    $dirty = true;
+                    return 'ok';
+                }
             }
+            unset($k);
+            return 'missing';
+        });
+        if ($maxOutcome === 'forbidden') {
+            $error = 'Bạn không có quyền sửa giới hạn Key của tài khoản khác!';
+        } elseif ($maxOutcome === 'ok') {
+            $devName = ($newMax === 0) ? 'Không giới hạn thiết bị' : "{$newMax} thiết bị";
+            addLog('admin', $actor, "Cập nhật giới hạn thiết bị Key {$keyCode} -> {$devName}");
+            $msg = "Đã cập nhật giới hạn thiết bị cho Key {$keyCode} thành: {$devName}!";
         }
-        unset($k);
-        saveKeys($keys);
     }
 
     // 8. Cập nhật Cài đặt hệ thống
@@ -617,7 +754,18 @@ if ($isLoggedIn && $_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['action
         $hwidToBan = trim((string)($_POST['hwid'] ?? ''));
         $reason = trim((string)($_POST['reason'] ?? 'Vi phạm điều khoản sử dụng / Can thiệp hệ thống'));
         $sourceKey = trim((string)($_POST['source_key'] ?? ''));
-        if ($hwidToBan === '') {
+        $canBanDevice = $isMasterAdmin;
+        if (!$canBanDevice && $sourceKey !== '') {
+            foreach (getKeys() as $chkKey) {
+                if (strcasecmp((string)($chkKey['key'] ?? ''), $sourceKey) === 0 && isKeyAccessibleToActor($chkKey, $actor, false)) {
+                    $canBanDevice = true;
+                    break;
+                }
+            }
+        }
+        if (!$canBanDevice) {
+            $error = 'Bạn không có quyền Ban thiết bị không thuộc Key của mình!';
+        } elseif ($hwidToBan === '') {
             $error = 'Vui lòng nhập mã HWID thiết bị cần Ban!';
         } else {
             banDeviceHwid($hwidToBan, $reason, $actor, $sourceKey);
@@ -644,24 +792,30 @@ if ($isLoggedIn && $_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['action
 
     $tabParam = 'keysTab';
     $returnTab = trim((string)($_POST['return_tab'] ?? ''));
-    if (in_array($returnTab, ['keysTab', 'securityTab', 'usersTab', 'settingsTab', 'logsTab'], true)) {
-        $tabParam = $returnTab;
-    } elseif (in_array($act, ['add_user', 'delete_user', 'toggle_status', 'reset_hwid', 'kick_user_session', 'extend_user'])) {
-        $tabParam = 'usersTab';
-    } elseif (in_array($act, ['update_settings', 'reset_master_hwid'])) {
-        $tabParam = 'settingsTab';
-    } elseif (in_array($act, ['update_security_policy', 'upsert_package_policy', 'delete_package_policy', 'save_preset_policies', 'add_build_manifest', 'toggle_manifest_revoke', 'delete_manifest', 'ban_device', 'unban_device'])) {
-        $tabParam = 'securityTab';
+    if ($isMasterAdmin) {
+        if (in_array($returnTab, ['keysTab', 'securityTab', 'usersTab', 'settingsTab', 'logsTab'], true)) {
+            $tabParam = $returnTab;
+        } elseif (in_array($act, ['add_user', 'delete_user', 'toggle_status', 'reset_hwid', 'kick_user_session', 'extend_user'])) {
+            $tabParam = 'usersTab';
+        } elseif (in_array($act, ['update_settings', 'reset_master_hwid'])) {
+            $tabParam = 'settingsTab';
+        } elseif (in_array($act, ['update_security_policy', 'upsert_package_policy', 'delete_package_policy', 'save_preset_policies', 'add_build_manifest', 'toggle_manifest_revoke', 'delete_manifest', 'ban_device', 'unban_device'])) {
+            $tabParam = 'securityTab';
+        }
     }
 
     header('Location: admin.php?tab=' . $tabParam);
     exit;
 }
 
-$allUsers = getUsers();
+$currentAdminUser = (string)($_SESSION['admin_current_user'] ?? '');
+$allUsers = $isMasterAdmin ? getUsers() : [];
 $allKeys = getKeys();
-$allLogs = readJsonFile(LOGS_FILE, []);
-$allManifests = getBuildManifests();
+$visibleKeys = $isMasterAdmin
+    ? $allKeys
+    : array_values(array_filter($allKeys, static fn($k) => isKeyAccessibleToActor($k, $currentAdminUser, false)));
+$allLogs = $isMasterAdmin ? readJsonFile(LOGS_FILE, []) : [];
+$allManifests = $isMasterAdmin ? getBuildManifests() : [];
 $presetPoliciesView = CoreEngine::resolvePresetPolicies($settings);
 $allBannedDevices = getBannedDevices();
 $bannedHwidMap = [];
@@ -674,7 +828,7 @@ $isServerOpenGlobal = !empty($settings['server_open']) && empty($settings['syste
 
 $search = strtolower(trim($_GET['q'] ?? ''));
 $keySearch = strtolower(trim($_GET['key_q'] ?? ''));
-if (!empty($search)) {
+if ($isMasterAdmin && !empty($search)) {
     $filteredUsers = [];
     foreach ($allUsers as $u) {
         if (strpos(strtolower($u['username']), $search) !== false || strpos(strtolower($u['hwid'] ?? ''), $search) !== false) {
@@ -687,12 +841,15 @@ if (!empty($search)) {
 
 $totalUsers = count($allUsers);
 $activeUsers = count(array_filter($allUsers, function($u) { return !empty($u['is_active']); }));
-$totalKeys = count($allKeys);
-$unusedKeys = count(array_filter($allKeys, function($k) { return empty($k['is_used']); }));
+$totalKeys = count($visibleKeys);
+$unusedKeys = count(array_filter($visibleKeys, function($k) {
+    $st = strtolower((string)($k['status'] ?? 'active'));
+    return empty($k['is_used']) && !in_array($st, ['revoked', 'banned', 'disabled'], true);
+}));
 $totalConnectedDevices = 0;
 $keyCreatorMap = [];
 $hasLegacyUnknownCreator = false;
-foreach ($allKeys as $k) {
+foreach ($visibleKeys as $k) {
     if (!empty($k['devices']) && is_array($k['devices'])) {
         $totalConnectedDevices += count($k['devices']);
     }
@@ -897,6 +1054,7 @@ ksort($keyCreatorMap);
 
         <!-- Stats Grid -->
         <div class="stats-grid">
+            <?php if ($isMasterAdmin): ?>
             <div class="stat-card">
                 <div>
                     <div class="stat-lbl">Tổng Tài Khoản</div>
@@ -904,6 +1062,7 @@ ksort($keyCreatorMap);
                 </div>
                 <div class="stat-icon icon-purple"><i class="fa-solid fa-users"></i></div>
             </div>
+            <?php endif; ?>
             <div class="stat-card">
                 <div>
                     <div class="stat-lbl">Kho Key Khả Dụng</div>
@@ -923,6 +1082,7 @@ ksort($keyCreatorMap);
         <!-- Navigation Tabs -->
         <div class="tabs">
             <button class="tab-btn active" onclick="switchTab('keysTab', this)"><i class="fa-solid fa-key"></i> Tạo & Quản Lý 5 Loại Key</button>
+            <?php if ($isMasterAdmin): ?>
             <button class="tab-btn" onclick="switchTab('securityTab', this)">
                 <i class="fa-solid fa-shield-halved"></i> Server & Cập Nhật
                 <?php if (!$isServerOpenGlobal): ?>
@@ -934,6 +1094,7 @@ ksort($keyCreatorMap);
             <button class="tab-btn" onclick="switchTab('usersTab', this)"><i class="fa-solid fa-users-gear"></i> Quản Lý Tài Khoản</button>
             <button class="tab-btn" onclick="switchTab('settingsTab', this)"><i class="fa-solid fa-sliders"></i> Cài Đặt Hệ Thống</button>
             <button class="tab-btn" onclick="switchTab('logsTab', this)"><i class="fa-solid fa-clock-rotate-left"></i> Nhật Ký Bảo Mật</button>
+            <?php endif; ?>
         </div>
 
         <!-- TAB 1: 5 LOẠI KEY -->
@@ -1066,13 +1227,13 @@ ksort($keyCreatorMap);
                     <span class="card-title">
                         <i class="fa-solid fa-list-check"></i> Kho Mã Key Đã Tạo & Quản Lý Thiết Bị 
                         <span id="keyCountBadge" class="badge badge-member" style="font-size: 11.5px; margin-left: 8px;">
-                            <?= count($allKeys) ?> key
+                            <?= count($visibleKeys) ?> key
                         </span>
                     </span>
-                    <form method="POST" style="display:inline;" onsubmit="return confirm('CẢNH BÁO: Reset toàn bộ thiết bị của TẤT CẢ các key trong hệ thống? Khách hàng sẽ được phép kích hoạt lại trên máy mới.');">
+                    <form method="POST" style="display:inline;" onsubmit="return confirm('CẢNH BÁO: Reset toàn bộ thiết bị của <?= $isMasterAdmin ? 'TẤT CẢ các key trong hệ thống' : 'các key do tài khoản bạn tạo' ?>? Khách hàng sẽ được phép kích hoạt lại trên máy mới.');">
                         <?= csrfField() ?>
                         <input type="hidden" name="action" value="reset_all_keys">
-                        <button type="submit" class="btn btn-warning btn-sm" title="Reset tất cả thiết bị của mọi key">
+                        <button type="submit" class="btn btn-warning btn-sm" title="Reset thiết bị các key">
                             <i class="fa-solid fa-arrows-rotate"></i> Reset Tất Cả Thiết Bị
                         </button>
                     </form>
@@ -1089,6 +1250,7 @@ ksort($keyCreatorMap);
                     </div>
 
                     <div style="display: flex; gap: 8px; align-items: center; flex-wrap: wrap;">
+                        <?php if ($isMasterAdmin): ?>
                         <!-- Lọc tài khoản tạo -->
                         <select id="filterKeyCreator" class="form-select" style="width: auto; height: 38px; font-size: 12.5px; padding: 0 12px;" onchange="filterKeys()">
                             <option value="all">👤 Tất cả người tạo</option>
@@ -1099,6 +1261,7 @@ ksort($keyCreatorMap);
                                 <option value="__unknown__">Hệ thống / Cũ</option>
                             <?php endif; ?>
                         </select>
+                        <?php endif; ?>
 
                         <!-- Lọc trạng thái -->
                         <select id="filterKeyStatus" class="form-select" style="width: auto; height: 38px; font-size: 12.5px; padding: 0 12px;" onchange="filterKeys()">
@@ -1107,6 +1270,7 @@ ksort($keyCreatorMap);
                             <option value="in_use">📱 Đang dùng</option>
                             <option value="full">🔒 Đã đủ máy</option>
                             <option value="infinite">♾️ Vô hạn máy</option>
+                            <option value="banned">🚫 Đã khóa / Ban</option>
                         </select>
 
                         <!-- Lọc thời hạn -->
@@ -1140,13 +1304,15 @@ ksort($keyCreatorMap);
                             </tr>
                         </thead>
                         <tbody id="keysTableBody">
-                            <?php if (empty($allKeys)): ?>
+                            <?php if (empty($visibleKeys)): ?>
                                 <tr><td colspan="8" style="text-align: center; color: var(--text-muted); padding: 30px;">Chưa có mã key nào. Hãy chọn loại key ở trên để tạo.</td></tr>
-                            <?php else: foreach (array_reverse($allKeys) as $k): 
+                            <?php else: foreach (array_reverse($visibleKeys) as $k): 
                                 $devCount = isset($k['devices']) && is_array($k['devices']) ? count($k['devices']) : 0;
                                 $maxDev = isset($k['max_devices']) ? intval($k['max_devices']) : 1;
                                 $creatorVal = trim((string)($k['created_by'] ?? ''));
                                 $creatorAttr = $creatorVal !== '' ? strtolower($creatorVal) : '__unknown__';
+                                $isKeyRevoked = in_array(strtolower((string)($k['status'] ?? 'active')), ['revoked', 'banned', 'disabled'], true);
+                                $keyBanReason = trim((string)($k['ban_reason'] ?? ''));
                                 $hwidsJoined = '';
                                 if (!empty($k['devices']) && is_array($k['devices'])) {
                                     $hwidsJoined = implode(' ', array_column($k['devices'], 'hwid'));
@@ -1165,6 +1331,7 @@ ksort($keyCreatorMap);
                                     data-duration="<?= strtolower(htmlspecialchars($k['duration'] ?? ($k['days'] ?? ''))) ?>"
                                     data-role="<?= strtolower(htmlspecialchars($k['role'] ?? 'vip')) ?>"
                                     data-status="<?= $statusSlug ?>"
+                                    data-locked="<?= $isKeyRevoked ? '1' : '0' ?>"
                                     data-creator="<?= htmlspecialchars($creatorAttr) ?>"
                                     data-hwids="<?= strtolower(htmlspecialchars($hwidsJoined)) ?>"
                                 >
@@ -1183,6 +1350,16 @@ ksort($keyCreatorMap);
                                     </td>
                                     <td><span class="badge badge-vip"><?= strtoupper($k['role'] ?? 'VIP') ?></span></td>
                                     <td>
+                                        <?php if ($isKeyRevoked): ?>
+                                            <div style="margin-bottom: 4px;">
+                                                <span class="badge badge-blocked"><i class="fa-solid fa-ban"></i> Đã khóa</span>
+                                            </div>
+                                            <?php if ($keyBanReason !== ''): ?>
+                                                <div style="font-size: 10.5px; color: #fca5a5; margin-bottom: 4px; max-width: 210px; line-height: 1.3;">
+                                                    Lý do: <?= htmlspecialchars($keyBanReason) ?>
+                                                </div>
+                                            <?php endif; ?>
+                                        <?php endif; ?>
                                         <?php if ($maxDev === 0): ?>
                                             <span class="badge" style="background: rgba(168,85,247,0.2); color:#c084fc;">
                                                 <i class="fa-solid fa-infinity"></i> Vô hạn (<?= $devCount ?> máy)
@@ -1243,6 +1420,7 @@ ksort($keyCreatorMap);
                                                         </div>
                                                         <div style="display:flex;gap:4px;flex-shrink:0;align-items:center;">
                                                             <?php if ($banInfo): ?>
+                                                                <?php if ($isMasterAdmin): ?>
                                                                 <form method="POST" style="margin: 0;" onsubmit="return confirm('Gỡ Ban cho thiết bị HWID này?');">
                                                                     <?= csrfField() ?>
                                                                     <input type="hidden" name="action" value="unban_device">
@@ -1250,6 +1428,7 @@ ksort($keyCreatorMap);
                                                                     <input type="hidden" name="hwid" value="<?= htmlspecialchars($devHwid) ?>">
                                                                     <button type="submit" class="btn btn-primary btn-sm" style="padding: 3px 6px; font-size: 10px;" title="Gỡ Ban HWID này"><i class="fa-solid fa-unlock"></i> Gỡ Ban</button>
                                                                 </form>
+                                                                <?php endif; ?>
                                                             <?php else: ?>
                                                                 <form method="POST" style="margin: 0;" onsubmit="return promptBanReason(this, '<?= htmlspecialchars($devHwid, ENT_QUOTES) ?>');">
                                                                     <?= csrfField() ?>
@@ -1294,15 +1473,26 @@ ksort($keyCreatorMap);
                                         <?php endif; ?>
                                     </td>
                                     <td style="white-space: nowrap; text-align: right;">
-                                        <?php $isKeyRevoked = in_array(strtolower((string)($k['status'] ?? 'active')), ['revoked', 'banned', 'disabled'], true); ?>
-                                        <form method="POST" style="display:inline-block; margin-right: 4px;">
+                                        <?php if ($isKeyRevoked): ?>
+                                        <form method="POST" style="display:inline-block; margin-right: 4px;" onsubmit="return confirm('Mở khóa Key <?= htmlspecialchars($k['key'], ENT_QUOTES) ?>?');">
                                             <?= csrfField() ?>
                                             <input type="hidden" name="action" value="toggle_key_status">
                                             <input type="hidden" name="key" value="<?= htmlspecialchars($k['key']) ?>">
-                                            <button type="submit" class="btn btn-sm <?= $isKeyRevoked ? 'btn-primary' : 'btn-danger' ?>" title="<?= $isKeyRevoked ? 'Mở khóa Key' : 'Khóa/Thu hồi Key' ?>">
-                                                <i class="fa-solid <?= $isKeyRevoked ? 'fa-unlock' : 'fa-ban' ?>"></i>
+                                            <button type="submit" class="btn btn-sm btn-primary" title="Mở khóa Key">
+                                                <i class="fa-solid fa-unlock"></i>
                                             </button>
                                         </form>
+                                        <?php else: ?>
+                                        <form method="POST" style="display:inline-block; margin-right: 4px;" onsubmit="return promptKeyBanReason(this, '<?= htmlspecialchars($k['key'], ENT_QUOTES) ?>');">
+                                            <?= csrfField() ?>
+                                            <input type="hidden" name="action" value="toggle_key_status">
+                                            <input type="hidden" name="key" value="<?= htmlspecialchars($k['key']) ?>">
+                                            <input type="hidden" name="ban_reason" value="">
+                                            <button type="submit" class="btn btn-sm btn-danger" title="Khóa/Ban Key">
+                                                <i class="fa-solid fa-ban"></i>
+                                            </button>
+                                        </form>
+                                        <?php endif; ?>
                                         <form method="POST" style="display:inline-block; margin-right: 4px;" onsubmit="return confirm('Reset mã key <?= htmlspecialchars($k['key']) ?>? Toàn bộ thiết bị đã liên kết sẽ bị xóa và thời hạn sẽ được làm mới.');">
                                             <?= csrfField() ?>
                                             <input type="hidden" name="action" value="reset_key">
@@ -1330,6 +1520,7 @@ ksort($keyCreatorMap);
             </div>
         </div>
 
+        <?php if ($isMasterAdmin): ?>
         <!-- TAB SECURITY: KILL-SWITCH, FORCE UPDATE & BUILD MANIFESTS -->
         <div id="securityTab" class="tab-pane" style="display: none;">
             <div class="content-card" style="border: 1px solid <?= $isServerOpenGlobal ? 'rgba(16,185,129,0.35)' : 'rgba(239,68,68,0.55)' ?>;">
@@ -1717,6 +1908,12 @@ ksort($keyCreatorMap);
                                             <span class="badge badge-active"><i class="fa-solid fa-check"></i> Hoạt động</span>
                                         <?php else: ?>
                                             <span class="badge badge-blocked"><i class="fa-solid fa-ban"></i> Đã khóa</span>
+                                            <?php $uBanReason = trim((string)($u['ban_reason'] ?? '')); ?>
+                                            <?php if ($uBanReason !== ''): ?>
+                                                <div style="font-size: 10.5px; color: #fca5a5; margin-top: 4px; max-width: 220px; line-height: 1.3;">
+                                                    Lý do: <?= htmlspecialchars($uBanReason) ?>
+                                                </div>
+                                            <?php endif; ?>
                                         <?php endif; ?>
                                     </td>
                                     <td>
@@ -1773,15 +1970,27 @@ ksort($keyCreatorMap);
                                     </td>
                                     <td>
                                         <div style="display: flex; gap: 5px;">
-                                            <!-- Khóa / Mở -->
-                                            <form method="POST" style="display:inline;">
+                                            <!-- Khóa / Ban hoặc Mở -->
+                                            <?php if (empty($u['is_active'])): ?>
+                                            <form method="POST" style="display:inline;" onsubmit="return confirm('Mở khóa tài khoản <?= htmlspecialchars($u['username'], ENT_QUOTES) ?>? Các key bị khóa theo lệnh ban trước đó cũng sẽ được mở lại.');">
                                                 <?= csrfField() ?>
                                                 <input type="hidden" name="action" value="toggle_status">
                                                 <input type="hidden" name="username" value="<?= htmlspecialchars($u['username']) ?>">
-                                                <button type="submit" class="btn btn-sm <?= empty($u['is_active']) ? 'btn-primary' : 'btn-danger' ?>" title="Đổi trạng thái Khóa/Mở">
-                                                    <?= empty($u['is_active']) ? '<i class="fa-solid fa-unlock"></i>' : '<i class="fa-solid fa-lock"></i>' ?>
+                                                <button type="submit" class="btn btn-sm btn-primary" title="Mở khóa tài khoản & key liên quan">
+                                                    <i class="fa-solid fa-unlock"></i>
                                                 </button>
                                             </form>
+                                            <?php else: ?>
+                                            <form method="POST" style="display:inline;" onsubmit="return promptAccountBanReason(this, '<?= htmlspecialchars($u['username'], ENT_QUOTES) ?>', 'ban', '');">
+                                                <?= csrfField() ?>
+                                                <input type="hidden" name="action" value="toggle_status">
+                                                <input type="hidden" name="username" value="<?= htmlspecialchars($u['username']) ?>">
+                                                <input type="hidden" name="ban_reason" value="">
+                                                <button type="submit" class="btn btn-sm btn-danger" title="Ban/Khóa tài khoản & toàn bộ key đã tạo">
+                                                    <i class="fa-solid fa-lock"></i>
+                                                </button>
+                                            </form>
+                                            <?php endif; ?>
 
                                             <?php if (!empty($u['active_session_token'])): ?>
                                             <!-- Kick phiên đang online (giữ nguyên HWID) -->
@@ -1805,12 +2014,13 @@ ksort($keyCreatorMap);
                                                 </button>
                                             </form>
 
-                                            <!-- Xóa User -->
-                                            <form method="POST" style="display:inline;" onsubmit="return confirm('Xóa vĩnh viễn tài khoản <?= htmlspecialchars($u['username']) ?>?');">
+                                            <!-- Xóa User & khóa cấm toàn bộ key đã tạo -->
+                                            <form method="POST" style="display:inline;" onsubmit="return promptAccountBanReason(this, '<?= htmlspecialchars($u['username'], ENT_QUOTES) ?>', 'delete', '<?= htmlspecialchars((string)($u['ban_reason'] ?? ''), ENT_QUOTES) ?>');">
                                                 <?= csrfField() ?>
                                                 <input type="hidden" name="action" value="delete_user">
                                                 <input type="hidden" name="username" value="<?= htmlspecialchars($u['username']) ?>">
-                                                <button type="submit" class="btn btn-sm btn-danger" title="Xóa tài khoản">
+                                                <input type="hidden" name="ban_reason" value="">
+                                                <button type="submit" class="btn btn-sm btn-danger" title="Xóa tài khoản & khóa cấm toàn bộ key đã tạo">
                                                     <i class="fa-solid fa-trash"></i>
                                                 </button>
                                             </form>
@@ -1952,6 +2162,7 @@ ksort($keyCreatorMap);
                 </div>
             </div>
         </div>
+        <?php endif; ?>
     </div>
 
     <script>
@@ -1975,11 +2186,13 @@ ksort($keyCreatorMap);
                 var creator = row.getAttribute('data-creator') || '';
                 var duration = row.getAttribute('data-duration') || '';
                 var status = row.getAttribute('data-status') || '';
+                var isLocked = row.getAttribute('data-locked') === '1';
                 var textContent = row.textContent.toLowerCase();
 
                 var matchesQuery = !query || key.includes(query) || hwids.includes(query) || creator.includes(query) || textContent.includes(query);
                 var matchesCreator = (creatorFilter === 'all') || (creator === creatorFilter);
-                var matchesStatus = (statusFilter === 'all') || (status === statusFilter);
+                var matchesStatus = (statusFilter === 'all')
+                    || (statusFilter === 'banned' ? isLocked : (status === statusFilter));
 
                 var matchesDuration = true;
                 if (durationFilter !== 'all') {
@@ -2078,6 +2291,36 @@ ksort($keyCreatorMap);
             return true;
         }
 
+        function promptAccountBanReason(form, username, mode, existingReason) {
+            var title = mode === 'delete'
+                ? 'XÓA vĩnh viễn tài khoản "' + username + '" và KHÓA CẤM toàn bộ key do tài khoản này tạo.'
+                : 'BAN / KHÓA tài khoản "' + username + '" và KHÓA CẤM toàn bộ key do tài khoản này tạo.';
+            var fallback = existingReason && existingReason.trim()
+                ? existingReason.trim()
+                : (mode === 'delete' ? 'Tài khoản tạo key đã bị xóa / cấm sử dụng' : 'Tài khoản bị khóa / vi phạm quy định');
+            var reason = prompt(title + '\\n\\nNhập lý do ban (key của tài khoản này sẽ hiển thị đúng lý do này):', fallback);
+            if (reason === null) {
+                return false;
+            }
+            var input = form.querySelector('input[name="ban_reason"]');
+            if (input) {
+                input.value = reason.trim() || fallback;
+            }
+            return true;
+        }
+
+        function promptKeyBanReason(form, keyCode) {
+            var reason = prompt('KHÓA / BAN mã Key:\\n' + keyCode + '\\n\\nNhập lý do khóa (để trống sẽ dùng mặc định):', 'Khóa bởi quản trị viên');
+            if (reason === null) {
+                return false;
+            }
+            var input = form.querySelector('input[name="ban_reason"]');
+            if (input) {
+                input.value = reason.trim() || 'Khóa bởi quản trị viên';
+            }
+            return true;
+        }
+
         function switchTab(tabId, btn) {
             document.querySelectorAll('.tab-pane').forEach(el => el.style.display = 'none');
             document.querySelectorAll('.tab-btn').forEach(el => el.classList.remove('active'));
@@ -2099,6 +2342,10 @@ ksort($keyCreatorMap);
             var urlTab = params.get('tab');
             var savedTab = urlTab || localStorage.getItem('admin_active_tab') || 'keysTab';
             var tabBtn = document.querySelector('.tab-btn[onclick*="' + savedTab + '"]');
+            if (!tabBtn) {
+                savedTab = 'keysTab';
+                tabBtn = document.querySelector('.tab-btn[onclick*="keysTab"]');
+            }
             if (tabBtn) {
                 switchTab(savedTab, tabBtn);
             }

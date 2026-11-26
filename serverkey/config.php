@@ -488,6 +488,11 @@ function resolveClientDeviceIdentity(?string $submittedFp = null, bool $issueCoo
     ];
 }
 
+function getMasterAdminUsername(array $settings): string {
+    $envUser = envValue('ADMIN_USERNAME', '');
+    return $envUser !== '' ? $envUser : (string)($settings['admin_user'] ?? '');
+}
+
 function authenticateAndBindAdminAccount(string $username, string $password, array $settings, array $devInfo, string $clientIp): array {
     $envUser = envValue('ADMIN_USERNAME', '');
     $envHash = envValue('ADMIN_PASS_HASH', '');
@@ -547,7 +552,11 @@ function authenticateAndBindAdminAccount(string $username, string $password, arr
                 continue;
             }
             if (empty($u['is_active'])) {
-                return ['ok' => false, 'code' => 'ACCOUNT_LOCKED', 'username' => (string)$u['username'], 'error' => 'Tài khoản này đã bị khóa!'];
+                $bReason = trim((string)($u['ban_reason'] ?? ''));
+                $errMsg = $bReason !== ''
+                    ? "Tài khoản này đã bị khóa! Lý do: {$bReason}"
+                    : 'Tài khoản này đã bị khóa!';
+                return ['ok' => false, 'code' => 'ACCOUNT_LOCKED', 'username' => (string)$u['username'], 'error' => $errMsg];
             }
             if (!verifyUserPassword($password, (string)($u['password'] ?? ''))) {
                 return ['ok' => false, 'code' => 'BAD_CREDENTIALS', 'username' => (string)$u['username'], 'error' => 'Sai tài khoản hoặc mật khẩu quản trị!'];
@@ -655,8 +664,15 @@ function verifyCurrentAdminSession(array $settings, array $devInfo): array {
     }
 
     $user = findUserByUsername($username);
-    if (!$user || empty($user['is_active']) || strtolower((string)($user['role'] ?? '')) !== 'admin') {
-        return ['valid' => false, 'reason' => 'Tài khoản đã bị khóa hoặc xóa quyền quản trị!'];
+    if (!$user) {
+        return ['valid' => false, 'reason' => 'Tài khoản đã bị xóa khỏi hệ thống!'];
+    }
+    if (empty($user['is_active']) || strtolower((string)($user['role'] ?? '')) !== 'admin') {
+        $bReason = trim((string)($user['ban_reason'] ?? ''));
+        $reasonMsg = $bReason !== ''
+            ? "Tài khoản đã bị khóa! Lý do: {$bReason}"
+            : 'Tài khoản đã bị khóa hoặc xóa quyền quản trị!';
+        return ['valid' => false, 'reason' => $reasonMsg];
     }
     if (!empty($user['expiry_date']) && $user['expiry_date'] !== 'permanent') {
         if (new DateTime() > new DateTime((string)$user['expiry_date'])) {
@@ -726,6 +742,11 @@ function normalizeKey(&$k) {
     } else {
         $k['created_by'] = trim((string)$k['created_by']);
     }
+    if (!isset($k['ban_reason'])) {
+        $k['ban_reason'] = '';
+    } else {
+        $k['ban_reason'] = trim((string)$k['ban_reason']);
+    }
     if (!isset($k['devices']) || !is_array($k['devices'])) {
         $k['devices'] = [];
         if (!empty($k['used_by']) && is_string($k['used_by'])) {
@@ -764,6 +785,62 @@ function getKeys() {
 
 function saveKeys($keys) {
     return writeJsonFile(KEYS_FILE, $keys);
+}
+
+function cascadeBanCreatorKeys(string $creatorUsername, string $reason, string $bannedBy = 'admin'): int {
+    $targetLower = strtolower(trim($creatorUsername));
+    if ($targetLower === '') {
+        return 0;
+    }
+    $cleanReason = trim($reason);
+    if ($cleanReason === '') {
+        $cleanReason = 'Tài khoản tạo key đã bị Admin khóa / cấm';
+    }
+    $nowStr = date('Y-m-d H:i:s');
+
+    return withLockedJson(KEYS_FILE, [], function (&$keys, &$dirty) use ($targetLower, $cleanReason, $bannedBy, $nowStr) {
+        $count = 0;
+        foreach ($keys as &$k) {
+            normalizeKey($k);
+            if (strtolower(trim((string)($k['created_by'] ?? ''))) === $targetLower) {
+                $k['status'] = 'banned';
+                $k['ban_reason'] = $cleanReason;
+                $k['banned_by'] = $bannedBy;
+                $k['banned_at'] = $nowStr;
+                $k['banned_by_account_action'] = true;
+                $count++;
+                $dirty = true;
+            }
+        }
+        unset($k);
+        return $count;
+    });
+}
+
+function cascadeRestoreCreatorKeys(string $creatorUsername): int {
+    $targetLower = strtolower(trim($creatorUsername));
+    if ($targetLower === '') {
+        return 0;
+    }
+
+    return withLockedJson(KEYS_FILE, [], function (&$keys, &$dirty) use ($targetLower) {
+        $count = 0;
+        foreach ($keys as &$k) {
+            normalizeKey($k);
+            if (
+                strtolower(trim((string)($k['created_by'] ?? ''))) === $targetLower
+                && !empty($k['banned_by_account_action'])
+            ) {
+                $k['status'] = 'active';
+                $k['ban_reason'] = '';
+                unset($k['banned_by'], $k['banned_at'], $k['banned_by_account_action']);
+                $count++;
+                $dirty = true;
+            }
+        }
+        unset($k);
+        return $count;
+    });
 }
 
 function getBuildManifests(): array {

@@ -445,7 +445,11 @@ final class CoreEngine {
                 normalizeKey($rec);
                 $status = strtolower((string)($rec['status'] ?? 'active'));
                 if (in_array($status, ['banned', 'disabled', 'revoked'], true)) {
-                    return ['ok' => false, 'code' => 'KEY_REVOKED', 'msg' => 'Mã Key này đã bị khóa hoặc thu hồi!'];
+                    $banReason = trim((string)($rec['ban_reason'] ?? ''));
+                    $msg = $banReason !== ''
+                        ? "Mã Key này đã bị khóa/cấm! Lý do: {$banReason}"
+                        : 'Mã Key này đã bị khóa hoặc thu hồi!';
+                    return ['ok' => false, 'code' => 'KEY_REVOKED', 'msg' => $msg];
                 }
                 $boundPkgs = $rec['bound_packages'] ?? [];
                 if (!empty($boundPkgs) && !in_array($pkg, $boundPkgs, true)) {
