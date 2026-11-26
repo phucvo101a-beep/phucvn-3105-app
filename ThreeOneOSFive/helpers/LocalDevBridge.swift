@@ -225,6 +225,7 @@ public final class LocalDevBridge: ObservableObject {
     private var isRefreshInFlight = false
     private var didTriggerLocalNetworkProbe = false
     private var didLogBundlePrefixNotice = false
+    private var lastAutoRefreshUptime: TimeInterval = 0
     private let workerQueue = DispatchQueue(label: "com.phucvn.3105.localdev.worker", qos: .userInitiated)
     private let networkProbeQueue = DispatchQueue(label: "com.phucvn.3105.localdev.nwprobe", qos: .utility)
     private var activeProbeCancelWorkItem: DispatchWorkItem?
@@ -277,12 +278,30 @@ public final class LocalDevBridge: ObservableObject {
     }
 
     private func publishStatus(_ status: LocalDevStatus, lastError: String? = nil) {
+        let normalizedStatus: LocalDevStatus
+        if status.code == LocalDevCode.localNetworkDenied.rawValue,
+           let bundleID = Bundle.main.bundleIdentifier,
+           bundleID.hasPrefix("com.apple."),
+           !status.message.contains("com.apple.") {
+            normalizedStatus = LocalDevStatus(
+                code: status.code,
+                status: "BỊ CHẶN DO BUNDLE ID 'com.apple.'",
+                message: "Bundle ID '\(bundleID)' bắt đầu bằng 'com.apple.' nên iOS 26/27 ẩn công tắc Mạng cục bộ và chặn kết nối EPERM tới \(status.host ?? "10.7.0.1"):\(status.port ?? 62078). Hãy dùng Bundle ID riêng (com.phucvn.threeoneosfive).",
+                host: status.host,
+                port: status.port,
+                udid: status.udid,
+                is_heartbeat_alive: status.is_heartbeat_alive
+            )
+        } else {
+            normalizedStatus = status
+        }
+
         statusLock.lock()
-        _threadSafeStatus = status
+        _threadSafeStatus = normalizedStatus
         statusLock.unlock()
-        logStatusIfChanged(status)
+        logStatusIfChanged(normalizedStatus)
         DispatchQueue.main.async {
-            self.currentStatus = status
+            self.currentStatus = normalizedStatus
             self.lastError = lastError
             self.isCheckingStatus = false
             AppLog.shared.writeDiagnosticsSnapshot()
@@ -316,10 +335,9 @@ public final class LocalDevBridge: ObservableObject {
         log("localdev: code=\(status.code) [\(status.status)] — \(status.message)")
     }
 
-    /// Triggers iOS Local Network permission evaluation using Apple TN3179 patterns:
+    /// Triggers iOS Local Network permission evaluation using Network.framework (Apple TN3179):
     /// - Step 1: `NWListener` + `NWBrowser` on declared `NSBonjourServices` (`_lockdown._tcp`, `_apple-mobdev2._tcp`)
-    /// - Step 2: Outbound limited UDP broadcast (`255.255.255.255:62078`, no restricted multicast entitlement needed)
-    /// - Step 3: `NWConnection` probe toward `10.7.0.1:62078` for interface/permission telemetry
+    /// - Step 2: `NWConnection` probe toward `10.7.0.1:62078` for interface/permission telemetry (no raw UDP broadcast probe)
     private func triggerLocalNetworkFrameworkProbe(force: Bool) {
         statusLock.lock()
         if didTriggerLocalNetworkProbe && !force {
@@ -391,10 +409,7 @@ public final class LocalDevBridge: ObservableObject {
             mobdevBrowser.start(queue: self.networkProbeQueue)
             self.activeMobdevBrowser = mobdevBrowser
 
-            // 3. Outbound UDP 255.255.255.255 broadcast (TN3179 trigger without multicast entitlement)
-            self.sendUDPLocalBroadcastProbe()
-
-            // 4. NWConnection telemetry probe toward tunnel endpoint
+            // 3. NWConnection telemetry probe toward tunnel endpoint
             if let port = NWEndpoint.Port(rawValue: 62078) {
                 let connParams = NWParameters.tcp
                 connParams.includePeerToPeer = true
@@ -429,44 +444,6 @@ public final class LocalDevBridge: ObservableObject {
         activeMobdevBrowser = nil
         activeProbeConnection?.cancel()
         activeProbeConnection = nil
-    }
-
-    private func sendUDPLocalBroadcastProbe() {
-        let sock = Darwin.socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP)
-        guard sock >= 0 else { return }
-        defer { Darwin.close(sock) }
-
-        var broadcast: Int32 = 1
-        _ = Darwin.setsockopt(
-            sock,
-            SOL_SOCKET,
-            SO_BROADCAST,
-            &broadcast,
-            socklen_t(MemoryLayout<Int32>.size)
-        )
-
-        var addr = sockaddr_in()
-        addr.sin_len = UInt8(MemoryLayout<sockaddr_in>.size)
-        addr.sin_family = sa_family_t(AF_INET)
-        addr.sin_port = UInt16(62078).bigEndian
-        addr.sin_addr = in_addr(s_addr: UInt32.max)
-
-        let payload: [UInt8] = [0x01]
-        let sent = withUnsafePointer(to: addr) { ptr in
-            ptr.withMemoryRebound(to: sockaddr.self, capacity: 1) { sockPtr in
-                Darwin.sendto(
-                    sock,
-                    payload,
-                    payload.count,
-                    0,
-                    sockPtr,
-                    socklen_t(MemoryLayout<sockaddr_in>.size)
-                )
-            }
-        }
-        if sent < 0 {
-            log("localdev: UDP broadcast probe errno=\(errno)")
-        }
     }
 
     public func requestLocalNetworkPermission() {
@@ -544,9 +521,12 @@ public final class LocalDevBridge: ObservableObject {
         for dir in candidateDirs {
             guard let files = try? FileManager.default.contentsOfDirectory(at: dir, includingPropertiesForKeys: nil) else { continue }
             for file in files {
-                let ext = file.pathExtension.lowercased()
-                if ext == "mobiledevicepairing" || ext == "plist",
+                let fileExt = file.pathExtension.lowercased()
+                if fileExt == "mobiledevicepairing" || fileExt == "plist" || fileExt == "pairing",
                    let validURL = ContainerStore.validatedExternalFileURL(file, requireExists: true) {
+                    if fileExt == "plist" && !Self.looksLikePairingFile(at: validURL) {
+                        continue
+                    }
                     if importPairingData(from: validURL) {
                         return true
                     }
@@ -587,7 +567,22 @@ public final class LocalDevBridge: ObservableObject {
         }
     }
 
-    public func refreshStatus() {
+    public func handleAppDidBecomeActive() {
+        guard isModuleEnabled else { return }
+        let now = ProcessInfo.processInfo.systemUptime
+        statusLock.lock()
+        if now - lastAutoRefreshUptime < 0.8 {
+            statusLock.unlock()
+            return
+        }
+        lastAutoRefreshUptime = now
+        let shouldForceProbe = (_threadSafeStatus.code == LocalDevCode.localNetworkDenied.rawValue)
+        statusLock.unlock()
+
+        refreshStatus(force: shouldForceProbe)
+    }
+
+    public func refreshStatus(force: Bool = false) {
         guard isModuleEnabled else {
             publishStatus(Self.disabledStatus(), lastError: nil)
             return
@@ -599,6 +594,7 @@ public final class LocalDevBridge: ObservableObject {
             return
         }
         isRefreshInFlight = true
+        let wasDenied = (_threadSafeStatus.code == LocalDevCode.localNetworkDenied.rawValue)
         statusLock.unlock()
 
         DispatchQueue.main.async {
@@ -617,7 +613,7 @@ public final class LocalDevBridge: ObservableObject {
                 return
             }
 
-            self.triggerLocalNetworkFrameworkProbe(force: false)
+            self.triggerLocalNetworkFrameworkProbe(force: force || wasDenied)
             self.ensureCoreInitialized()
             guard let fnStatus = LocalDevLib.shared.fnStatus,
                   let cStr = fnStatus() else {
@@ -676,6 +672,32 @@ public final class LocalDevBridge: ObservableObject {
         }
     }
 
+    public static func looksLikePairingFile(at url: URL) -> Bool {
+        guard let validURL = ContainerStore.validatedExternalFileURL(url) else { return false }
+        let hasAccess = validURL.startAccessingSecurityScopedResource()
+        defer {
+            if hasAccess {
+                validURL.stopAccessingSecurityScopedResource()
+            }
+        }
+        guard let handle = try? FileHandle(forReadingFrom: validURL) else { return false }
+        defer { try? handle.close() }
+        let prefix = handle.readData(ofLength: 8192)
+        guard !prefix.isEmpty else { return false }
+        let normalized = Self.stripUTF8BOM(prefix)
+        if let dict = Self.parsePlistDictionary(from: normalized),
+           let unwrapped = Self.unwrapPairingDictionary(from: dict) {
+            let analysis = Self.classifyPairingDictionary(unwrapped)
+            if analysis.isValid { return true }
+        }
+        if let str = String(data: normalized, encoding: .utf8) ?? String(data: normalized, encoding: .ascii) {
+            if str.contains("HostCertificate") || str.contains("HostID") || str.contains("public_key") || str.contains("private_key") || str.contains("alt_irk") {
+                return true
+            }
+        }
+        return false
+    }
+
     public func importPairingFile(from url: URL) -> Bool {
         guard let validURL = ContainerStore.validatedExternalFileURL(url) else {
             let msg = "Đường dẫn tệp pairing không hợp lệ hoặc rỗng."
@@ -694,46 +716,136 @@ public final class LocalDevBridge: ObservableObject {
         return importPairingData(from: validURL)
     }
 
+    private func readCoordinatedPairingData(from url: URL) -> Data? {
+        if let direct = try? Data(contentsOf: url), !direct.isEmpty {
+            return direct
+        }
+        var coordinatedData: Data?
+        var coordinatorError: NSError?
+        let coordinator = NSFileCoordinator()
+        coordinator.coordinate(readingItemAt: url, options: .withoutChanges, error: &coordinatorError) { readURL in
+            guard let validReadURL = ContainerStore.validatedExternalFileURL(readURL) else { return }
+            coordinatedData = try? Data(contentsOf: validReadURL)
+        }
+        if let coordinatorError {
+            log("localdev: NSFileCoordinator read error for '\(url.lastPathComponent)': \(coordinatorError.localizedDescription)")
+        }
+        if let data = coordinatedData, !data.isEmpty {
+            return data
+        }
+        return nil
+    }
+
+    private static func stripUTF8BOM(_ data: Data) -> Data {
+        if data.count >= 3 && data[0] == 0xEF && data[1] == 0xBB && data[2] == 0xBF {
+            return Data(data.dropFirst(3))
+        }
+        return data
+    }
+
+    private static func parsePlistDictionary(from data: Data) -> [String: Any]? {
+        var format: PropertyListSerialization.PropertyListFormat = .xml
+        if let obj = try? PropertyListSerialization.propertyList(from: data, options: [], format: &format),
+           let dict = obj as? [String: Any] {
+            return dict
+        }
+        return nil
+    }
+
+    private static func unwrapPairingDictionary(from rawObject: Any, depth: Int = 0) -> [String: Any]? {
+        guard depth < 4, let dict = rawObject as? [String: Any] else { return nil }
+        let lowerKeys = Set(dict.keys.map { $0.lowercased() })
+        let knownMarkers: Set<String> = [
+            "hostcertificate", "devicecertificate", "rootcertificate",
+            "hostprivatekey", "rootprivatekey", "deviceprivatekey",
+            "hostid", "systembuid", "escrowbag", "wifimacaddress",
+            "public_key", "private_key", "alt_irk", "identifier"
+        ]
+        if !lowerKeys.isDisjoint(with: knownMarkers) {
+            return dict
+        }
+        for key in ["PairRecord", "PairingRecord", "RemotePairing", "pairing", "record"] {
+            if let nested = dict[key],
+               let found = unwrapPairingDictionary(from: nested, depth: depth + 1) {
+                return found
+            }
+        }
+        for value in dict.values {
+            if let found = unwrapPairingDictionary(from: value, depth: depth + 1) {
+                return found
+            }
+        }
+        return dict
+    }
+
+    private static func classifyPairingDictionary(_ dict: [String: Any]) -> (isValid: Bool, isRemotePairing: Bool, udid: String?, keys: [String]) {
+        let lookup = Dictionary(
+            dict.map { ($0.key.lowercased(), $0.value) },
+            uniquingKeysWith: { first, _ in first }
+        )
+        let sortedKeys = dict.keys.sorted()
+
+        let hasHostCert = lookup["hostcertificate"] != nil
+        let hasDeviceCert = lookup["devicecertificate"] != nil
+        let hasRootCert = lookup["rootcertificate"] != nil
+        let hasHostPriv = lookup["hostprivatekey"] != nil
+        let hasHostID = lookup["hostid"] != nil
+        let hasSystemBUID = lookup["systembuid"] != nil
+        let hasEscrowBag = lookup["escrowbag"] != nil
+
+        let hasPublicKey = lookup["public_key"] != nil
+        let hasPrivateKey = lookup["private_key"] != nil
+        let hasIdentifier = lookup["identifier"] != nil
+        let hasAltIRK = lookup["alt_irk"] != nil
+
+        let isLockdown = (hasHostCert || hasDeviceCert || hasRootCert || hasHostPriv)
+            && (hasHostID || hasSystemBUID || hasHostCert || hasEscrowBag)
+        let isRemote = (hasPublicKey && hasPrivateKey)
+            || (hasIdentifier && hasAltIRK && (hasPublicKey || hasPrivateKey))
+
+        var udid: String? = nil
+        for key in ["udid", "deviceid", "identifier"] {
+            if let str = lookup[key] as? String, !str.isEmpty {
+                udid = str
+                break
+            }
+        }
+        return (isLockdown || isRemote, !isLockdown && isRemote, udid, sortedKeys)
+    }
+
     private func importPairingData(from url: URL) -> Bool {
-        guard let validURL = ContainerStore.validatedExternalFileURL(url, requireExists: true),
-              let data = try? Data(contentsOf: validURL),
-              !data.isEmpty else {
+        guard let validURL = ContainerStore.validatedExternalFileURL(url),
+              let rawData = readCoordinatedPairingData(from: validURL),
+              !rawData.isEmpty else {
+            let msg = "Không thể đọc nội dung file pairing '\(url.lastPathComponent)' (đường dẫn không hợp lệ, file trống hoặc bị khóa quyền đọc)."
+            log("localdev: \(msg)")
             DispatchQueue.main.async {
-                self.lastError = "Không thể đọc nội dung file pairing (đường dẫn không hợp lệ, file trống hoặc bị khóa quyền đọc)"
+                self.lastError = msg
             }
             return false
         }
 
+        let data = Self.stripUTF8BOM(rawData)
+
         // 1. Validate Pairing File:
         //    - Classic Lockdown XML/bplist00 (`HostCertificate`/`DeviceCertificate` + `HostID`/`SystemBUID`)
-        //    - `idevice pair v1.2.0` Remote Pairing XML plist (`public_key`, `private_key`, `identifier`, `alt_irk`)
+        //    - `idevice pair v1.2.0` Remote Pairing XML/bplist00 (`public_key`, `private_key`, `identifier`, `alt_irk`)
         var parsedUDID: String? = nil
         var isValidPairing = false
         var isRemotePairingFormat = false
+        var parsedKeys: [String] = []
+        var plistFormatLabel = "raw"
 
-        if let plist = (try? PropertyListSerialization.propertyList(from: data, options: [], format: nil)) as? [String: Any] {
-            let hasHostCert = plist["HostCertificate"] != nil
-            let hasDeviceCert = plist["DeviceCertificate"] != nil
-            let hasHostID = plist["HostID"] != nil
-            let hasSystemBUID = plist["SystemBUID"] != nil
-
-            let hasPublicKey = plist["public_key"] != nil
-            let hasPrivateKey = plist["private_key"] != nil
-            let hasIdentifier = plist["identifier"] != nil
-            let hasAltIRK = plist["alt_irk"] != nil
-
-            if (hasHostCert || hasDeviceCert) && (hasHostID || hasSystemBUID) {
-                isValidPairing = true
-            } else if hasPublicKey && hasPrivateKey && (hasIdentifier || hasAltIRK || !plist.isEmpty) {
-                isValidPairing = true
-                isRemotePairingFormat = true
-            }
-
-            if let u = plist["UDID"] as? String, !u.isEmpty {
-                parsedUDID = u
-            } else if let identifier = plist["identifier"] as? String, !identifier.isEmpty {
-                parsedUDID = identifier
-            }
+        var detectedFormat: PropertyListSerialization.PropertyListFormat = .xml
+        if let plistObj = try? PropertyListSerialization.propertyList(from: data, options: [], format: &detectedFormat),
+           let unwrapped = Self.unwrapPairingDictionary(from: plistObj) {
+            plistFormatLabel = (detectedFormat == .binary) ? "bplist00" : "xml-plist"
+            let analysis = Self.classifyPairingDictionary(unwrapped)
+            isValidPairing = analysis.isValid
+            isRemotePairingFormat = analysis.isRemotePairing
+            parsedUDID = analysis.udid
+            parsedKeys = analysis.keys
+            log("localdev: inspect '\(validURL.lastPathComponent)' format=\(plistFormatLabel) bytes=\(data.count) valid=\(isValidPairing) remote=\(isRemotePairingFormat) keys=[\(parsedKeys.joined(separator: ", "))]")
         }
 
         let filename = validURL.deletingPathExtension().lastPathComponent
@@ -743,23 +855,27 @@ public final class LocalDevBridge: ObservableObject {
 
         // Binary plist / XML pairing fallback check (stack-obfuscated on CI builds)
         if !isValidPairing {
-            let prefixData = Data(data.prefix(2048))
+            let prefixData = Data(data.prefix(4096))
             let bplistSig = "bplist00"
-            if let prefixStr = String(data: prefixData, encoding: .utf8) ?? String(data: prefixData, encoding: .ascii) {
+            if data.starts(with: Data(bplistSig.utf8)) {
+                isValidPairing = parsedKeys.isEmpty
+                plistFormatLabel = bplistSig
+            } else if let prefixStr = String(data: prefixData, encoding: .utf8) ?? String(data: prefixData, encoding: .ascii) {
                 if prefixStr.contains("HostCertificate") || prefixStr.contains("HostID") || prefixStr.contains(bplistSig) {
                     isValidPairing = true
                 } else if prefixStr.contains("public_key") && prefixStr.contains("private_key") {
                     isValidPairing = true
                     isRemotePairingFormat = true
                 }
-            } else if data.starts(with: Data(bplistSig.utf8)) {
-                isValidPairing = true
             }
         }
 
         guard isValidPairing else {
+            let keyDesc = parsedKeys.isEmpty ? "không đọc được khóa plist" : "keys=[\(parsedKeys.joined(separator: ", "))]"
+            let msg = "Tệp '\(validURL.lastPathComponent)' không hợp lệ (\(plistFormatLabel), \(data.count) bytes, \(keyDesc)). Cần file Lockdown (HostCertificate/HostID) hoặc Remote Pairing từ idevice pair v1.2.0 (public_key/private_key)."
+            log("localdev: rejected pairing file — \(msg)")
             DispatchQueue.main.async {
-                self.lastError = "Tệp không hợp lệ! Cần file pairing chuẩn Lockdown (HostCertificate/HostID) hoặc Remote Pairing (public_key/private_key)."
+                self.lastError = msg
             }
             return false
         }
@@ -776,8 +892,10 @@ public final class LocalDevBridge: ObservableObject {
         do {
             try data.write(to: targetURL, options: .atomic)
         } catch {
+            let msg = "Lỗi lưu file pairing: \(error.localizedDescription)"
+            log("localdev: \(msg)")
             DispatchQueue.main.async {
-                self.lastError = "Lỗi lưu file: \(error.localizedDescription)"
+                self.lastError = msg
             }
             return false
         }
@@ -805,7 +923,8 @@ public final class LocalDevBridge: ObservableObject {
                         if isRemotePairingFormat && status.code == LocalDevCode.pairingExpiredOrCorrupt.rawValue {
                             self.publishStatus(Self.remotePairingUnsupportedStatus(udid: fallbackUDID), lastError: nil)
                         } else {
-                            self.publishStatus(status, lastError: nil)
+                            let errMsg = (status.code == LocalDevCode.pairingExpiredOrCorrupt.rawValue || status.code == LocalDevCode.remotePairingUnsupported.rawValue) ? status.message : nil
+                            self.publishStatus(status, lastError: errMsg)
                         }
                         return
                     }

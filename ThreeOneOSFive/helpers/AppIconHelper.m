@@ -41,11 +41,11 @@ static NSString *stringForFirstKey(NSDictionary *info, NSArray<NSString *> *keys
 static NSString *pathForFirstKey(NSDictionary *info, NSArray<NSString *> *keys) {
     for (NSString *key in keys) {
         id value = info[key];
-        if ([value isKindOfClass:[NSURL class]]) {
+        if ([value isKindOfClass:[NSURL class]] && [(NSURL *)value isFileURL]) {
             NSString *path = [value path];
-            if (path.length > 0) return path;
+            if (path.length > 0 && [path hasPrefix:@"/"]) return path;
         }
-        if ([value isKindOfClass:[NSString class]] && [value length] > 0) return value;
+        if ([value isKindOfClass:[NSString class]] && [value length] > 0 && [value hasPrefix:@"/"]) return value;
     }
     return nil;
 }
@@ -208,8 +208,13 @@ static NSDictionary *appsFromWorkspace(void) {
                 SEL containerSel = NSSelectorFromString(selectorName);
                 if (![app respondsToSelector:containerSel]) continue;
                 id containerValue = ((id (*)(id, SEL))objc_msgSend)(app, containerSel);
-                NSString *containerPath = [containerValue isKindOfClass:[NSURL class]] ? [containerValue path] : containerValue;
-                if ([containerPath isKindOfClass:[NSString class]] && containerPath.length > 0) {
+                NSString *containerPath = nil;
+                if ([containerValue isKindOfClass:[NSURL class]] && [(NSURL *)containerValue isFileURL]) {
+                    containerPath = [containerValue path];
+                } else if ([containerValue isKindOfClass:[NSString class]]) {
+                    containerPath = containerValue;
+                }
+                if (containerPath.length > 0 && [containerPath hasPrefix:@"/"]) {
                     entry[@"container"] = containerPath;
                     withContainer++;
                     break;
@@ -234,6 +239,7 @@ NSDictionary<NSString *, NSDictionary *> *installedAppInfo(void) {
 
 // Icon via LSApplicationProxy (per bundle ID)
 UIImage *iconForBundleID(NSString *bundleID) {
+    if (bundleID.length == 0) return nil;
     static NSCache<NSString *, UIImage *> *cache;
     static dispatch_once_t onceToken;
     dispatch_once(&onceToken, ^{
@@ -256,6 +262,7 @@ UIImage *iconForBundleID(NSString *bundleID) {
 
 // Name + icon for a single bundle ID via LSApplicationProxy
 NSDictionary *appInfoForBundleID(NSString *bundleID) {
+    if (bundleID.length == 0) return @{};
     NSMutableDictionary *result = [NSMutableDictionary dictionary];
     result[@"name"] = bundleID;
 
@@ -327,8 +334,13 @@ NSDictionary *appInfoForBundleID(NSString *bundleID) {
         SEL containerSel = NSSelectorFromString(selectorName);
         if (![proxy respondsToSelector:containerSel]) continue;
         id value = ((id (*)(id, SEL))objc_msgSend)(proxy, containerSel);
-        NSString *path = [value isKindOfClass:[NSURL class]] ? [value path] : value;
-        if ([path isKindOfClass:[NSString class]] && path.length > 0) {
+        NSString *path = nil;
+        if ([value isKindOfClass:[NSURL class]] && [(NSURL *)value isFileURL]) {
+            path = [value path];
+        } else if ([value isKindOfClass:[NSString class]]) {
+            path = value;
+        }
+        if (path.length > 0 && [path hasPrefix:@"/"]) {
             result[@"container"] = path;
             break;
         }

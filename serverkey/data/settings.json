@@ -20,7 +20,7 @@
   "enforce_binary_hash": false,
   "preset_policies": {},
   "packages": {
-    "com.apple.mobile.MobileHouseArrest": {
+    "com.phucvn.threeoneosfive": {
       "server_open": true,
       "force_update": false,
       "min_required_version": "2.1.0",

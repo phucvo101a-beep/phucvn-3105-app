@@ -144,8 +144,26 @@ impl LocalDevManager {
                 self.active_pairing = None;
                 self.heartbeat.stop();
             } else if self.active_pairing.is_none() {
-                if let Ok(loaded) = PairingFile::load_from_dir(dir) {
-                    self.active_pairing = Some(loaded);
+                if let Some(load_res) = PairingFile::load_any_from_dir(dir) {
+                    match load_res {
+                        Ok(loaded) => self.active_pairing = Some(loaded),
+                        Err(err) if err.starts_with("REMOTE_PAIRING_UNSUPPORTED:") => {
+                            self.heartbeat.stop();
+                            return Ok(remote_pairing_unsupported_report(self.host.clone(), self.port));
+                        }
+                        Err(err) => {
+                            self.heartbeat.stop();
+                            return Ok(LocalDevStatusReport {
+                                code: LocalDevStatusCode::PairingExpiredOrCorrupt as i32,
+                                status: "PAIRING FILE HẾT HẠN / LỖI".to_string(),
+                                message: format!("Không thể phân tích tệp pairing đã lưu: {}", err),
+                                host: self.host.clone(),
+                                port: self.port,
+                                udid: None,
+                                is_heartbeat_alive: false,
+                            });
+                        }
+                    }
                 }
             }
         }
@@ -251,15 +269,36 @@ fn build_failure_report(
     err: &LockdownError,
 ) -> LocalDevStatusReport {
     match err.kind {
-        LockdownErrorKind::PermissionDenied => LocalDevStatusReport {
-            code: LocalDevStatusCode::LocalNetworkDenied as i32,
-            status: "CHƯA CẤP QUYỀN MẠNG CỤC BỘ".to_string(),
-            message: "iOS đang chặn kết nối tới tunnel 10.7.0.1:62078 (EPERM). Hãy bấm 'Kích hoạt quyền Mạng cục bộ' rồi chọn Cho phép (hoặc tắt/bỏ qua LocalDev để dùng thẳng Sandbox & Nhật ký USB).".to_string(),
-            host,
-            port,
-            udid: Some(udid.to_string()),
-            is_heartbeat_alive: false,
-        },
+        LockdownErrorKind::PermissionDenied => {
+            let (bundle_id, _, _) = crate::integrity::read_bundle_identity();
+            if bundle_id.starts_with("com.apple.") {
+                LocalDevStatusReport {
+                    code: LocalDevStatusCode::LocalNetworkDenied as i32,
+                    status: "BỊ CHẶN DO BUNDLE ID HỆ THỐNG".to_string(),
+                    message: format!(
+                        "Bundle ID '{}' có tiền tố 'com.apple.' khiến iOS 26/27 chặn EPERM tới {}:{} và ẩn công tắc Mạng cục bộ trong Cài đặt. Cần build lại bằng Bundle ID riêng (ví dụ: com.phucvn.threeoneosfive). Chi tiết: {}",
+                        bundle_id, host, port, err.detail
+                    ),
+                    host,
+                    port,
+                    udid: Some(udid.to_string()),
+                    is_heartbeat_alive: false,
+                }
+            } else {
+                LocalDevStatusReport {
+                    code: LocalDevStatusCode::LocalNetworkDenied as i32,
+                    status: "CHƯA CẤP QUYỀN MẠNG CỤC BỘ".to_string(),
+                    message: format!(
+                        "iOS đang chặn kết nối tới tunnel {}:{} (EPERM — {}). Hãy bấm 'Kích hoạt quyền Mạng cục bộ' -> Cho phép, hoặc bật công tắc 'Mạng cục bộ' trong Cài đặt -> 3105 x PHUCVN rồi quay lại app.",
+                        host, port, err.detail
+                    ),
+                    host,
+                    port,
+                    udid: Some(udid.to_string()),
+                    is_heartbeat_alive: false,
+                }
+            }
+        }
         LockdownErrorKind::PairingRejected => LocalDevStatusReport {
             code: LocalDevStatusCode::PairingExpiredOrCorrupt as i32,
             status: "PAIRING FILE HẾT HẠN / LỖI".to_string(),

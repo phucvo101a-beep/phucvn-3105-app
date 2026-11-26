@@ -3,6 +3,7 @@ import UniformTypeIdentifiers
 
 public struct LocalDevStatusCard: View {
     @ObservedObject private var bridge = LocalDevBridge.shared
+    @Environment(\.scenePhase) private var scenePhase
     @State private var showFilePicker = false
 
     public init() {}
@@ -196,14 +197,24 @@ public struct LocalDevStatusCard: View {
                     }
 
                     if bridge.currentStatus.code == LocalDevCode.localNetworkDenied.rawValue {
-                        if let bundleID = Bundle.main.bundleIdentifier, bundleID.hasPrefix("com.apple.") {
-                            Text("Lưu ý iOS 26/27: Bundle ID '\(bundleID)' bắt đầu bằng 'com.apple.' có thể bị iOS ẩn mục 'Mạng cục bộ' trong Cài đặt. Hãy bấm 'Kích hoạt quyền Mạng cục bộ' để hệ thống gọi lại hộp thoại Network.framework (hoặc dùng Bundle ID riêng khi build nếu cần nút gạt trong Cài đặt).")
-                                .font(.system(size: 10, weight: .medium))
-                                .foregroundStyle(Color.yellow.opacity(0.9))
-                                .fixedSize(horizontal: false, vertical: true)
-                                .padding(.horizontal, 9)
-                                .padding(.vertical, 6)
-                                .background(Color.yellow.opacity(0.12), in: RoundedRectangle(cornerRadius: 8, style: .continuous))
+                        if let bundleID = Bundle.main.bundleIdentifier, !bundleID.isEmpty {
+                            if bundleID.hasPrefix("com.apple.") {
+                                Text("Lưu ý iOS 26/27: Bundle ID '\(bundleID)' bắt đầu bằng 'com.apple.' nên iOS ẩn mục 'Mạng cục bộ' trong Cài đặt và chặn kết nối tunnel (EPERM). Hãy cài bản build dùng Bundle ID riêng (com.phucvn.threeoneosfive) rồi bật công tắc Mạng cục bộ.")
+                                    .font(.system(size: 10, weight: .medium))
+                                    .foregroundStyle(Color.yellow.opacity(0.95))
+                                    .fixedSize(horizontal: false, vertical: true)
+                                    .padding(.horizontal, 9)
+                                    .padding(.vertical, 6)
+                                    .background(Color.yellow.opacity(0.14), in: RoundedRectangle(cornerRadius: 8, style: .continuous))
+                            } else {
+                                Text("Ứng dụng '\(bundleID)' đang bị từ chối quyền Mạng cục bộ (EPERM). Bấm 'Kích hoạt quyền Mạng cục bộ' hoặc mở Cài Đặt iPhone để bật công tắc Mạng cục bộ, sau đó quay lại app — trạng thái sẽ tự cập nhật.")
+                                    .font(.system(size: 10, weight: .medium))
+                                    .foregroundStyle(Color.orange.opacity(0.95))
+                                    .fixedSize(horizontal: false, vertical: true)
+                                    .padding(.horizontal, 9)
+                                    .padding(.vertical, 6)
+                                    .background(Color.orange.opacity(0.12), in: RoundedRectangle(cornerRadius: 8, style: .continuous))
+                            }
                         }
 
                         HStack(spacing: 8) {
@@ -287,10 +298,12 @@ public struct LocalDevStatusCard: View {
         .sheet(isPresented: $showFilePicker) {
             FileDocumentPicker(
                 allowedContentTypes: [
-                    UTType.item,
+                    UTType.propertyList,
+                    UTType.xml,
                     UTType.data,
-                    UTType.propertyList
+                    UTType.item
                 ],
+                copiesSelectedDocument: true,
                 allowsMultipleSelection: false,
                 onSelection: { result in
                     showFilePicker = false
@@ -312,6 +325,11 @@ public struct LocalDevStatusCard: View {
         .onAppear {
             if bridge.isModuleEnabled {
                 bridge.refreshStatus()
+            }
+        }
+        .onChange(of: scenePhase) { phase in
+            if phase == .active, bridge.isModuleEnabled {
+                bridge.handleAppDidBecomeActive()
             }
         }
     }

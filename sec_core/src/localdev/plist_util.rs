@@ -64,6 +64,13 @@ impl PlistValue {
     }
 }
 
+/// Returns sorted list of dictionary key names for non-sensitive diagnostics logging
+pub fn dict_key_names(dict: &HashMap<String, PlistValue>) -> Vec<String> {
+    let mut keys: Vec<String> = dict.keys().cloned().collect();
+    keys.sort();
+    keys
+}
+
 // ==============================================================================
 // BASE64 ENCODER / DECODER
 // ==============================================================================
@@ -145,9 +152,10 @@ pub fn parse_plist(data: &[u8]) -> Result<PlistValue, String> {
 }
 
 pub fn parse_xml_plist(xml: &str) -> Result<PlistValue, String> {
+    let clean_xml = xml.trim_start_matches('\u{FEFF}');
     let mut cursor = 0;
-    skip_xml_declaration_and_doctypes(xml, &mut cursor);
-    parse_xml_element(xml, &mut cursor)
+    skip_xml_declaration_and_doctypes(clean_xml, &mut cursor);
+    parse_xml_element(clean_xml, &mut cursor)
 }
 
 fn skip_xml_declaration_and_doctypes(xml: &str, cursor: &mut usize) {
@@ -160,7 +168,13 @@ fn skip_xml_declaration_and_doctypes(xml: &str, cursor: &mut usize) {
                 continue;
             }
         }
-        if xml[*cursor..].starts_with("<!DOCTYPE") || xml[*cursor..].starts_with("<!--") {
+        if xml[*cursor..].starts_with("<!--") {
+            if let Some(end) = xml[*cursor..].find("-->") {
+                *cursor += end + 3;
+                continue;
+            }
+        }
+        if xml[*cursor..].starts_with("<!DOCTYPE") {
             if let Some(end) = xml[*cursor..].find('>') {
                 *cursor += end + 1;
                 continue;
@@ -286,6 +300,12 @@ fn parse_xml_dict(xml: &str, cursor: &mut usize) -> Result<PlistValue, String> {
             break;
         }
 
+        if xml[*cursor..].starts_with("<!--") {
+            if let Some(end) = xml[*cursor..].find("-->") {
+                *cursor += end + 3;
+                continue;
+            }
+        }
         if xml[*cursor..].starts_with("<key>") {
             let key = parse_xml_leaf(xml, cursor, "<key>", "</key>")?;
             skip_whitespace(xml, cursor);
@@ -424,8 +444,31 @@ fn parse_bplist_object(
             PlistValue::Integer(val)
         }
         0x20 => {
-            // Real (float)
-            PlistValue::Real(0.0)
+            // Real (float, 2^count bytes)
+            let bytes_len = 1usize << count;
+            if bytes_len == 4 && cur + 4 <= data.len() {
+                let bits = u32::from_be_bytes([data[cur], data[cur + 1], data[cur + 2], data[cur + 3]]);
+                PlistValue::Real(f32::from_bits(bits) as f64)
+            } else if bytes_len == 8 && cur + 8 <= data.len() {
+                let bits = u64::from_be_bytes([
+                    data[cur], data[cur + 1], data[cur + 2], data[cur + 3],
+                    data[cur + 4], data[cur + 5], data[cur + 6], data[cur + 7],
+                ]);
+                PlistValue::Real(f64::from_bits(bits))
+            } else {
+                PlistValue::Real(0.0)
+            }
+        }
+        0x30 => {
+            // Apple Date (8-byte float seconds since 2001-01-01)
+            if cur + 8 > data.len() {
+                return Err("bplist date out of bounds".to_string());
+            }
+            let bits = u64::from_be_bytes([
+                data[cur], data[cur + 1], data[cur + 2], data[cur + 3],
+                data[cur + 4], data[cur + 5], data[cur + 6], data[cur + 7],
+            ]);
+            PlistValue::Real(f64::from_bits(bits))
         }
         0x40 => {
             // Data
@@ -437,13 +480,13 @@ fn parse_bplist_object(
             }
             PlistValue::Data(data[cur..cur + count].to_vec())
         }
-        0x50 => {
-            // ASCII String
+        0x50 | 0x70 => {
+            // ASCII / UTF-8 String
             if count == 0x0F {
                 count = read_bplist_length(data, &mut cur, get_offset)?;
             }
             if cur + count > data.len() {
-                return Err("bplist ASCII string out of bounds".to_string());
+                return Err("bplist string out of bounds".to_string());
             }
             let s = String::from_utf8_lossy(&data[cur..cur + count]).to_string();
             PlistValue::String(s)
@@ -464,7 +507,19 @@ fn parse_bplist_object(
             let s = String::from_utf16_lossy(&u16s);
             PlistValue::String(s)
         }
-        0xA0 => {
+        0x80 => {
+            // UID (count + 1 bytes unsigned integer)
+            let bytes_len = (count + 1).min(8);
+            if cur + bytes_len > data.len() {
+                return Err("bplist UID out of bounds".to_string());
+            }
+            let mut val = 0i64;
+            for &b in &data[cur..cur + bytes_len] {
+                val = (val << 8) | (b as i64);
+            }
+            PlistValue::Integer(val)
+        }
+        0xA0 | 0xB0 | 0xC0 => {
             // Array
             if count == 0x0F {
                 count = read_bplist_length(data, &mut cur, get_offset)?;

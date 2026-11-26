@@ -87,10 +87,15 @@ enum DevicePatchService {
 
         for bundleID in bundleIDs {
             guard let path = ContainerStore.resolveAppContainerPath(bundleID: bundleID),
-                  ContainerStore.isApplicationContainerPath(path) else {
+                  ContainerStore.isApplicationContainerPath(path),
+                  let containerURL = ContainerStore.validatedLocalFileURL(
+                      fromPath: path,
+                      isDirectory: true,
+                      requireExists: true
+                  ) else {
                 throw PatchPackageError.targetAppUnavailable(bundleID)
             }
-            roots[bundleID] = PatchPathValidator.canonicalFileURL(URL(fileURLWithPath: path, isDirectory: true))
+            roots[bundleID] = PatchPathValidator.canonicalFileURL(containerURL)
         }
         return try operation(roots)
     }

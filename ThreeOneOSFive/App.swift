@@ -103,7 +103,16 @@ private struct SecurityGateRootView: View {
                         .opacity(showOnboarding ? 0 : 1)
                         .allowsHitTesting(!showOnboarding)
                         .onOpenURL { url in
-                            patchDraftCoordinator.presentImport(url)
+                            guard url.isFileURL else { return }
+                            let ext = url.pathExtension.lowercased()
+                            if let validURL = ContainerStore.validatedExternalFileURL(url) {
+                                if ext == "mobiledevicepairing" || ext == "pairing"
+                                    || (ext == "plist" && LocalDevBridge.looksLikePairingFile(at: validURL)) {
+                                    _ = LocalDevBridge.shared.importPairingFile(from: validURL)
+                                    return
+                                }
+                                patchDraftCoordinator.presentImport(validURL)
+                            }
                         }
 
                     if showOnboarding {
@@ -142,6 +151,9 @@ private struct SecurityGateRootView: View {
         .onChange(of: scenePhase) { phase in
             if phase == .active {
                 keyAuth.verifyLiveSessionOnForeground()
+                if LocalDevBridge.shared.isModuleEnabled {
+                    LocalDevBridge.shared.handleAppDidBecomeActive()
+                }
                 if !showOnboarding && keyAuth.activeVerifiedTicket != nil {
                     appState.detectSupport()
                 }

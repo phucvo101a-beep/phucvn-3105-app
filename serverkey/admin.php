@@ -1596,7 +1596,7 @@ ksort($keyCreatorMap);
                     <div class="form-row">
                         <div>
                             <label class="form-label">Package / Bundle ID</label>
-                            <input type="text" name="package_id" class="form-input" value="com.apple.mobile.MobileHouseArrest" required>
+                            <input type="text" name="package_id" class="form-input" value="com.phucvn.threeoneosfive" required>
                         </div>
                         <div>
                             <label class="form-label">Min Version</label>
@@ -1721,7 +1721,7 @@ ksort($keyCreatorMap);
                     <?= csrfField() ?>
                     <input type="hidden" name="action" value="add_build_manifest">
                     <div class="form-row">
-                        <div><label class="form-label">Package ID</label><input type="text" name="package_id" class="form-input" value="com.apple.mobile.MobileHouseArrest" required></div>
+                        <div><label class="form-label">Package ID</label><input type="text" name="package_id" class="form-input" value="com.phucvn.threeoneosfive" required></div>
                         <div><label class="form-label">Version</label><input type="text" name="version" class="form-input" placeholder="2.1.0" required></div>
                         <div><label class="form-label">Build</label><input type="text" name="build" class="form-input" placeholder="9"></div>
                     </div>

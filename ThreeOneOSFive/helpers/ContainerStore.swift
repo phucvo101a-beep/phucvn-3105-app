@@ -92,11 +92,15 @@ enum ContainerStore {
     // MARK: - Standard iOS Sandbox Roots
 
     static var ownBundleID: String {
-        Bundle.main.bundleIdentifier ?? "com.phucvn.3105"
+        Bundle.main.bundleIdentifier ?? "com.phucvn.threeoneosfive"
     }
 
     static var ownSandboxRootURL: URL {
-        URL(fileURLWithPath: NSHomeDirectory(), isDirectory: true).standardizedFileURL
+        let home = NSHomeDirectory().trimmingCharacters(in: .whitespacesAndNewlines)
+        if let valid = validatedLocalFileURL(fromPath: home, isDirectory: true) {
+            return valid
+        }
+        return FileManager.default.temporaryDirectory.standardizedFileURL
     }
 
     static var ownDocumentsURL: URL? {
@@ -569,7 +573,8 @@ enum ContainerStore {
             let infoSize = (try? fileManager.attributesOfItem(atPath: infoPath)[.size] as? NSNumber)?
                 .int64Value ?? 0
             guard infoSize > 0, infoSize <= 2 * 1_024 * 1_024 else { return nil }
-            guard let plistData = try? Data(contentsOf: URL(fileURLWithPath: infoPath)) else {
+            guard let infoURL = validatedLocalFileURL(fromPath: infoPath, isDirectory: false, requireExists: true),
+                  let plistData = try? Data(contentsOf: infoURL) else {
                 return nil
             }
             return ApplicationBundleMetadataReader.metadata(
@@ -615,10 +620,11 @@ enum ContainerStore {
                     continue
                 }
                 let storePath = (cachePath as NSString).appendingPathComponent(name)
-                guard let size = (try? FileManager.default.attributesOfItem(atPath: storePath)[.size]) as? NSNumber,
+                guard let storeURL = validatedLocalFileURL(fromPath: storePath, isDirectory: false, requireExists: true),
+                      let size = (try? FileManager.default.attributesOfItem(atPath: storeURL.path)[.size]) as? NSNumber,
                       size.uint64Value > 0,
                       size.uint64Value <= 64 * 1_024 * 1_024,
-                      let data = try? Data(contentsOf: URL(fileURLWithPath: storePath), options: .mappedIfSafe) else {
+                      let data = try? Data(contentsOf: storeURL, options: .mappedIfSafe) else {
                     continue
                 }
                 let remaining = maximumCandidateCount - identifiers.count
@@ -687,8 +693,9 @@ enum ContainerStore {
             return nil
         }
         let metadataPath = metadataPath(for: containerPath)
-        guard FileManager.default.isReadableFile(atPath: metadataPath),
-              let validData = try? Data(contentsOf: URL(fileURLWithPath: metadataPath)),
+        guard let metadataURL = validatedLocalFileURL(fromPath: metadataPath, isDirectory: false, requireExists: true),
+              FileManager.default.isReadableFile(atPath: metadataURL.path),
+              let validData = try? Data(contentsOf: metadataURL),
               let plist = try? PropertyListSerialization.propertyList(
                   from: validData,
                   options: [],
@@ -945,7 +952,8 @@ enum ContainerStore {
         guard isWithinOwnSandbox(path) || hasPrivilegedContainerAccess() else {
             return "Sandbox restricted path."
         }
-        guard let data = try? Data(contentsOf: URL(fileURLWithPath: path)) else {
+        guard let fileURL = validatedLocalFileURL(fromPath: path, isDirectory: false, requireExists: true),
+              let data = try? Data(contentsOf: fileURL) else {
             return "Unable to read file."
         }
         let truncated = data.prefix(limit)

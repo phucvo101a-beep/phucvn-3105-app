@@ -591,7 +591,13 @@ struct FileBrowserView: View {
     }
 
     private func openDirectoryInNewTab(_ entry: FileEntry) {
-        guard let filesTabSession else { return }
+        guard entry.isDirectory, let filesTabSession else { return }
+        let isValidPath = LocalDevVirtualPath.isLocalDevPath(entry.path)
+            || ContainerStore.validatedLocalFileURL(fromPath: entry.path, isDirectory: true) != nil
+        guard isValidPath else {
+            log("filebrowser: ignored openDirectoryInNewTab with invalid path='\(entry.path)'")
+            return
+        }
         var updatedSession = filesTabSession.wrappedValue
         updatedSession.openTab(
             navigationPath: [
@@ -1201,13 +1207,21 @@ struct FileBrowserView: View {
                 "replace=\(replaceExisting)"
         )
         DispatchQueue.global(qos: .userInitiated).async {
-            let hasSecurityScope = sourceURL.startAccessingSecurityScopedResource()
+            guard let validSourceURL = ContainerStore.validatedExternalFileURL(sourceURL) else {
+                log("filebrowser: ignored import with invalid sourceURL")
+                DispatchQueue.main.async {
+                    activityText = nil
+                    recordImportFailure(FileManagerOperationError.sourceMissing, sourceURL: sourceURL)
+                }
+                return
+            }
+            let hasSecurityScope = validSourceURL.startAccessingSecurityScopedResource()
             defer {
-                if hasSecurityScope { sourceURL.stopAccessingSecurityScopedResource() }
+                if hasSecurityScope { validSourceURL.stopAccessingSecurityScopedResource() }
             }
             do {
                 let result = try FileManagerService.importFile(
-                    sourceURL,
+                    validSourceURL,
                     into: destinationDirectory,
                     replaceExisting: replaceExisting
                 )
@@ -1549,18 +1563,34 @@ struct FileBrowserView: View {
                     "source=\(selection.sourceURL.lastPathComponent)"
             )
             DispatchQueue.global(qos: .userInitiated).async {
-                let hasSecurityScope = selection.sourceURL.startAccessingSecurityScopedResource()
+                guard let validSourceURL = ContainerStore.validatedExternalFileURL(selection.sourceURL),
+                      let validTargetURL = ContainerStore.validatedLocalFileURL(
+                          fromPath: selection.targetURL.path,
+                          isDirectory: false,
+                          requireExists: true
+                      ) else {
+                    log("filebrowser: ignored replacement with invalid source or target URL")
+                    DispatchQueue.main.async {
+                        activityText = nil
+                        replacementNotice = FileReplacementNotice(
+                            title: language.text("browser.replace_error_title"),
+                            message: replacementErrorMessage(FileReplacementError.sourceMissing)
+                        )
+                    }
+                    return
+                }
+                let hasSecurityScope = validSourceURL.startAccessingSecurityScopedResource()
                 log("filebrowser: replacement source access securityScope=\(hasSecurityScope)")
                 defer {
                     if hasSecurityScope {
-                        selection.sourceURL.stopAccessingSecurityScopedResource()
+                        validSourceURL.stopAccessingSecurityScopedResource()
                     }
                 }
                 do {
                     log("filebrowser: replacement copy begin target=\(selection.targetName)")
                     let replacement = try FileReplacementService.replace(
-                        target: selection.targetURL,
-                        with: selection.sourceURL
+                        target: validTargetURL,
+                        with: validSourceURL
                     )
                     let size = ByteCountFormatter.string(
                         fromByteCount: replacement.byteCount,
@@ -2103,7 +2133,9 @@ private struct FileQuickLookController: UIViewControllerRepresentable {
             self.url = url
         }
 
-        func numberOfPreviewItems(in controller: QLPreviewController) -> Int { 1 }
+        func numberOfPreviewItems(in controller: QLPreviewController) -> Int {
+            (url.isFileURL && !url.path.isEmpty) ? 1 : 0
+        }
 
         func previewController(
             _ controller: QLPreviewController,

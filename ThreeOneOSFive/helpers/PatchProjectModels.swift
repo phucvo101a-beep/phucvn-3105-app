@@ -332,7 +332,9 @@ enum PatchPathValidator {
     }
 
     static func canonicalFileURL(_ url: URL) -> URL {
+        guard url.isFileURL else { return url }
         var path = url.standardizedFileURL.path
+        guard !path.isEmpty, path.hasPrefix("/") else { return url }
         if path == "/var" || path.hasPrefix("/var/") {
             path = "/private" + path
         }

@@ -12,7 +12,7 @@ class AppLog: ObservableObject {
     private static let maxInMemoryEntries = 2_000
     private static let maxLogFileBytes: UInt64 = 512 * 1_024
     private let logger = Logger(
-        subsystem: Bundle.main.bundleIdentifier ?? "com.phucvn.3105",
+        subsystem: Bundle.main.bundleIdentifier ?? "com.phucvn.threeoneosfive",
         category: "runtime"
     )
     private let fileQueue = DispatchQueue(label: "com.phucvn.3105.applog.file", qos: .utility)
@@ -62,9 +62,11 @@ class AppLog: ObservableObject {
         let openInPlaceEnabled = (Bundle.main.object(forInfoDictionaryKey: "LSSupportsOpeningDocumentsInPlace") as? Bool) ?? false
 
         let ldSnapshot = LocalDevBridge.shared.currentStatusSnapshot
+        let bundleID = Bundle.main.bundleIdentifier ?? ""
         var payload: [String: Any] = [
             "generated_at": Self.isoTimestamp(),
-            "bundle_id": Bundle.main.bundleIdentifier ?? "",
+            "bundle_id": bundleID,
+            "bundle_id_is_apple_prefix": bundleID.hasPrefix("com.apple."),
             "app_version": (Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String) ?? "",
             "app_build": (Bundle.main.object(forInfoDictionaryKey: "CFBundleVersion") as? String) ?? "",
             "ios_version": AppInfo.osVersion,
@@ -92,6 +94,8 @@ class AppLog: ObservableObject {
 
         fileQueue.async { [weak self] in
             guard let url = self?.environmentFileURL,
+                  url.isFileURL,
+                  !url.path.isEmpty,
                   let data = try? JSONSerialization.data(withJSONObject: payload, options: [.prettyPrinted, .sortedKeys]) else {
                 return
             }
@@ -245,11 +249,14 @@ enum ExploitStatus: Equatable {
 enum AppPaths {
     static var backups: String {
         let u = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first
-            ?? URL(fileURLWithPath: NSTemporaryDirectory(), isDirectory: true)
+            ?? FileManager.default.temporaryDirectory
         let b = u.appendingPathComponent("backups", isDirectory: true)
         try? FileManager.default.createDirectory(at: b, withIntermediateDirectories: true)
         return b.path
     }
 
-    static var backupsURL: URL { URL(fileURLWithPath: backups, isDirectory: true) }
+    static var backupsURL: URL {
+        ContainerStore.validatedLocalFileURL(fromPath: backups, isDirectory: true)
+            ?? FileManager.default.temporaryDirectory
+    }
 }

@@ -37,8 +37,9 @@ except ImportError as exc:
     sys.exit(1)
 
 DEFAULT_BUNDLE_IDS = (
-    "com.apple.mobile.MobileHouseArrest",
+    "com.phucvn.threeoneosfive",
     "com.phucvn.3105",
+    "com.apple.mobile.MobileHouseArrest",
 )
 
 

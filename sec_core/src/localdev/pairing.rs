@@ -1,7 +1,8 @@
 //! iOS Pairing File (.mobiledevicepairing / pair.plist) Parser & Storage Manager
 //! Fully compatible with iOS 15.0 - iOS 27.2.1
 
-use super::plist_util::{base64_decode, parse_plist, PlistValue};
+use super::plist_util::{base64_decode, dict_key_names, parse_plist, PlistValue};
+use std::collections::HashMap;
 use std::fs;
 use std::path::{Path, PathBuf};
 
@@ -21,55 +22,54 @@ impl PairingFile {
     /// Parses raw bytes of a .mobiledevicepairing or .plist file (XML or bplist00)
     pub fn parse(raw_data: &[u8]) -> Result<Self, String> {
         let root = parse_plist(raw_data)?;
-        let dict = root.as_dict().ok_or_else(|| "Pairing file root must be a Dictionary".to_string())?;
+        let root_dict = root
+            .as_dict()
+            .ok_or_else(|| "Pairing file root must be a Dictionary".to_string())?;
+        let dict = unwrap_pairing_dict(root_dict);
+        let keys_summary = dict_key_names(dict).join(", ");
 
-        // Detect `idevice pair v1.2.0` Remote Pairing plist (`public_key`, `private_key`, `identifier`, `alt_irk`)
-        if dict.contains_key("public_key")
-            && dict.contains_key("private_key")
-            && !dict.contains_key("HostCertificate")
-            && !dict.contains_key("HostID")
-        {
-            return Err("REMOTE_PAIRING_UNSUPPORTED: Đã nhận diện tệp Remote Pairing (public_key / private_key / identifier / alt_irk), nhưng libsec_core.dylib hiện tại chỉ hỗ trợ Lockdown X.509 TLS (HostCertificate / HostID trên cổng 62078).".to_string());
+        // Detect `idevice pair v1.2.0` Remote Pairing plist (XML or bplist00)
+        // Keys typically: `public_key`, `private_key`, `identifier`, `alt_irk`
+        if is_remote_pairing_dict(dict) {
+            return Err("REMOTE_PAIRING_UNSUPPORTED: Đã nhận diện tệp Remote Pairing (public_key / private_key / identifier / alt_irk), nhưng libsec_core.dylib hiện tại chỉ hỗ trợ Lockdown X.509 TLS (HostCertificate & HostPrivateKey trên cổng 62078).".to_string());
         }
 
-        // 1. HostID
-        let host_id = dict.get("HostID")
-            .and_then(|v| v.as_str())
-            .ok_or_else(|| "Missing required 'HostID' in pairing file".to_string())?
-            .to_string();
+        // 1. HostID / SystemBUID (accept SystemBUID as HostID fallback if omitted)
+        let system_buid_opt = get_str_ci(dict, &["SystemBUID"]);
+        let host_id = get_str_ci(dict, &["HostID"])
+            .or_else(|| system_buid_opt.clone())
+            .filter(|s| !s.is_empty())
+            .ok_or_else(|| format!("Missing required 'HostID'/'SystemBUID' (keys found: [{}])", keys_summary))?;
 
         // 2. SystemBUID
-        let system_buid = dict.get("SystemBUID")
-            .and_then(|v| v.as_str())
-            .unwrap_or("00000000-0000-0000-0000-000000000000")
-            .to_string();
+        let system_buid = system_buid_opt
+            .unwrap_or_else(|| "00000000-0000-0000-0000-000000000000".to_string());
 
         // 3. UDID
-        let udid = dict.get("UDID")
-            .and_then(|v| v.as_str())
-            .or_else(|| dict.get("DeviceUDID").and_then(|v| v.as_str()))
-            .unwrap_or("unknown-udid")
-            .to_string();
+        let udid = get_str_ci(dict, &["UDID", "DeviceUDID", "TargetIdentifier", "identifier"])
+            .unwrap_or_else(|| "unknown-udid".to_string());
 
         // 4. HostCertificate
-        let host_cert_raw = extract_bytes(dict, "HostCertificate")
-            .ok_or_else(|| "Missing required 'HostCertificate' in pairing file".to_string())?;
+        let host_cert_raw = extract_bytes_ci(dict, &["HostCertificate"])
+            .ok_or_else(|| format!("Missing required 'HostCertificate' (keys found: [{}])", keys_summary))?;
         let host_certificate_der = normalize_to_der(&host_cert_raw)?;
 
         // 5. HostPrivateKey
-        let host_key_raw = extract_bytes(dict, "HostPrivateKey")
-            .ok_or_else(|| "Missing required 'HostPrivateKey' in pairing file".to_string())?;
+        let host_key_raw = extract_bytes_ci(dict, &["HostPrivateKey"])
+            .ok_or_else(|| format!("Missing required 'HostPrivateKey' (keys found: [{}])", keys_summary))?;
         let host_private_key_der = normalize_to_der(&host_key_raw)?;
 
-        // 6. RootCertificate
-        let root_cert_raw = extract_bytes(dict, "RootCertificate")
-            .ok_or_else(|| "Missing required 'RootCertificate' in pairing file".to_string())?;
-        let root_certificate_der = normalize_to_der(&root_cert_raw)?;
+        // 6. RootCertificate (optional fallback to empty if Lockdown file omits it)
+        let root_certificate_der = match extract_bytes_ci(dict, &["RootCertificate"]) {
+            Some(raw) => normalize_to_der(&raw)?,
+            None => Vec::new(),
+        };
 
-        // 7. DeviceCertificate
-        let device_cert_raw = extract_bytes(dict, "DeviceCertificate")
-            .ok_or_else(|| "Missing required 'DeviceCertificate' in pairing file".to_string())?;
-        let device_certificate_der = normalize_to_der(&device_cert_raw)?;
+        // 7. DeviceCertificate (optional fallback; `DeviceCertVerifier` tolerates empty)
+        let device_certificate_der = match extract_bytes_ci(dict, &["DeviceCertificate"]) {
+            Some(raw) => normalize_to_der(&raw)?,
+            None => Vec::new(),
+        };
 
         // Validate that key and certificates are non-empty
         if host_id.is_empty() || host_certificate_der.is_empty() || host_private_key_der.is_empty() {
@@ -99,8 +99,8 @@ impl PairingFile {
         Ok(file_path)
     }
 
-    /// Loads pairing file from persistent storage directory
-    pub fn load_from_dir(dir: &Path) -> Result<Self, String> {
+    /// Loads saved Lockdown pairing file if present in directory, preserving parse diagnostics
+    pub fn load_any_from_dir(dir: &Path) -> Option<Result<Self, String>> {
         let candidate1 = dir.join("pairing.mobiledevicepairing");
         let candidate2 = dir.join("pairing.plist");
 
@@ -109,19 +109,72 @@ impl PairingFile {
         } else if candidate2.exists() {
             candidate2
         } else {
-            return Err("No pairing file found in directory".to_string());
+            return None;
         };
 
-        let data = fs::read(&target).map_err(|e| format!("Failed to read stored pairing: {}", e))?;
-        Self::parse(&data)
+        Some(
+            fs::read(&target)
+                .map_err(|e| format!("Failed to read stored pairing: {}", e))
+                .and_then(|data| Self::parse(&data)),
+        )
+    }
+
+    /// Loads pairing file from persistent storage directory
+    pub fn load_from_dir(dir: &Path) -> Result<Self, String> {
+        match Self::load_any_from_dir(dir) {
+            Some(res) => res,
+            None => Err("No pairing file found in directory".to_string()),
+        }
     }
 }
 
-fn extract_bytes(dict: &std::collections::HashMap<String, PlistValue>, key: &str) -> Option<Vec<u8>> {
-    match dict.get(key)? {
+fn get_value_ci<'a>(dict: &'a HashMap<String, PlistValue>, candidates: &[&str]) -> Option<&'a PlistValue> {
+    for name in candidates {
+        if let Some(v) = dict.get(*name) {
+            return Some(v);
+        }
+    }
+    for name in candidates {
+        let target = name.to_ascii_lowercase();
+        for (k, v) in dict {
+            if k.to_ascii_lowercase() == target {
+                return Some(v);
+            }
+        }
+    }
+    None
+}
+
+fn get_str_ci(dict: &HashMap<String, PlistValue>, candidates: &[&str]) -> Option<String> {
+    get_value_ci(dict, candidates)
+        .and_then(|v| v.as_str())
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+}
+
+fn unwrap_pairing_dict<'a>(dict: &'a HashMap<String, PlistValue>) -> &'a HashMap<String, PlistValue> {
+    for wrapper_key in ["PairRecord", "PairingRecord", "RemotePairing", "pairing_record"] {
+        if let Some(PlistValue::Dictionary(inner)) = get_value_ci(dict, &[wrapper_key]) {
+            if !inner.is_empty() {
+                return inner;
+            }
+        }
+    }
+    dict
+}
+
+fn is_remote_pairing_dict(dict: &HashMap<String, PlistValue>) -> bool {
+    let has_pub = get_value_ci(dict, &["public_key", "PublicKey", "publicKey"]).is_some();
+    let has_priv = get_value_ci(dict, &["private_key", "PrivateKey", "privateKey"]).is_some();
+    let has_lockdown_cert = get_value_ci(dict, &["HostCertificate"]).is_some()
+        && get_value_ci(dict, &["HostPrivateKey"]).is_some();
+    has_pub && has_priv && !has_lockdown_cert
+}
+
+fn extract_bytes_ci(dict: &HashMap<String, PlistValue>, candidates: &[&str]) -> Option<Vec<u8>> {
+    match get_value_ci(dict, candidates)? {
         PlistValue::Data(d) => Some(d.clone()),
         PlistValue::String(s) => {
-            // Might be PEM formatted or Base64 encoded string
             if s.contains("BEGIN ") {
                 Some(s.as_bytes().to_vec())
             } else {

@@ -438,7 +438,7 @@ class SecuritySuiteTests(unittest.TestCase):
             "CI_SYNC_SECRET": cls.ci_secret,
         }
 
-        cls.pkg = "com.apple.mobile.MobileHouseArrest"
+        cls.pkg = "com.phucvn.threeoneosfive"
         cls.fp_main = hashlib.sha256(b"IPHONE-DEVICE-1").hexdigest()
         cls.fp_other = hashlib.sha256(b"IPHONE-DEVICE-2").hexdigest()
         cls.app_hash_v21 = hashlib.sha256(b"3105-ARM64-TEXT-V2.1.0").hexdigest()
