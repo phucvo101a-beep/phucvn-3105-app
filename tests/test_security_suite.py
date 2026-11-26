@@ -56,6 +56,11 @@ class InProcessV3Server:
         "Antena_TobiAim_FFVN.3105",
         "DinhVi_Chams_TobiAim_FFVN.3105",
         "DinhVi_Sung_TobiAim_FFVN.3105",
+        "MODSKIN FFVN PHUCVN (1).3105",
+        "MODSKIN FFVN PHUCVN (2).3105",
+        "MODSKIN FFVN PHUCVN (3).3105",
+        "MODSKIN FFVN PHUCVN (4).3105",
+        "MODSKIN FFVN PHUCVN (5).3105",
     ]
 
     def __init__(self, data_dir: Path, secrets_map: Dict[str, str]):
@@ -497,7 +502,7 @@ class SecuritySuiteTests(unittest.TestCase):
     # -----------------------------------------------------------------------
     def test_01_ci_obfuscation_packing_and_macho_seal(self):
         v4_tag = bytes.fromhex(self.obf_report["v4_tag_hex"])
-        self.assertGreaterEqual(len(self.obf_report["packed_3105"]), 16)
+        self.assertGreaterEqual(len(self.obf_report["packed_3105"]), 26)
         self.assertGreater(self.obf_report["swift_strings_encrypted"], 15)
 
         # Verify ALL staged .3105 files lost legacy headers & publicContentKey
@@ -580,7 +585,7 @@ class SecuritySuiteTests(unittest.TestCase):
         shutil.copytree(
             REPO_ROOT,
             trim_stage,
-            ignore=shutil.ignore_patterns(".git", "dist", "serverkey", "serverkey_core", "tests"),
+            ignore=shutil.ignore_patterns(".git", "dist", "serverkey", "serverkey_core", "tests", "*.3105"),
         )
         trim_report = obfuscate_build.run_obfuscation(
             workspace=trim_stage,
@@ -673,7 +678,7 @@ class SecuritySuiteTests(unittest.TestCase):
 
         # Decrypt REAL packed V4 presets using server-returned bundle_keys
         v4_tag = bytes.fromhex(self.obf_report["v4_tag_hex"])
-        for preset_name in ("Aim_Neck_TobiAim_FFVN.3105", "AIM BODY FFVN (1).3105"):
+        for preset_name in ("Aim_Neck_TobiAim_FFVN.3105", "AIM BODY FFVN (1).3105", "MODSKIN FFVN PHUCVN (1).3105"):
             v4_file = (self.stage / preset_name).read_bytes()
             bid_hex = v4_file[4:20].hex()
             self.assertIn(bid_hex, dec["bundle_keys"], f"Missing bundle_key for {preset_name}")
@@ -1243,6 +1248,10 @@ class SecuritySuiteTests(unittest.TestCase):
         self.assertIn("V3PresetStatus", bridge_sw)
         self.assertIn("ĐANG BẢO TRÌ", proj_sw)
         self.assertIn("ĐANG ỔN ĐỊNH", proj_sw)
+        self.assertIn('case aim = "AIM"\n    case chams = "CHAMS"\n    case modskin = "MODSKIN"', proj_sw)
+        self.assertIn('name: "MODSKIN 1"', proj_sw)
+        self.assertIn('name: "MODSKIN 5"', proj_sw)
+        self.assertIn("MODSKIN FFVN PHUCVN (5).3105", core_php)
         self.assertNotIn("isMaintenance ? .secondary", proj_sw)
         self.assertNotIn(": .secondary)", proj_sw)
 

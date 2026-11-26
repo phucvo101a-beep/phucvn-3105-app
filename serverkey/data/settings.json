@@ -1,0 +1,33 @@
+{
+  "app_name": "PHUCVN STUDIO",
+  "admin_user": "phucvn_admin",
+  "admin_pass_hash": "",
+  "allow_register": false,
+  "require_key": true,
+  "auto_activate": true,
+  "default_duration": "30d",
+  "bind_hwid": true,
+  "allow_hwid_reset": false,
+  "telegram_support": "https://t.me/phuciosvn",
+  "server_open": true,
+  "system_paused": false,
+  "server_closed_message": "Hệ thống máy chủ đang tạm đóng để bảo trì. Vui lòng quay lại sau.",
+  "force_update": false,
+  "min_required_version": "2.1.0",
+  "latest_version": "2.1.0",
+  "download_url": "",
+  "update_message": "Phiên bản hiện tại đã cũ. Vui lòng tải bản cập nhật mới nhất để tiếp tục.",
+  "enforce_binary_hash": false,
+  "preset_policies": {},
+  "packages": {
+    "com.apple.mobile.MobileHouseArrest": {
+      "server_open": true,
+      "force_update": false,
+      "min_required_version": "2.1.0",
+      "latest_version": "2.1.0",
+      "download_url": "",
+      "update_message": "Vui lòng cập nhật 3105 bản mới nhất.",
+      "enforce_binary_hash": false
+    }
+  }
+}

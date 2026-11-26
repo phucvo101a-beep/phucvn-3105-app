@@ -83,6 +83,11 @@
 		3105P106 /* AimNeck_Antena_TobiAim_FFVN.3105 in Resources */ = {isa = PBXBuildFile; fileRef = 3105P006; };
 		3105P107 /* AimDrag_85_Antena_TobiAim_FFVN.3105 in Resources */ = {isa = PBXBuildFile; fileRef = 3105P007; };
 		3105P108 /* AIM BODY FFVN (1).3105 in Resources */ = {isa = PBXBuildFile; fileRef = 3105P008; };
+		3105P109 /* MODSKIN FFVN PHUCVN (1).3105 in Resources */ = {isa = PBXBuildFile; fileRef = 3105P009; };
+		3105P110 /* MODSKIN FFVN PHUCVN (2).3105 in Resources */ = {isa = PBXBuildFile; fileRef = 3105P010; };
+		3105P111 /* MODSKIN FFVN PHUCVN (3).3105 in Resources */ = {isa = PBXBuildFile; fileRef = 3105P011; };
+		3105P112 /* MODSKIN FFVN PHUCVN (4).3105 in Resources */ = {isa = PBXBuildFile; fileRef = 3105P012; };
+		3105P113 /* MODSKIN FFVN PHUCVN (5).3105 in Resources */ = {isa = PBXBuildFile; fileRef = 3105P013; };
 /* End PBXBuildFile section */
 
 /* Begin PBXFileReference section */
@@ -105,6 +110,11 @@
 		3105P006 /* AimNeck_Antena_TobiAim_FFVN.3105 */ = {isa = PBXFileReference; lastKnownFileType = file; path = AimNeck_Antena_TobiAim_FFVN.3105; sourceTree = "<group>"; };
 		3105P007 /* AimDrag_85_Antena_TobiAim_FFVN.3105 */ = {isa = PBXFileReference; lastKnownFileType = file; path = AimDrag_85_Antena_TobiAim_FFVN.3105; sourceTree = "<group>"; };
 		3105P008 /* AIM BODY FFVN (1).3105 */ = {isa = PBXFileReference; lastKnownFileType = file; path = "AIM BODY FFVN (1).3105"; sourceTree = "<group>"; };
+		3105P009 /* MODSKIN FFVN PHUCVN (1).3105 */ = {isa = PBXFileReference; lastKnownFileType = file; path = "MODSKIN FFVN PHUCVN (1).3105"; sourceTree = "<group>"; };
+		3105P010 /* MODSKIN FFVN PHUCVN (2).3105 */ = {isa = PBXFileReference; lastKnownFileType = file; path = "MODSKIN FFVN PHUCVN (2).3105"; sourceTree = "<group>"; };
+		3105P011 /* MODSKIN FFVN PHUCVN (3).3105 */ = {isa = PBXFileReference; lastKnownFileType = file; path = "MODSKIN FFVN PHUCVN (3).3105"; sourceTree = "<group>"; };
+		3105P012 /* MODSKIN FFVN PHUCVN (4).3105 */ = {isa = PBXFileReference; lastKnownFileType = file; path = "MODSKIN FFVN PHUCVN (4).3105"; sourceTree = "<group>"; };
+		3105P013 /* MODSKIN FFVN PHUCVN (5).3105 */ = {isa = PBXFileReference; lastKnownFileType = file; path = "MODSKIN FFVN PHUCVN (5).3105"; sourceTree = "<group>"; };
 		3105A040 /* bad_query.h */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.h; path = bad_query.h; sourceTree = "<group>"; };
 		3105A041 /* mcm_bridge.h */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.h; path = mcm_bridge.h; sourceTree = "<group>"; };
 		3105A050 /* ThreeOneOSFive-Bridging-Header.h */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.h; path = "ThreeOneOSFive-Bridging-Header.h"; sourceTree = "<group>"; };
@@ -219,6 +229,11 @@
 				3105P006 /* AimNeck_Antena_TobiAim_FFVN.3105 */,
 				3105P007 /* AimDrag_85_Antena_TobiAim_FFVN.3105 */,
 				3105P008 /* AIM BODY FFVN (1).3105 */,
+				3105P009 /* MODSKIN FFVN PHUCVN (1).3105 */,
+				3105P010 /* MODSKIN FFVN PHUCVN (2).3105 */,
+				3105P011 /* MODSKIN FFVN PHUCVN (3).3105 */,
+				3105P012 /* MODSKIN FFVN PHUCVN (4).3105 */,
+				3105P013 /* MODSKIN FFVN PHUCVN (5).3105 */,
 			);
 			path = ThreeOneOSFive;
 			sourceTree = "<group>";
@@ -398,6 +413,11 @@
 				3105P106,
 				3105P107,
 				3105P108,
+				3105P109,
+				3105P110,
+				3105P111,
+				3105P112,
+				3105P113,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};

@@ -55,6 +55,11 @@ pub const BUNDLED_PRESET_FILENAMES: &[&str] = &[
     "Antena_TobiAim_FFVN.3105",
     "DinhVi_Chams_TobiAim_FFVN.3105",
     "DinhVi_Sung_TobiAim_FFVN.3105",
+    "MODSKIN FFVN PHUCVN (1).3105",
+    "MODSKIN FFVN PHUCVN (2).3105",
+    "MODSKIN FFVN PHUCVN (3).3105",
+    "MODSKIN FFVN PHUCVN (4).3105",
+    "MODSKIN FFVN PHUCVN (5).3105",
 ];
 
 /// Cryptographic keys held in memory by the server engine.
@@ -322,6 +327,11 @@ fn preset_label(fname: &str) -> &'static str {
         "Antena_TobiAim_FFVN.3105" => "ANTENA",
         "DinhVi_Chams_TobiAim_FFVN.3105" => "CHAMS",
         "DinhVi_Sung_TobiAim_FFVN.3105" => "DINHVI SUNG KEO",
+        "MODSKIN FFVN PHUCVN (1).3105" => "MODSKIN 1",
+        "MODSKIN FFVN PHUCVN (2).3105" => "MODSKIN 2",
+        "MODSKIN FFVN PHUCVN (3).3105" => "MODSKIN 3",
+        "MODSKIN FFVN PHUCVN (4).3105" => "MODSKIN 4",
+        "MODSKIN FFVN PHUCVN (5).3105" => "MODSKIN 5",
         _ => "MOD PRESET",
     }
 }
