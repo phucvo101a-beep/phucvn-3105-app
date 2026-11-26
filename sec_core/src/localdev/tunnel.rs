@@ -437,24 +437,29 @@ impl LockdownClient {
             )
         })?;
 
-        let tcp = TcpStream::connect_timeout(&addr, Duration::from_millis(HANDSHAKE_CONNECT_TIMEOUT_MS))
-            .map_err(|e| {
-                classify_io_error(
-                    e,
-                    LockdownStage::TcpConnect,
-                    &format!("Failed to connect to LocalDevVPN at {}", addr_str),
-                )
-            })?;
+        let mut plain_tcp =
+            TcpStream::connect_timeout(&addr, Duration::from_millis(HANDSHAKE_CONNECT_TIMEOUT_MS))
+                .map_err(|e| {
+                    classify_io_error(
+                        e,
+                        LockdownStage::TcpConnect,
+                        &format!("Failed to connect to LocalDevVPN at {}", addr_str),
+                    )
+                })?;
 
-        let mut stream = LockdownStream::Plain(tcp);
-        stream.set_timeouts(HANDSHAKE_IO_TIMEOUT_SECS, HANDSHAKE_IO_TIMEOUT_SECS);
+        plain_tcp
+            .set_read_timeout(Some(Duration::from_secs(HANDSHAKE_IO_TIMEOUT_SECS)))
+            .ok();
+        plain_tcp
+            .set_write_timeout(Some(Duration::from_secs(HANDSHAKE_IO_TIMEOUT_SECS)))
+            .ok();
 
         // 1. QueryType handshake
         let mut query = HashMap::new();
         query.insert("Request".to_string(), PlistValue::String("QueryType".to_string()));
-        send_plist_for_stage(&mut stream, &query, LockdownStage::QueryType)?;
+        send_plist_for_stage(&mut plain_tcp, &query, LockdownStage::QueryType)?;
 
-        let query_resp = read_plist_for_stage(&mut stream, LockdownStage::QueryType)?;
+        let query_resp = read_plist_for_stage(&mut plain_tcp, LockdownStage::QueryType)?;
         if let Some(err) = query_resp.get_string("Error") {
             return Err(LockdownError::new(
                 LockdownErrorKind::ProtocolError,
@@ -471,9 +476,9 @@ impl LockdownClient {
             "SystemBUID".to_string(),
             PlistValue::String(pairing.system_buid.clone()),
         );
-        send_plist_for_stage(&mut stream, &session_req, LockdownStage::StartSession)?;
+        send_plist_for_stage(&mut plain_tcp, &session_req, LockdownStage::StartSession)?;
 
-        let session_resp = read_plist_for_stage(&mut stream, LockdownStage::StartSession)?;
+        let session_resp = read_plist_for_stage(&mut plain_tcp, LockdownStage::StartSession)?;
         if let Some(err) = session_resp.get_string("Error") {
             let kind = if is_pairing_rejection_error(&err) {
                 LockdownErrorKind::PairingRejected
@@ -502,14 +507,12 @@ impl LockdownClient {
             .unwrap_or(false);
 
         // 3. Upgrade TCP socket to mutual-auth TLS when EnableSessionSSL is true
-        if enable_ssl {
-            let tcp = match stream {
-                LockdownStream::Plain(tcp) => tcp,
-                LockdownStream::Tls(tls) => tls.into_inner().1,
-            };
-            let tls = build_tls_stream(tcp, pairing, LockdownStage::TlsUpgrade)?;
-            stream = LockdownStream::Tls(Box::new(tls));
-        }
+        let mut stream = if enable_ssl {
+            let tls = build_tls_stream(plain_tcp, pairing, LockdownStage::TlsUpgrade)?;
+            LockdownStream::Tls(Box::new(tls))
+        } else {
+            LockdownStream::Plain(plain_tcp)
+        };
 
         // 4. Encrypted GetValue(UniqueDeviceID) completes the lazy TLS handshake safely
         let mut udid_req = HashMap::new();
