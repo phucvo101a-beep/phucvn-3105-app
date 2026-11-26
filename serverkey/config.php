@@ -561,8 +561,9 @@ function authenticateAndBindAdminAccount(string $username, string $password, arr
             if (!verifyUserPassword($password, (string)($u['password'] ?? ''))) {
                 return ['ok' => false, 'code' => 'BAD_CREDENTIALS', 'username' => (string)$u['username'], 'error' => 'Sai tài khoản hoặc mật khẩu quản trị!'];
             }
-            if (strtolower((string)($u['role'] ?? '')) !== 'admin') {
-                return ['ok' => false, 'code' => 'NO_ADMIN_ROLE', 'username' => (string)$u['username'], 'error' => 'Tài khoản không có quyền Quản trị Admin!'];
+            $userRole = strtolower(trim((string)($u['role'] ?? 'member')));
+            if (!in_array($userRole, ['admin', 'vip', 'member'], true)) {
+                return ['ok' => false, 'code' => 'NO_ADMIN_ROLE', 'username' => (string)$u['username'], 'error' => 'Tài khoản không có quyền truy cập!'];
             }
             if (!empty($u['expiry_date']) && $u['expiry_date'] !== 'permanent') {
                 if (new DateTime() > new DateTime((string)$u['expiry_date'])) {
@@ -667,11 +668,12 @@ function verifyCurrentAdminSession(array $settings, array $devInfo): array {
     if (!$user) {
         return ['valid' => false, 'reason' => 'Tài khoản đã bị xóa khỏi hệ thống!'];
     }
-    if (empty($user['is_active']) || strtolower((string)($user['role'] ?? '')) !== 'admin') {
+    $userRole = strtolower(trim((string)($user['role'] ?? 'member')));
+    if (empty($user['is_active']) || !in_array($userRole, ['admin', 'vip', 'member'], true)) {
         $bReason = trim((string)($user['ban_reason'] ?? ''));
         $reasonMsg = $bReason !== ''
             ? "Tài khoản đã bị khóa! Lý do: {$bReason}"
-            : 'Tài khoản đã bị khóa hoặc xóa quyền quản trị!';
+            : 'Tài khoản đã bị khóa hoặc thu hồi quyền truy cập!';
         return ['valid' => false, 'reason' => $reasonMsg];
     }
     if (!empty($user['expiry_date']) && $user['expiry_date'] !== 'permanent') {
