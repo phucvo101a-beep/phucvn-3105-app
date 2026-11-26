@@ -445,17 +445,14 @@ public final class LocalDevBridge: ObservableObject {
             socklen_t(MemoryLayout<Int32>.size)
         )
 
-        var bcastAddr = in_addr()
-        guard Darwin.inet_aton("255.255.255.255", &bcastAddr) != 0 else { return }
-
         var addr = sockaddr_in()
         addr.sin_len = UInt8(MemoryLayout<sockaddr_in>.size)
         addr.sin_family = sa_family_t(AF_INET)
         addr.sin_port = UInt16(62078).bigEndian
-        addr.sin_addr = bcastAddr
+        addr.sin_addr = in_addr(s_addr: UInt32.max)
 
         let payload: [UInt8] = [0x01]
-        let sent = withUnsafePointer(to: &addr) { ptr in
+        let sent = withUnsafePointer(to: addr) { ptr in
             ptr.withMemoryRebound(to: sockaddr.self, capacity: 1) { sockPtr in
                 Darwin.sendto(
                     sock,
@@ -560,7 +557,7 @@ public final class LocalDevBridge: ObservableObject {
     }
 
     public func openLocalDevVPNApp() {
-        let openBlock = {
+        let openBlock: () -> Void = {
             // Only query schemes declared in Info.plist `LSApplicationQueriesSchemes` (avoids private `App-prefs:` `(null)` sandbox extension errors)
             let urlStrings = [
                 "localdev://",

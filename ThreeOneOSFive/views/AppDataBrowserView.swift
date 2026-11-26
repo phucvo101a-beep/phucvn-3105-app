@@ -463,7 +463,9 @@ struct AppDataBrowserView: View {
         }
         .buttonStyle(AppPressableStyle())
         .contextMenu {
-            openInNewTabButton(destination)
+            if let destination {
+                openInNewTabButton(destination)
+            }
         }
     }
 

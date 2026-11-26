@@ -1964,7 +1964,7 @@ struct FileQuickLookView: View {
             let filePath = file.path
             let fileName = file.name
             let result = await Task.detached(priority: .userInitiated) {
-                Result {
+                Result<PreparedFilePreview, Error> {
                     if let parsed = LocalDevVirtualPath.parse(filePath) {
                         return try FilePreviewService.makeRemotePreviewCopy(
                             bundleID: parsed.bundleID,
