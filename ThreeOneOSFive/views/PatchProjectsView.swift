@@ -23,6 +23,7 @@ struct PatchProjectsView: View {
     @State private var showCleaner = false
     @StateObject private var proxyManager = ProxyManager.shared
     @ObservedObject private var keyAuth = KeyAuthManager.shared
+    @State private var selectedModCategory: ProxyModCategory = .aim
     @State private var showProxyManager = false
     @State private var proxyModRefreshID = UUID()
     @State private var wallpaperPackages: [WallpaperStagedPackage] = []
@@ -151,17 +152,30 @@ struct PatchProjectsView: View {
                             .listRowSeparator(.hidden)
                             .listRowInsets(EdgeInsets(top: 6, leading: 18, bottom: 6, trailing: 18))
 
-                        ForEach(ProxyModPreset.presets) { mod in
-                            NavigationLink {
-                                ProxyModPresetDetailView(mod: mod, onModified: {
-                                    proxyModRefreshID = UUID()
-                                })
-                            } label: {
-                                proxyModRow(mod)
-                            }
-                            .listRowBackground(AppTheme.consoleBackground)
+                        modCategoryBar
+                            .listRowBackground(Color.clear)
                             .listRowSeparator(.hidden)
-                            .listRowInsets(EdgeInsets(top: 6, leading: 18, bottom: 6, trailing: 18))
+                            .listRowInsets(EdgeInsets(top: 8, leading: 18, bottom: 6, trailing: 18))
+
+                        let categoryPresets = ProxyModPreset.presets(for: selectedModCategory)
+                        if categoryPresets.isEmpty {
+                            emptyModCategoryCard(for: selectedModCategory)
+                                .listRowBackground(AppTheme.consoleBackground)
+                                .listRowSeparator(.hidden)
+                                .listRowInsets(EdgeInsets(top: 6, leading: 18, bottom: 6, trailing: 18))
+                        } else {
+                            ForEach(categoryPresets) { mod in
+                                NavigationLink {
+                                    ProxyModPresetDetailView(mod: mod, onModified: {
+                                        proxyModRefreshID = UUID()
+                                    })
+                                } label: {
+                                    proxyModRow(mod)
+                                }
+                                .listRowBackground(AppTheme.consoleBackground)
+                                .listRowSeparator(.hidden)
+                                .listRowInsets(EdgeInsets(top: 6, leading: 18, bottom: 6, trailing: 18))
+                            }
                         }
                     }
                     .id(proxyModRefreshID)
@@ -426,6 +440,80 @@ struct PatchProjectsView: View {
         .buttonStyle(.plain)
     }
 
+    private var modCategoryBar: some View {
+        HStack(spacing: 6) {
+            ForEach(ProxyModCategory.allCases) { category in
+                let isSelected = (selectedModCategory == category)
+                Button {
+                    withAnimation(.easeInOut(duration: 0.18)) {
+                        selectedModCategory = category
+                    }
+                } label: {
+                    HStack(spacing: 5) {
+                        Image(systemName: category.iconName)
+                            .font(.system(size: 11, weight: .semibold))
+                        Text(category.title)
+                            .font(.system(size: 12, weight: .bold))
+                            .lineLimit(1)
+                            .minimumScaleFactor(0.8)
+                    }
+                    .foregroundStyle(isSelected ? AppTheme.pageBackground : AppTheme.subduedText)
+                    .frame(maxWidth: .infinity)
+                    .padding(.vertical, 10)
+                    .background(
+                        RoundedRectangle(cornerRadius: 12, style: .continuous)
+                            .fill(isSelected ? AppTheme.accent : Color.white.opacity(0.05))
+                    )
+                    .overlay {
+                        RoundedRectangle(cornerRadius: 12, style: .continuous)
+                            .strokeBorder(
+                                isSelected ? Color.white.opacity(0.45) : Color.white.opacity(0.08),
+                                lineWidth: 1
+                            )
+                    }
+                }
+                .buttonStyle(.plain)
+            }
+        }
+        .padding(4)
+        .background(
+            RoundedRectangle(cornerRadius: 16, style: .continuous)
+                .fill(AppTheme.elevatedBackground)
+        )
+        .overlay {
+            RoundedRectangle(cornerRadius: 16, style: .continuous)
+                .strokeBorder(AppTheme.hairline, lineWidth: 1)
+        }
+    }
+
+    private func emptyModCategoryCard(for category: ProxyModCategory) -> some View {
+        HStack(spacing: 12) {
+            AppRowIcon(systemName: category.iconName, tint: AppTheme.subduedText)
+            VStack(alignment: .leading, spacing: 3) {
+                Text("Chưa có file \(category.title)")
+                    .font(.body.weight(.semibold))
+                    .foregroundStyle(Color.white)
+                Text("Bạn có thể thêm file .3105 cho mục \(category.title) hoặc dùng nút Nhập .3105.")
+                    .font(.caption)
+                    .foregroundStyle(Color.secondary)
+                    .lineLimit(2)
+            }
+            Spacer()
+            Button {
+                showImporter = true
+            } label: {
+                Text("Nhập")
+                    .font(.caption.weight(.bold))
+                    .foregroundStyle(AppTheme.pageBackground)
+                    .padding(.horizontal, 10)
+                    .padding(.vertical, 6)
+                    .background(AppTheme.accent, in: Capsule())
+            }
+            .buttonStyle(.plain)
+        }
+        .padding(.vertical, 4)
+    }
+
     private func proxyModRow(_ mod: ProxyModPreset) -> some View {
         let isApplied = DevicePatchService.latestReceipt(projectID: mod.id) != nil
         let runtimeStatus = keyAuth.presetStatus(for: mod.fileName)
@@ -466,10 +554,6 @@ struct PatchProjectsView: View {
                     .lineLimit(1)
             }
             Spacer()
-            Image(systemName: "chevron.right")
-                .font(.caption.weight(.semibold))
-                .foregroundStyle(.tertiary)
-                .accessibilityHidden(true)
         }
         .contentShape(Rectangle())
     }
@@ -1782,19 +1866,42 @@ struct ProxyManagerView: View {
     }
 }
 
-// MARK: - PROXY PRESET MODS (ANTENA, DRAG 85%, CHAMS)
+// MARK: - PROXY PRESET MODS (AIM, CHAMS, MODSKIN)
+
+enum ProxyModCategory: String, CaseIterable, Identifiable {
+    case aim = "AIM"
+    case chams = "CHAMS"
+    case modskin = "MODSKIN"
+
+    var id: String { rawValue }
+    var title: String { rawValue }
+
+    var iconName: String {
+        switch self {
+        case .aim: return "scope"
+        case .chams: return "eye.fill"
+        case .modskin: return "sparkles"
+        }
+    }
+}
 
 struct ProxyModPreset: Identifiable {
     let id: UUID
+    let category: ProxyModCategory
     let name: String
     let fileName: String
     let iconName: String
     let subtitle: String
     let detailDescription: String
 
+    static func presets(for category: ProxyModCategory) -> [ProxyModPreset] {
+        presets.filter { $0.category == category }
+    }
+
     static let presets: [ProxyModPreset] = [
         ProxyModPreset(
             id: UUID(uuidString: "16A78656-EE0A-41F9-B0FA-5F9F44973BBE") ?? UUID(),
+            category: .chams,
             name: "ANTENA",
             fileName: "Antena_PhucVN_FFVN.3105",
             iconName: "antenna.radiowaves.left.and.right",
@@ -1803,6 +1910,7 @@ struct ProxyModPreset: Identifiable {
         ),
         ProxyModPreset(
             id: UUID(uuidString: "DFC0AF84-76EF-49AF-9945-E8307FAE5C2B") ?? UUID(),
+            category: .aim,
             name: "DRAG 85%",
             fileName: "AimDrag_85_PhucVN_FFVN.3105",
             iconName: "scope",
@@ -1811,6 +1919,7 @@ struct ProxyModPreset: Identifiable {
         ),
         ProxyModPreset(
             id: UUID(uuidString: "B8192D12-7013-4420-8073-794D00FB4200") ?? UUID(),
+            category: .chams,
             name: "CHAMS",
             fileName: "DinhVi_Chams_PhucVN_FFVN.3105",
             iconName: "eye.fill",
@@ -1819,6 +1928,7 @@ struct ProxyModPreset: Identifiable {
         ),
         ProxyModPreset(
             id: UUID(uuidString: "855F300E-A213-45B6-8A14-D1EFA8D0F7AE") ?? UUID(),
+            category: .chams,
             name: "DINHVI SUNG KEO",
             fileName: "DinhVi_Sung_PhucVN_FFVN.3105",
             iconName: "cross.circle.fill",
@@ -1827,6 +1937,7 @@ struct ProxyModPreset: Identifiable {
         ),
         ProxyModPreset(
             id: UUID(uuidString: "C0CA95DF-CD18-4F4A-A3CD-56DA11324716") ?? UUID(),
+            category: .aim,
             name: "AIM NECK",
             fileName: "Aim_Neck_PhucVN_FFVN.3105",
             iconName: "person.crop.circle.badge.checkmark",
@@ -1835,6 +1946,7 @@ struct ProxyModPreset: Identifiable {
         ),
         ProxyModPreset(
             id: UUID(uuidString: "5A53E415-D850-4722-ADF3-1FAE7E73F9AB") ?? UUID(),
+            category: .aim,
             name: "AIM NECK ANTENA",
             fileName: "AimNeck_Antena_PhucVN_FFVN.3105",
             iconName: "antenna.radiowaves.left.and.right",
@@ -1843,6 +1955,7 @@ struct ProxyModPreset: Identifiable {
         ),
         ProxyModPreset(
             id: UUID(uuidString: "233DAE36-3734-4E2B-8C66-C491B540B4B5") ?? UUID(),
+            category: .aim,
             name: "AIM DRAG ANTENA",
             fileName: "AimDrag_85_Antena_PhucVN_FFVN.3105",
             iconName: "scope",
@@ -1851,6 +1964,7 @@ struct ProxyModPreset: Identifiable {
         ),
         ProxyModPreset(
             id: UUID(uuidString: "F88B1A0A-E999-423E-88C3-220DF07F6F99") ?? UUID(),
+            category: .aim,
             name: "AIM BODY",
             fileName: "AIM BODY FFVN (1).3105",
             iconName: "figure.stand",
