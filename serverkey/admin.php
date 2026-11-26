@@ -742,7 +742,7 @@ ksort($keyCreatorMap);
         .nav-btn { background: rgba(255,255,255,0.06); border: 1px solid rgba(255,255,255,0.1); color: #cbd5e1; padding: 7px 14px; border-radius: var(--radius-md); text-decoration: none; font-size: 13px; font-weight: 600; transition: all 0.2s; }
         .nav-btn:hover { background: rgba(255,255,255,0.12); color: #fff; }
         .nav-btn.logout { color: #fca5a5; border-color: rgba(239,68,68,0.3); }
-        .container { max-width: 1240px; margin: 0 auto; padding: 24px; }
+        .container { max-width: 1480px; margin: 0 auto; padding: 24px; }
         .stats-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap: 16px; margin-bottom: 24px; }
         .stat-card { background: var(--bg-surface); border: 1px solid var(--border-color); border-radius: var(--radius-md); padding: 18px 20px; display: flex; align-items: center; justify-content: space-between; }
         .stat-val { font-size: 26px; font-weight: 800; color: #fff; margin-top: 4px; }
@@ -782,6 +782,13 @@ ksort($keyCreatorMap);
         .alert-success { background: rgba(16,185,129,0.15); border: 1px solid #10b981; color: #6ee7b7; }
         .alert-error { background: rgba(239,68,68,0.15); border: 1px solid #ef4444; color: #fca5a5; }
         .code-box { font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace; background: var(--bg-input); padding: 5px 10px; border-radius: 6px; font-size: 12px; color: #22d3ee; white-space: nowrap; display: inline-block; user-select: all; letter-spacing: 0.5px; border: 1px solid rgba(34, 211, 238, 0.2); }
+        .keys-table th, .keys-table td { padding: 10px 9px; }
+        .keys-table th { white-space: nowrap; font-size: 11.5px; }
+        .keys-table td { font-size: 12.5px; }
+        .keys-table .code-box { font-size: 11.5px; padding: 4px 8px; letter-spacing: 0.3px; }
+        .badge-creator { display: inline-flex; align-items: center; gap: 5px; white-space: nowrap; }
+        .hwid-stack { display: flex; flex-direction: column; gap: 6px; max-width: 310px; }
+        .created-at-cell { font-size: 11px; color: var(--text-muted); white-space: nowrap; line-height: 1.35; }
     </style>
 </head>
 <body>
@@ -1119,17 +1126,17 @@ ksort($keyCreatorMap);
                 </div>
 
                 <div class="table-responsive">
-                    <table>
+                    <table class="keys-table">
                         <thead>
                             <tr>
-                                <th style="white-space: nowrap; min-width: 240px;">MÃ KEY</th>
-                                <th>LOẠI THỜI HẠN</th>
+                                <th>MÃ KEY</th>
+                                <th>THỜI HẠN</th>
                                 <th>GÓI</th>
-                                <th>TRẠNG THÁI & GIỚI HẠN</th>
-                                <th>THIẾT BỊ ĐÃ KÍCH HOẠT (HWID)</th>
+                                <th>TRẠNG THÁI</th>
+                                <th>THIẾT BỊ (HWID)</th>
                                 <th>NGƯỜI TẠO</th>
                                 <th>NGÀY TẠO</th>
-                                <th>THAO TÁC</th>
+                                <th style="text-align: right;">THAO TÁC</th>
                             </tr>
                         </thead>
                         <tbody id="keysTableBody">
@@ -1169,7 +1176,7 @@ ksort($keyCreatorMap);
                                             </button>
                                         </div>
                                     </td>
-                                    <td>
+                                    <td style="white-space: nowrap;">
                                         <strong style="color: #38bdf8;">
                                             <?= formatDurationLabel($k['duration'] ?? ($k['days'] ?? 30)) ?>
                                         </strong>
@@ -1214,7 +1221,7 @@ ksort($keyCreatorMap);
                                         <?php if (empty($k['devices'])): ?>
                                             <span style="color:#64748b; font-size: 12px;"><i class="fa-solid fa-circle-minus"></i> Chưa có máy nào</span>
                                         <?php else: ?>
-                                            <div style="display: flex; flex-direction: column; gap: 6px; max-width: 390px;">
+                                            <div class="hwid-stack">
                                                 <?php foreach ($k['devices'] as $d):
                                                     $devHwid = trim((string)($d['hwid'] ?? ''));
                                                     $banInfo = $bannedHwidMap[strtolower($devHwid)] ?? null;
@@ -1267,17 +1274,26 @@ ksort($keyCreatorMap);
                                             </div>
                                         <?php endif; ?>
                                     </td>
-                                    <td>
+                                    <td style="white-space: nowrap;">
                                         <?php if ($creatorVal !== ''): ?>
-                                            <span class="badge badge-member" title="Tạo bởi tài khoản: <?= htmlspecialchars($creatorVal) ?>">
+                                            <span class="badge badge-member badge-creator" title="Tạo bởi tài khoản: <?= htmlspecialchars($creatorVal) ?>">
                                                 <i class="fa-solid fa-user-shield"></i> <?= htmlspecialchars($creatorVal) ?>
                                             </span>
                                         <?php else: ?>
-                                            <span style="color: var(--text-muted); font-size: 11.5px;">Hệ thống / Cũ</span>
+                                            <span style="color: var(--text-muted); font-size: 11.5px; white-space: nowrap;">Hệ thống / Cũ</span>
                                         <?php endif; ?>
                                     </td>
-                                    <td style="font-size: 11.5px; color: var(--text-muted);"><?= htmlspecialchars($k['created_at'] ?? 'N/A') ?></td>
-                                    <td style="white-space: nowrap;">
+                                    <?php
+                                        $createdAtRaw = trim((string)($k['created_at'] ?? 'N/A'));
+                                        $createdAtParts = preg_split('/\s+/', $createdAtRaw, 2);
+                                    ?>
+                                    <td class="created-at-cell">
+                                        <div><?= htmlspecialchars($createdAtParts[0] ?? 'N/A') ?></div>
+                                        <?php if (!empty($createdAtParts[1])): ?>
+                                            <div style="opacity: 0.78;"><?= htmlspecialchars($createdAtParts[1]) ?></div>
+                                        <?php endif; ?>
+                                    </td>
+                                    <td style="white-space: nowrap; text-align: right;">
                                         <?php $isKeyRevoked = in_array(strtolower((string)($k['status'] ?? 'active')), ['revoked', 'banned', 'disabled'], true); ?>
                                         <form method="POST" style="display:inline-block; margin-right: 4px;">
                                             <?= csrfField() ?>
