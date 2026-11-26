@@ -539,8 +539,14 @@ struct FileBrowserView: View {
         } label: {
             Label(language.text("browser.move"), systemImage: "folder")
         }
-        ShareLink(item: URL(fileURLWithPath: entry.path)) {
-            Label(language.text("browser.share"), systemImage: "square.and.arrow.up")
+        if let shareURL = ContainerStore.validatedLocalFileURL(
+            fromPath: entry.path,
+            isDirectory: entry.isDirectory,
+            requireExists: true
+        ) {
+            ShareLink(item: shareURL) {
+                Label(language.text("browser.share"), systemImage: "square.and.arrow.up")
+            }
         }
         Divider()
         if bundleID != nil {
@@ -719,7 +725,13 @@ struct FileBrowserView: View {
         guard let prompt = namePrompt else { return }
         let requestedName = nameInput
         namePrompt = nil
-        let directoryURL = URL(fileURLWithPath: currentPath, isDirectory: true)
+        guard let directoryURL = ContainerStore.validatedLocalFileURL(
+            fromPath: currentPath,
+            isDirectory: true
+        ) else {
+            log("filebrowser: ignored name prompt action with invalid currentPath='\(currentPath)'")
+            return
+        }
 
         switch prompt.action {
         case .createFile:
@@ -747,8 +759,19 @@ struct FileBrowserView: View {
                 activity: language.text("browser.renaming"),
                 operationName: "rename"
             ) {
-                try FileManagerService.renameItem(
-                    at: URL(fileURLWithPath: entry.path),
+                guard let targetURL = ContainerStore.validatedLocalFileURL(
+                    fromPath: entry.path,
+                    isDirectory: entry.isDirectory,
+                    requireExists: true
+                ) else {
+                    throw NSError(
+                        domain: "com.phucvn.3105",
+                        code: 22,
+                        userInfo: [NSLocalizedDescriptionKey: "Đường dẫn tệp không hợp lệ"]
+                    )
+                }
+                return try FileManagerService.renameItem(
+                    at: targetURL,
                     to: requestedName
                 ).path
             }
@@ -766,8 +789,22 @@ struct FileBrowserView: View {
                     )
                 }
             ) {
-                try FileManagerService.createZIPArchive(
-                    containing: selectedEntries.map { URL(fileURLWithPath: $0.path) },
+                let targetURLs = selectedEntries.compactMap {
+                    ContainerStore.validatedLocalFileURL(
+                        fromPath: $0.path,
+                        isDirectory: $0.isDirectory,
+                        requireExists: true
+                    )
+                }
+                guard !targetURLs.isEmpty else {
+                    throw NSError(
+                        domain: "com.phucvn.3105",
+                        code: 22,
+                        userInfo: [NSLocalizedDescriptionKey: "Không có tệp hợp lệ để nén"]
+                    )
+                }
+                return try FileManagerService.createZIPArchive(
+                    containing: targetURLs,
                     named: requestedName,
                     in: directoryURL
                 ).archiveURL.path
@@ -784,7 +821,13 @@ struct FileBrowserView: View {
             operationName: "delete"
         ) {
             for entry in targets {
-                try FileManagerService.deleteItem(at: URL(fileURLWithPath: entry.path))
+                if let targetURL = ContainerStore.validatedLocalFileURL(
+                    fromPath: entry.path,
+                    isDirectory: entry.isDirectory,
+                    requireExists: true
+                ) {
+                    try FileManagerService.deleteItem(at: targetURL)
+                }
             }
             return targets.map(\.path).joined(separator: ",")
         }
@@ -815,11 +858,15 @@ struct FileBrowserView: View {
     }
 
     private func prepareTransfer(_ entries: [FileEntry], mode: FileTransferMode) {
-        guard !entries.isEmpty else { return }
-        fileOperationCoordinator.prepare(
-            entries.map { URL(fileURLWithPath: $0.path, isDirectory: $0.isDirectory) },
-            mode: mode
-        )
+        let validURLs = entries.compactMap {
+            ContainerStore.validatedLocalFileURL(
+                fromPath: $0.path,
+                isDirectory: $0.isDirectory,
+                requireExists: true
+            )
+        }
+        guard !validURLs.isEmpty else { return }
+        fileOperationCoordinator.prepare(validURLs, mode: mode)
         isSelecting = false
         selectedEntryIDs.removeAll()
     }
@@ -842,9 +889,16 @@ struct FileBrowserView: View {
 
     private func beginPaste(_ payload: FileOperationPayload) {
         guard transferSession == nil, activityText == nil else { return }
+        guard let destinationURL = ContainerStore.validatedLocalFileURL(
+            fromPath: currentPath,
+            isDirectory: true
+        ) else {
+            log("filebrowser: ignored paste with invalid destination path='\(currentPath)'")
+            return
+        }
         transferSession = FileTransferSession(
             payload: payload,
-            destinationDirectory: URL(fileURLWithPath: currentPath, isDirectory: true)
+            destinationDirectory: destinationURL
         )
         fileOperationCoordinator.clear()
         log(
@@ -1051,7 +1105,14 @@ struct FileBrowserView: View {
                 message: fileOperationErrorMessage(error)
             )
         case .success(let sourceURLs):
-            guard !sourceURLs.isEmpty else {
+            let validSourceURLs = sourceURLs.compactMap {
+                ContainerStore.validatedExternalFileURL($0)
+            }
+            guard !validSourceURLs.isEmpty,
+                  let destinationURL = ContainerStore.validatedLocalFileURL(
+                      fromPath: currentPath,
+                      isDirectory: true
+                  ) else {
                 operationNotice = FileReplacementNotice(
                     title: language.text("browser.import_error_title"),
                     message: language.text("browser.error_source_missing")
@@ -1059,10 +1120,10 @@ struct FileBrowserView: View {
                 return
             }
             importSession = FileImportSession(
-                destinationDirectory: URL(fileURLWithPath: currentPath, isDirectory: true),
-                sourceURLs: sourceURLs
+                destinationDirectory: destinationURL,
+                sourceURLs: validSourceURLs
             )
-            log("filebrowser: import session started files=\(sourceURLs.count)")
+            log("filebrowser: import session started files=\(validSourceURLs.count)")
             DispatchQueue.main.async { processNextImport() }
         }
     }
@@ -1324,8 +1385,13 @@ struct FileBrowserView: View {
                 isLoadingEntries = false
             }
             for directory in loadedEntries where directory.isDirectory {
+                guard let dirURL = ContainerStore.validatedLocalFileURL(
+                    fromPath: directory.path,
+                    isDirectory: true,
+                    requireExists: true
+                ) else { continue }
                 let summary = try? FileBrowserMetadataScanner.directorySummary(
-                    at: URL(fileURLWithPath: directory.path, isDirectory: true)
+                    at: dirURL
                 )
                 DispatchQueue.main.async {
                     guard currentPath == path,
@@ -1345,8 +1411,18 @@ struct FileBrowserView: View {
             )
             return
         }
-        let itemURL = URL(fileURLWithPath: entry.path, isDirectory: entry.isDirectory)
-        let containerURL = URL(fileURLWithPath: containerPath, isDirectory: true)
+        guard let itemURL = ContainerStore.validatedLocalFileURL(
+            fromPath: entry.path,
+            isDirectory: entry.isDirectory,
+            requireExists: true
+        ),
+        let containerURL = ContainerStore.validatedLocalFileURL(
+            fromPath: containerPath,
+            isDirectory: true
+        ) else {
+            presentPatchDraftError(.invalidProject)
+            return
+        }
         activityText = language.text("patch.preparing_from_browser")
         let suggestedName = entry.isDirectory
             ? entry.name
@@ -1378,8 +1454,18 @@ struct FileBrowserView: View {
     }
 
     private func extractArchive(_ entry: FileEntry) {
-        let archiveURL = URL(fileURLWithPath: entry.path, isDirectory: false)
-        let directoryURL = URL(fileURLWithPath: currentPath, isDirectory: true)
+        guard let archiveURL = ContainerStore.validatedLocalFileURL(
+            fromPath: entry.path,
+            isDirectory: false,
+            requireExists: true
+        ),
+        let directoryURL = ContainerStore.validatedLocalFileURL(
+            fromPath: currentPath,
+            isDirectory: true
+        ) else {
+            log("filebrowser: ignored extractArchive for invalid path='\(entry.path)'")
+            return
+        }
         performFileOperation(
             activity: language.text("browser.extracting"),
             operationName: "extract ZIP",
@@ -1408,8 +1494,16 @@ struct FileBrowserView: View {
     }
 
     private func requestReplacement(for entry: FileEntry) {
+        guard let targetURL = ContainerStore.validatedLocalFileURL(
+            fromPath: entry.path,
+            isDirectory: entry.isDirectory,
+            requireExists: true
+        ) else {
+            log("filebrowser: ignored replacement for invalid path='\(entry.path)'")
+            return
+        }
         let request = FileReplacementRequest(
-            targetURL: URL(fileURLWithPath: entry.path),
+            targetURL: targetURL,
             targetName: entry.name
         )
         pendingReplacementRequest = request
@@ -1588,7 +1682,8 @@ struct FileDocumentPicker: UIViewControllerRepresentable {
             _ controller: UIDocumentPickerViewController,
             didPickDocumentsAt urls: [URL]
         ) {
-            onSelection(.success(urls))
+            let validURLs = urls.compactMap { ContainerStore.validatedExternalFileURL($0) }
+            onSelection(.success(validURLs))
         }
 
         func documentPickerWasCancelled(_ controller: UIDocumentPickerViewController) {
@@ -1877,8 +1972,19 @@ struct FileQuickLookView: View {
                             fileName: fileName
                         )
                     }
+                    guard let localURL = ContainerStore.validatedLocalFileURL(
+                        fromPath: filePath,
+                        isDirectory: false,
+                        requireExists: true
+                    ) else {
+                        throw NSError(
+                            domain: "com.phucvn.3105",
+                            code: 22,
+                            userInfo: [NSLocalizedDescriptionKey: "Đường dẫn xem trước không hợp lệ"]
+                        )
+                    }
                     return try FilePreviewService.makePreviewCopy(
-                        of: URL(fileURLWithPath: filePath)
+                        of: localURL
                     )
                 }
             }.value

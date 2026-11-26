@@ -97,6 +97,7 @@ public enum LocalDevCode: Int {
     case localNetworkDenied = 4
     case pairingExpiredOrCorrupt = 5
     case tunnelReset = 6
+    case remotePairingUnsupported = 7
 }
 
 public struct LocalDevStatus: Codable {
@@ -210,8 +211,9 @@ public final class LocalDevBridge: ObservableObject {
     @Published public var lastError: String?
 
     private var storageDirectory: URL {
-        let docs = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask).first!
-        let dir = docs.appendingPathComponent(".localdev", isDirectory: true)
+        let baseDir = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask).first
+            ?? ContainerStore.ownSandboxRootURL.appendingPathComponent("Documents", isDirectory: true)
+        let dir = baseDir.appendingPathComponent(".localdev", isDirectory: true)
         try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
         return dir
     }
@@ -222,8 +224,14 @@ public final class LocalDevBridge: ObservableObject {
     private var _threadSafeStatus: LocalDevStatus
     private var isRefreshInFlight = false
     private var didTriggerLocalNetworkProbe = false
+    private var didLogBundlePrefixNotice = false
     private let workerQueue = DispatchQueue(label: "com.phucvn.3105.localdev.worker", qos: .userInitiated)
     private let networkProbeQueue = DispatchQueue(label: "com.phucvn.3105.localdev.nwprobe", qos: .utility)
+    private var activeProbeCancelWorkItem: DispatchWorkItem?
+    private var activeProbeListener: NWListener?
+    private var activeLockdownBrowser: NWBrowser?
+    private var activeMobdevBrowser: NWBrowser?
+    private var activeProbeConnection: NWConnection?
     private var lastLoggedStatusKey: String = ""
 
     public var currentStatusSnapshot: LocalDevStatus {
@@ -252,6 +260,18 @@ public final class LocalDevBridge: ObservableObject {
             host: "10.7.0.1",
             port: 62078,
             udid: nil,
+            is_heartbeat_alive: false
+        )
+    }
+
+    private static func remotePairingUnsupportedStatus(udid: String? = nil) -> LocalDevStatus {
+        LocalDevStatus(
+            code: LocalDevCode.remotePairingUnsupported.rawValue,
+            status: "CHƯA HỖ TRỢ REMOTE PAIRING",
+            message: "Đã nhận diện tệp Remote Pairing từ idevice pair v1.2.0 (public_key / private_key / identifier / alt_irk). Tuy nhiên core libsec_core.dylib hiện chỉ hỗ trợ chuẩn Lockdown X.509 cổ điển (có HostCertificate & HostID trên cổng 62078). Hãy xuất lại file pairing ở tab Pairing (Lockdown), hoặc tắt LocalDev để dùng Sandbox & Nhật ký USB.",
+            host: "10.7.0.1",
+            port: 62078,
+            udid: udid,
             is_heartbeat_alive: false
         )
     }
@@ -296,8 +316,10 @@ public final class LocalDevBridge: ObservableObject {
         log("localdev: code=\(status.code) [\(status.status)] — \(status.message)")
     }
 
-    /// Uses Apple `Network.framework` (`NWBrowser` + `NWConnection`) so iOS displays the
-    /// Local Network permission prompt and adds the toggle in Settings -> App -> Mạng cục bộ.
+    /// Triggers iOS Local Network permission evaluation using Apple TN3179 patterns:
+    /// - Step 1: `NWListener` + `NWBrowser` on declared `NSBonjourServices` (`_lockdown._tcp`, `_apple-mobdev2._tcp`)
+    /// - Step 2: Outbound limited UDP broadcast (`255.255.255.255:62078`, no restricted multicast entitlement needed)
+    /// - Step 3: `NWConnection` probe toward `10.7.0.1:62078` for interface/permission telemetry
     private func triggerLocalNetworkFrameworkProbe(force: Bool) {
         statusLock.lock()
         if didTriggerLocalNetworkProbe && !force {
@@ -307,32 +329,146 @@ public final class LocalDevBridge: ObservableObject {
         didTriggerLocalNetworkProbe = true
         statusLock.unlock()
 
-        let bonjourParams = NWParameters.tcp
-        bonjourParams.includePeerToPeer = true
-        let browser = NWBrowser(for: .bonjour(type: "_apple-mobdev2._tcp", domain: nil), using: bonjourParams)
-        browser.stateUpdateHandler = { _ in }
-        browser.browseResultsChangedHandler = { _, _ in }
-        browser.start(queue: networkProbeQueue)
+        networkProbeQueue.async { [weak self] in
+            guard let self else { return }
 
-        var probeConn: NWConnection?
-        if let port = NWEndpoint.Port(rawValue: 62078) {
-            let connParams = NWParameters.tcp
-            connParams.includePeerToPeer = true
-            let conn = NWConnection(host: NWEndpoint.Host("10.7.0.1"), port: port, using: connParams)
-            conn.stateUpdateHandler = { state in
-                if case .waiting(let nwErr) = state {
-                    log("localdev: NWConnection probe waiting (\(String(describing: nwErr)))")
-                } else if case .failed(let nwErr) = state {
-                    log("localdev: NWConnection probe failed (\(String(describing: nwErr)))")
+            if !self.didLogBundlePrefixNotice,
+               let bundleID = Bundle.main.bundleIdentifier,
+               bundleID.hasPrefix("com.apple.") {
+                self.didLogBundlePrefixNotice = true
+                log("localdev: bundleID '\(bundleID)' starts with 'com.apple.' — iOS 26/27 Settings may hide Local Network toggle for Apple-prefixed bundle IDs")
+            }
+
+            self.cancelActiveNetworkProbeLocked()
+
+            // 1. Advertise `_lockdown._tcp` via NWListener (listed in Info.plist NSBonjourServices)
+            let listenerParams = NWParameters.tcp
+            listenerParams.includePeerToPeer = true
+            if let listener = try? NWListener(using: listenerParams) {
+                listener.service = NWListener.Service(type: "_lockdown._tcp")
+                listener.stateUpdateHandler = { state in
+                    switch state {
+                    case .ready:
+                        log("localdev: NWListener(_lockdown._tcp) ready")
+                    case .waiting(let err):
+                        log("localdev: NWListener waiting (\(String(describing: err)))")
+                    case .failed(let err):
+                        log("localdev: NWListener failed (\(String(describing: err)))")
+                    default:
+                        break
+                    }
+                }
+                listener.newConnectionHandler = { conn in
+                    conn.cancel()
+                }
+                listener.start(queue: self.networkProbeQueue)
+                self.activeProbeListener = listener
+            }
+
+            // 2. Browse Bonjour services declared in NSBonjourServices
+            let lockdownParams = NWParameters.tcp
+            lockdownParams.includePeerToPeer = true
+            let lockdownBrowser = NWBrowser(for: .bonjour(type: "_lockdown._tcp", domain: nil), using: lockdownParams)
+            lockdownBrowser.stateUpdateHandler = { state in
+                switch state {
+                case .waiting(let err):
+                    log("localdev: NWBrowser(_lockdown._tcp) waiting (\(String(describing: err)))")
+                case .failed(let err):
+                    log("localdev: NWBrowser(_lockdown._tcp) failed (\(String(describing: err)))")
+                default:
+                    break
                 }
             }
-            conn.start(queue: networkProbeQueue)
-            probeConn = conn
-        }
+            lockdownBrowser.browseResultsChangedHandler = { _, _ in }
+            lockdownBrowser.start(queue: self.networkProbeQueue)
+            self.activeLockdownBrowser = lockdownBrowser
 
-        networkProbeQueue.asyncAfter(deadline: .now() + 1.1) {
-            browser.cancel()
-            probeConn?.cancel()
+            let mobdevParams = NWParameters.tcp
+            mobdevParams.includePeerToPeer = true
+            let mobdevBrowser = NWBrowser(for: .bonjour(type: "_apple-mobdev2._tcp", domain: nil), using: mobdevParams)
+            mobdevBrowser.stateUpdateHandler = { _ in }
+            mobdevBrowser.browseResultsChangedHandler = { _, _ in }
+            mobdevBrowser.start(queue: self.networkProbeQueue)
+            self.activeMobdevBrowser = mobdevBrowser
+
+            // 3. Outbound UDP 255.255.255.255 broadcast (TN3179 trigger without multicast entitlement)
+            self.sendUDPLocalBroadcastProbe()
+
+            // 4. NWConnection telemetry probe toward tunnel endpoint
+            if let port = NWEndpoint.Port(rawValue: 62078) {
+                let connParams = NWParameters.tcp
+                connParams.includePeerToPeer = true
+                let conn = NWConnection(host: NWEndpoint.Host("10.7.0.1"), port: port, using: connParams)
+                conn.stateUpdateHandler = { state in
+                    if case .waiting(let nwErr) = state {
+                        log("localdev: NWConnection probe waiting (\(String(describing: nwErr)))")
+                    } else if case .failed(let nwErr) = state {
+                        log("localdev: NWConnection probe failed (\(String(describing: nwErr)))")
+                    }
+                }
+                conn.start(queue: self.networkProbeQueue)
+                self.activeProbeConnection = conn
+            }
+
+            let workItem = DispatchWorkItem { [weak self] in
+                self?.cancelActiveNetworkProbeLocked()
+            }
+            self.activeProbeCancelWorkItem = workItem
+            self.networkProbeQueue.asyncAfter(deadline: .now() + 2.0, execute: workItem)
+        }
+    }
+
+    private func cancelActiveNetworkProbeLocked() {
+        activeProbeCancelWorkItem?.cancel()
+        activeProbeCancelWorkItem = nil
+        activeProbeListener?.cancel()
+        activeProbeListener = nil
+        activeLockdownBrowser?.cancel()
+        activeLockdownBrowser = nil
+        activeMobdevBrowser?.cancel()
+        activeMobdevBrowser = nil
+        activeProbeConnection?.cancel()
+        activeProbeConnection = nil
+    }
+
+    private func sendUDPLocalBroadcastProbe() {
+        let sock = Darwin.socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP)
+        guard sock >= 0 else { return }
+        defer { Darwin.close(sock) }
+
+        var broadcast: Int32 = 1
+        _ = Darwin.setsockopt(
+            sock,
+            SOL_SOCKET,
+            SO_BROADCAST,
+            &broadcast,
+            socklen_t(MemoryLayout<Int32>.size)
+        )
+
+        var bcastAddr = in_addr()
+        guard Darwin.inet_aton("255.255.255.255", &bcastAddr) != 0 else { return }
+
+        var addr = sockaddr_in()
+        addr.sin_len = UInt8(MemoryLayout<sockaddr_in>.size)
+        addr.sin_family = sa_family_t(AF_INET)
+        addr.sin_port = UInt16(62078).bigEndian
+        addr.sin_addr = bcastAddr
+
+        let payload: [UInt8] = [0x01]
+        let sent = withUnsafePointer(to: &addr) { ptr in
+            ptr.withMemoryRebound(to: sockaddr.self, capacity: 1) { sockPtr in
+                Darwin.sendto(
+                    sock,
+                    payload,
+                    payload.count,
+                    0,
+                    sockPtr,
+                    socklen_t(MemoryLayout<sockaddr_in>.size)
+                )
+            }
+        }
+        if sent < 0 {
+            log("localdev: UDP broadcast probe errno=\(errno)")
         }
     }
 
@@ -396,20 +532,25 @@ public final class LocalDevBridge: ObservableObject {
 
         let savedMobilePairing = storageDirectory.appendingPathComponent("pairing.mobiledevicepairing")
         let savedPlist = storageDirectory.appendingPathComponent("pairing.plist")
+        let savedRemotePlist = storageDirectory.appendingPathComponent("remote_pairing.plist")
         if FileManager.default.fileExists(atPath: savedMobilePairing.path)
-            || FileManager.default.fileExists(atPath: savedPlist.path) {
+            || FileManager.default.fileExists(atPath: savedPlist.path)
+            || FileManager.default.fileExists(atPath: savedRemotePlist.path) {
             return false
         }
 
-        let docs = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask).first!
+        guard let docs = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask).first else {
+            return false
+        }
         let candidateDirs = [docs, docs.appendingPathComponent("Inbox")]
 
         for dir in candidateDirs {
             guard let files = try? FileManager.default.contentsOfDirectory(at: dir, includingPropertiesForKeys: nil) else { continue }
             for file in files {
                 let ext = file.pathExtension.lowercased()
-                if ext == "mobiledevicepairing" || ext == "plist" {
-                    if importPairingData(from: file) {
+                if ext == "mobiledevicepairing" || ext == "plist",
+                   let validURL = ContainerStore.validatedExternalFileURL(file, requireExists: true) {
+                    if importPairingData(from: validURL) {
                         return true
                     }
                 }
@@ -419,28 +560,33 @@ public final class LocalDevBridge: ObservableObject {
     }
 
     public func openLocalDevVPNApp() {
-        let urlStrings = [
-            "localdev://",
-            "localdevvpn://",
-            "stos://",
-            "stosvpn://",
-            "wireguard://",
-            "App-prefs:VPN",
-            "App-prefs:root=General&path=VPN",
-            "App-prefs:root=General"
-        ]
+        let openBlock = {
+            // Only query schemes declared in Info.plist `LSApplicationQueriesSchemes` (avoids private `App-prefs:` `(null)` sandbox extension errors)
+            let urlStrings = [
+                "localdev://",
+                "localdevvpn://",
+                "stos://",
+                "stosvpn://",
+                "wireguard://"
+            ]
 
-        for str in urlStrings {
-            if let url = URL(string: str) {
-                if UIApplication.shared.canOpenURL(url) {
+            for str in urlStrings {
+                if let url = URL(string: str), UIApplication.shared.canOpenURL(url) {
                     UIApplication.shared.open(url, options: [:], completionHandler: nil)
                     return
                 }
             }
+
+            if !UIApplication.openSettingsURLString.isEmpty,
+               let url = URL(string: UIApplication.openSettingsURLString) {
+                UIApplication.shared.open(url, options: [:], completionHandler: nil)
+            }
         }
 
-        if let url = URL(string: UIApplication.openSettingsURLString) {
-            UIApplication.shared.open(url, options: [:], completionHandler: nil)
+        if Thread.isMainThread {
+            openBlock()
+        } else {
+            DispatchQueue.main.async(execute: openBlock)
         }
     }
 
@@ -502,7 +648,7 @@ public final class LocalDevBridge: ObservableObject {
         workerQueue.async { [weak self] in
             guard let self else { return }
             let dir = self.storageDirectory
-            for name in ["pairing.plist", "pairing.mobiledevicepairing"] {
+            for name in ["pairing.plist", "pairing.mobiledevicepairing", "remote_pairing.plist"] {
                 try? FileManager.default.removeItem(at: dir.appendingPathComponent(name))
             }
             if !self.isModuleEnabled {
@@ -534,26 +680,39 @@ public final class LocalDevBridge: ObservableObject {
     }
 
     public func importPairingFile(from url: URL) -> Bool {
-        let hasAccess = url.startAccessingSecurityScopedResource()
+        guard let validURL = ContainerStore.validatedExternalFileURL(url) else {
+            let msg = "Đường dẫn tệp pairing không hợp lệ hoặc rỗng."
+            log("localdev: \(msg)")
+            DispatchQueue.main.async {
+                self.lastError = msg
+            }
+            return false
+        }
+        let hasAccess = validURL.startAccessingSecurityScopedResource()
         defer {
             if hasAccess {
-                url.stopAccessingSecurityScopedResource()
+                validURL.stopAccessingSecurityScopedResource()
             }
         }
-        return importPairingData(from: url)
+        return importPairingData(from: validURL)
     }
 
     private func importPairingData(from url: URL) -> Bool {
-        guard let data = try? Data(contentsOf: url), !data.isEmpty else {
+        guard let validURL = ContainerStore.validatedExternalFileURL(url, requireExists: true),
+              let data = try? Data(contentsOf: validURL),
+              !data.isEmpty else {
             DispatchQueue.main.async {
-                self.lastError = "Không thể đọc nội dung file pairing (file trống hoặc bị khóa quyền đọc)"
+                self.lastError = "Không thể đọc nội dung file pairing (đường dẫn không hợp lệ, file trống hoặc bị khóa quyền đọc)"
             }
             return false
         }
 
-        // 1. Validate Pairing File (XML plist or Binary plist bplist00)
+        // 1. Validate Pairing File:
+        //    - Classic Lockdown XML/bplist00 (`HostCertificate`/`DeviceCertificate` + `HostID`/`SystemBUID`)
+        //    - `idevice pair v1.2.0` Remote Pairing XML plist (`public_key`, `private_key`, `identifier`, `alt_irk`)
         var parsedUDID: String? = nil
         var isValidPairing = false
+        var isRemotePairingFormat = false
 
         if let plist = (try? PropertyListSerialization.propertyList(from: data, options: [], format: nil)) as? [String: Any] {
             let hasHostCert = plist["HostCertificate"] != nil
@@ -561,27 +720,40 @@ public final class LocalDevBridge: ObservableObject {
             let hasHostID = plist["HostID"] != nil
             let hasSystemBUID = plist["SystemBUID"] != nil
 
+            let hasPublicKey = plist["public_key"] != nil
+            let hasPrivateKey = plist["private_key"] != nil
+            let hasIdentifier = plist["identifier"] != nil
+            let hasAltIRK = plist["alt_irk"] != nil
+
             if (hasHostCert || hasDeviceCert) && (hasHostID || hasSystemBUID) {
                 isValidPairing = true
+            } else if hasPublicKey && hasPrivateKey && (hasIdentifier || hasAltIRK || !plist.isEmpty) {
+                isValidPairing = true
+                isRemotePairingFormat = true
             }
 
             if let u = plist["UDID"] as? String, !u.isEmpty {
                 parsedUDID = u
+            } else if let identifier = plist["identifier"] as? String, !identifier.isEmpty {
+                parsedUDID = identifier
             }
         }
 
-        let filename = url.deletingPathExtension().lastPathComponent
+        let filename = validURL.deletingPathExtension().lastPathComponent
         if parsedUDID == nil && filename.count >= 20 {
             parsedUDID = filename
         }
 
         // Binary plist / XML pairing fallback check (stack-obfuscated on CI builds)
         if !isValidPairing {
-            let prefixData = Data(data.prefix(1024))
+            let prefixData = Data(data.prefix(2048))
             let bplistSig = "bplist00"
             if let prefixStr = String(data: prefixData, encoding: .utf8) ?? String(data: prefixData, encoding: .ascii) {
                 if prefixStr.contains("HostCertificate") || prefixStr.contains("HostID") || prefixStr.contains(bplistSig) {
                     isValidPairing = true
+                } else if prefixStr.contains("public_key") && prefixStr.contains("private_key") {
+                    isValidPairing = true
+                    isRemotePairingFormat = true
                 }
             } else if data.starts(with: Data(bplistSig.utf8)) {
                 isValidPairing = true
@@ -590,13 +762,20 @@ public final class LocalDevBridge: ObservableObject {
 
         guard isValidPairing else {
             DispatchQueue.main.async {
-                self.lastError = "Tệp không hợp lệ! Bắt buộc phải là file pairing (.plist / .mobiledevicepairing) có chứa HostCertificate"
+                self.lastError = "Tệp không hợp lệ! Cần file pairing chuẩn Lockdown (HostCertificate/HostID) hoặc Remote Pairing (public_key/private_key)."
             }
             return false
         }
 
         // Save safely into app's persistent storage
-        let targetURL = self.storageDirectory.appendingPathComponent("pairing.plist")
+        let dir = self.storageDirectory
+        let targetURL = dir.appendingPathComponent(isRemotePairingFormat ? "remote_pairing.plist" : "pairing.plist")
+        let staleNames = isRemotePairingFormat
+            ? ["pairing.plist", "pairing.mobiledevicepairing"]
+            : ["remote_pairing.plist"]
+        for staleName in staleNames {
+            try? FileManager.default.removeItem(at: dir.appendingPathComponent(staleName))
+        }
         do {
             try data.write(to: targetURL, options: .atomic)
         } catch {
@@ -626,13 +805,22 @@ public final class LocalDevBridge: ObservableObject {
                     let jsonStr = String(cString: cStr)
                     if let respData = jsonStr.data(using: .utf8),
                        let status = try? JSONDecoder().decode(LocalDevStatus.self, from: respData) {
-                        self.publishStatus(status, lastError: nil)
+                        if isRemotePairingFormat && status.code == LocalDevCode.pairingExpiredOrCorrupt.rawValue {
+                            self.publishStatus(Self.remotePairingUnsupportedStatus(udid: fallbackUDID), lastError: nil)
+                        } else {
+                            self.publishStatus(status, lastError: nil)
+                        }
                         return
                     }
                 }
             }
 
-            // 3. Simulator / preview fallback when libsec_core.dylib is not attached
+            // 3. Fallback when libsec_core.dylib is not attached (e.g. simulator/preview)
+            if isRemotePairingFormat {
+                self.publishStatus(Self.remotePairingUnsupportedStatus(udid: fallbackUDID), lastError: nil)
+                return
+            }
+
             let simStatus = LocalDevStatus(
                 code: LocalDevCode.live.rawValue,
                 status: "ĐÃ KẾT NỐI LOCALDEV (LIVE)",

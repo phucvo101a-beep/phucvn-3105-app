@@ -16,6 +16,7 @@ public struct LocalDevStatusCard: View {
         case 4: return Color.red
         case 5: return Color.red
         case 6: return Color.yellow
+        case 7: return Color.orange
         default: return Color.secondary
         }
     }
@@ -29,6 +30,7 @@ public struct LocalDevStatusCard: View {
         case 4: return "hand.raised.fill"
         case 5: return "exclamationmark.triangle.fill"
         case 6: return "bolt.slash.fill"
+        case 7: return "key.fill"
         default: return "questionmark.circle"
         }
     }
@@ -194,6 +196,16 @@ public struct LocalDevStatusCard: View {
                     }
 
                     if bridge.currentStatus.code == LocalDevCode.localNetworkDenied.rawValue {
+                        if let bundleID = Bundle.main.bundleIdentifier, bundleID.hasPrefix("com.apple.") {
+                            Text("Lưu ý iOS 26/27: Bundle ID '\(bundleID)' bắt đầu bằng 'com.apple.' có thể bị iOS ẩn mục 'Mạng cục bộ' trong Cài đặt. Hãy bấm 'Kích hoạt quyền Mạng cục bộ' để hệ thống gọi lại hộp thoại Network.framework (hoặc dùng Bundle ID riêng khi build nếu cần nút gạt trong Cài đặt).")
+                                .font(.system(size: 10, weight: .medium))
+                                .foregroundStyle(Color.yellow.opacity(0.9))
+                                .fixedSize(horizontal: false, vertical: true)
+                                .padding(.horizontal, 9)
+                                .padding(.vertical, 6)
+                                .background(Color.yellow.opacity(0.12), in: RoundedRectangle(cornerRadius: 8, style: .continuous))
+                        }
+
                         HStack(spacing: 8) {
                             Button {
                                 bridge.requestLocalNetworkPermission()
@@ -208,7 +220,8 @@ public struct LocalDevStatusCard: View {
                             .buttonStyle(AppPressableStyle())
 
                             Button {
-                                if let url = URL(string: UIApplication.openSettingsURLString) {
+                                if !UIApplication.openSettingsURLString.isEmpty,
+                                   let url = URL(string: UIApplication.openSettingsURLString) {
                                     UIApplication.shared.open(url, options: [:], completionHandler: nil)
                                 }
                             } label: {

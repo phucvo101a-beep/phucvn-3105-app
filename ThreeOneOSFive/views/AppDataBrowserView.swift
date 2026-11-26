@@ -373,15 +373,20 @@ struct AppDataBrowserView: View {
     }
 
     private var patchesShortcutCard: some View {
-        let destination = FileBrowserDestination(
-            containerPath: patchesURL?.path ?? "",
-            startPath: patchesURL?.path ?? "",
-            title: "Kho bản vá (.3105)",
-            bundleID: nil
-        )
+        let validPatchesURL = patchesURL.flatMap {
+            ContainerStore.validatedLocalFileURL(fromPath: $0.path, isDirectory: true)
+        }
+        let destination = validPatchesURL.map { url in
+            FileBrowserDestination(
+                containerPath: url.path,
+                startPath: url.path,
+                title: "Kho bản vá (.3105)",
+                bundleID: nil
+            )
+        }
 
         return Button {
-            if let patchesURL {
+            if let destination {
                 pushDestination(destination)
             }
         } label: {
@@ -409,21 +414,30 @@ struct AppDataBrowserView: View {
         }
         .buttonStyle(AppPressableStyle())
         .contextMenu {
-            openInNewTabButton(destination)
+            if let destination {
+                openInNewTabButton(destination)
+            }
         }
     }
 
     private var sandboxShortcutCard: some View {
-        let sandboxPath = ContainerStore.ownSandboxRootURL.path
-        let destination = FileBrowserDestination(
-            containerPath: sandboxPath,
-            startPath: sandboxPath,
-            title: "Hộp cát ứng dụng (Sandbox)",
-            bundleID: ContainerStore.ownBundleID
+        let validSandboxURL = ContainerStore.validatedLocalFileURL(
+            fromPath: ContainerStore.ownSandboxRootURL.path,
+            isDirectory: true
         )
+        let destination = validSandboxURL.map { url in
+            FileBrowserDestination(
+                containerPath: url.path,
+                startPath: url.path,
+                title: "Hộp cát ứng dụng (Sandbox)",
+                bundleID: ContainerStore.ownBundleID
+            )
+        }
 
         return Button {
-            pushDestination(destination)
+            if let destination {
+                pushDestination(destination)
+            }
         } label: {
             HStack(spacing: 13) {
                 AppRowIcon(systemName: "internaldrive.fill", tint: AppTheme.silverGlow, symbolSize: 19, frameSize: 45)

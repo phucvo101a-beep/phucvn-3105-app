@@ -104,20 +104,24 @@ final class PatchProjectStore: ObservableObject {
 
     func importPackage(at sourceURL: URL) {
         guard !isBusy else { return }
+        guard let validSourceURL = ContainerStore.validatedExternalFileURL(sourceURL) else {
+            log("patch: ignored invalid import URL")
+            return
+        }
         isBusy = true
-        let hasAccess = sourceURL.startAccessingSecurityScopedResource()
+        let hasAccess = validSourceURL.startAccessingSecurityScopedResource()
         Task.detached(priority: .userInitiated) { [weak self] in
             defer {
-                if hasAccess { sourceURL.stopAccessingSecurityScopedResource() }
+                if hasAccess { validSourceURL.stopAccessingSecurityScopedResource() }
             }
             do {
-                var data = try PatchProjectLibrary.readPackage(at: sourceURL)
+                var data = try PatchProjectLibrary.readPackage(at: validSourceURL)
 
                 if data.count > 4 && data.prefix(2) == Data([0x50, 0x4B]) {
                     let tempDir = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
                     defer { try? FileManager.default.removeItem(at: tempDir) }
 
-                    if (try? SecureZIPArchive.extract(archiveURL: sourceURL, destinationURL: tempDir)) != nil {
+                    if (try? SecureZIPArchive.extract(archiveURL: validSourceURL, destinationURL: tempDir)) != nil {
                         if let enumerator = FileManager.default.enumerator(at: tempDir, includingPropertiesForKeys: nil) {
                             for case let fileURL as URL in enumerator {
                                 let ext = fileURL.pathExtension.lowercased()

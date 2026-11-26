@@ -512,8 +512,15 @@ struct CleanerView: View {
                     },
                     isValidContainerPath: ContainerStore.isApplicationContainerPath,
                     usageForContainer: { containerPath in
-                        try? LimitedCleanerService.scan(
-                            containerURL: URL(fileURLWithPath: containerPath, isDirectory: true),
+                        guard let containerURL = ContainerStore.validatedLocalFileURL(
+                            fromPath: containerPath,
+                            isDirectory: true,
+                            requireExists: true
+                        ) else {
+                            return nil
+                        }
+                        return try? LimitedCleanerService.scan(
+                            containerURL: containerURL,
                             rootValidator: { ContainerStore.isApplicationContainerPath($0.path) }
                         )
                     }
@@ -603,9 +610,19 @@ struct CleanerView: View {
                     continue
                 }
 
+                guard let containerURL = ContainerStore.validatedLocalFileURL(
+                    fromPath: containerPath,
+                    isDirectory: true,
+                    requireExists: true
+                ) else {
+                    unavailableApps += 1
+                    log("cleaner: invalid container path for \(record.app.bundleID)")
+                    continue
+                }
+
                 do {
                     let result = try LimitedCleanerService.clean(
-                        containerURL: URL(fileURLWithPath: containerPath, isDirectory: true),
+                        containerURL: containerURL,
                         rootValidator: { ContainerStore.isApplicationContainerPath($0.path) }
                     )
                     updatedUsage[record.id] = result.after

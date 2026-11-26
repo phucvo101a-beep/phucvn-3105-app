@@ -405,7 +405,14 @@ struct PatchRuleEditorView: View {
     }
 
     private func importFile(_ result: Result<[URL], Error>) {
-        guard case .success(let urls) = result, let url = urls.first else { return }
+        guard case .success(let urls) = result,
+              let rawURL = urls.first,
+              let url = ContainerStore.validatedExternalFileURL(rawURL) else {
+            if case .success = result {
+                validationMessageKey = "patch.error.invalid_project"
+            }
+            return
+        }
         isImporting = true
         validationMessageKey = nil
         DispatchQueue.global(qos: .userInitiated).async {

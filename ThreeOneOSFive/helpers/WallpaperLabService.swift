@@ -118,11 +118,16 @@ enum WallpaperDeviceAccessService {
 #endif
         guard let path = ContainerStore.resolveAppContainerPath(
             bundleID: "com.apple.PosterBoard"
+        ),
+        let containerURL = ContainerStore.validatedLocalFileURL(
+            fromPath: path,
+            isDirectory: true,
+            requireExists: true
         ) else {
             throw WallpaperLabError.accessDenied
         }
         return try WallpaperAccessProbe.probe(
-            containerURL: URL(fileURLWithPath: path, isDirectory: true),
+            containerURL: containerURL,
             rootValidator: { ContainerStore.isApplicationContainerPath($0.path) },
             requiredExtensionIdentifiers: requiredExtensionIdentifiers
         )
@@ -164,10 +169,14 @@ enum WallpaperDeviceAccessService {
         }
         guard let path = ContainerStore.resolveAppContainerPath(
             bundleID: "com.apple.PosterBoard"
+        ),
+        let containerURL = ContainerStore.validatedLocalFileURL(
+            fromPath: path,
+            isDirectory: true,
+            requireExists: true
         ) else {
             throw WallpaperLabError.accessDenied
         }
-        let containerURL = URL(fileURLWithPath: path, isDirectory: true)
         let backupRoot = try WallpaperPackageStore.backupRoot()
         let removed = try WallpaperInstaller.resetCustomDescriptors(
             layout: currentReport.layout,
@@ -215,14 +224,15 @@ enum WallpaperPackageStore {
         repositoryIdentity: String? = nil,
         fileManager: FileManager = .default
     ) throws -> WallpaperStagedPackage {
-        guard sourceURL.pathExtension.lowercased() == "tendies" else {
+        guard let validSourceURL = ContainerStore.validatedExternalFileURL(sourceURL),
+              validSourceURL.pathExtension.lowercased() == "tendies" else {
             throw WallpaperLabError.unsupportedPackage
         }
-        let didAccess = sourceURL.startAccessingSecurityScopedResource()
+        let didAccess = validSourceURL.startAccessingSecurityScopedResource()
         defer {
-            if didAccess { sourceURL.stopAccessingSecurityScopedResource() }
+            if didAccess { validSourceURL.stopAccessingSecurityScopedResource() }
         }
-        let values = try sourceURL.resourceValues(
+        let values = try validSourceURL.resourceValues(
             forKeys: [.isRegularFileKey, .isSymbolicLinkKey, .fileSizeKey]
         )
         guard values.isRegularFile == true,
@@ -234,7 +244,7 @@ enum WallpaperPackageStore {
             throw WallpaperLabError.packageTooLarge
         }
         let resolvedDisplayName = (
-            displayName ?? sourceURL.deletingPathExtension().lastPathComponent
+            displayName ?? validSourceURL.deletingPathExtension().lastPathComponent
         ).trimmingCharacters(in: .whitespacesAndNewlines)
         guard isValidMetadataText(resolvedDisplayName, maximumBytes: 255),
               repositoryIdentity.map({
@@ -256,7 +266,7 @@ enum WallpaperPackageStore {
                 withIntermediateDirectories: false
             )
             let archiveURL = importingURL.appendingPathComponent(archiveName)
-            try fileManager.copyItem(at: sourceURL, to: archiveURL)
+            try fileManager.copyItem(at: validSourceURL, to: archiveURL)
             let extractedURL = importingURL.appendingPathComponent(
                 extractedName,
                 isDirectory: true

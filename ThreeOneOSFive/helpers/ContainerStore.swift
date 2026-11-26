@@ -252,6 +252,40 @@ enum ContainerStore {
         return ContainerDiscoveryMerger.canonicalPath(resolved)
     }
 
+    /// Validates a local filesystem path before constructing a file URL, preventing empty/`(null)`
+    /// or virtual (`localdev://`) paths from reaching `sandbox_extension_issue_file` (`EINVAL 22`).
+    static func validatedLocalFileURL(
+        fromPath rawPath: String,
+        isDirectory: Bool? = nil,
+        requireExists: Bool = false
+    ) -> URL? {
+        let trimmed = rawPath.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty,
+              trimmed.hasPrefix("/"),
+              !trimmed.contains("://"),
+              !trimmed.contains("\0") else {
+            return nil
+        }
+        let components = (trimmed as NSString).pathComponents
+        guard !components.contains("..") else { return nil }
+
+        let url = isDirectory.map {
+            URL(fileURLWithPath: trimmed, isDirectory: $0).standardizedFileURL
+        } ?? URL(fileURLWithPath: trimmed).standardizedFileURL
+        let path = url.path
+        guard !path.isEmpty, path.hasPrefix("/") else { return nil }
+        if requireExists && !FileManager.default.fileExists(atPath: path) {
+            return nil
+        }
+        return url
+    }
+
+    /// Validates an external document URL (picker / Open-In) before calling security-scoped APIs.
+    static func validatedExternalFileURL(_ url: URL, requireExists: Bool = false) -> URL? {
+        guard url.isFileURL else { return nil }
+        return validatedLocalFileURL(fromPath: url.path, requireExists: requireExists)
+    }
+
     // MARK: - Container Resolution
 
     static func resolveAppContainerPath(bundleID: String) -> String? {

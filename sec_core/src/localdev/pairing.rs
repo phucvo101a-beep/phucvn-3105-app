@@ -23,6 +23,15 @@ impl PairingFile {
         let root = parse_plist(raw_data)?;
         let dict = root.as_dict().ok_or_else(|| "Pairing file root must be a Dictionary".to_string())?;
 
+        // Detect `idevice pair v1.2.0` Remote Pairing plist (`public_key`, `private_key`, `identifier`, `alt_irk`)
+        if dict.contains_key("public_key")
+            && dict.contains_key("private_key")
+            && !dict.contains_key("HostCertificate")
+            && !dict.contains_key("HostID")
+        {
+            return Err("REMOTE_PAIRING_UNSUPPORTED: Đã nhận diện tệp Remote Pairing (public_key / private_key / identifier / alt_irk), nhưng libsec_core.dylib hiện tại chỉ hỗ trợ Lockdown X.509 TLS (HostCertificate / HostID trên cổng 62078).".to_string());
+        }
+
         // 1. HostID
         let host_id = dict.get("HostID")
             .and_then(|v| v.as_str())

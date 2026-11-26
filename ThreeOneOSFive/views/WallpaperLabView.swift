@@ -445,9 +445,14 @@ struct WallpaperLabView: View {
 #endif
         guard let path = ContainerStore.resolveAppContainerPath(
             bundleID: "com.apple.PosterBoard"
+        ),
+        let containerURL = ContainerStore.validatedLocalFileURL(
+            fromPath: path,
+            isDirectory: true,
+            requireExists: true
         ) else { throw WallpaperLabError.accessDenied }
         return try WallpaperAccessProbe.probe(
-            containerURL: URL(fileURLWithPath: path, isDirectory: true),
+            containerURL: containerURL,
             rootValidator: { ContainerStore.isApplicationContainerPath($0.path) },
             requiredExtensionIdentifiers: requiredExtensionIdentifiers
         )

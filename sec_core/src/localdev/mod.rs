@@ -20,7 +20,7 @@ use tunnel::{
     DEFAULT_LOCKDOWN_PORT, MAX_HANDSHAKE_ATTEMPTS,
 };
 
-/// Status Codes: distinguishes Pairing file validity from VPN tunnel / socket resets
+/// Status Codes: distinguishes Pairing file validity, VPN/socket resets, and Remote Pairing format
 #[repr(i32)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum LocalDevStatusCode {
@@ -30,6 +30,7 @@ pub enum LocalDevStatusCode {
     LocalNetworkDenied = 4,
     PairingExpiredOrCorrupt = 5,
     TunnelReset = 6,
+    RemotePairingUnsupported = 7,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -91,14 +92,30 @@ impl LocalDevManager {
 
     /// Imports a new pairing file from raw data and persists it
     pub fn import_pairing(&mut self, data: &[u8]) -> Result<LocalDevStatusReport, String> {
-        let parsed = PairingFile::parse(data)?;
-        if let Some(ref dir) = self.storage_dir {
-            let _ = parsed.save_to_dir(dir);
+        match PairingFile::parse(data) {
+            Ok(parsed) => {
+                if let Some(ref dir) = self.storage_dir {
+                    let _ = std::fs::remove_file(dir.join("remote_pairing.plist"));
+                    let _ = parsed.save_to_dir(dir);
+                }
+                self.active_pairing = Some(parsed);
+                self.check_status_report()
+            }
+            Err(err) if err.starts_with("REMOTE_PAIRING_UNSUPPORTED:") => {
+                self.active_pairing = None;
+                self.heartbeat.stop();
+                if let Some(ref dir) = self.storage_dir {
+                    if !dir.exists() {
+                        let _ = std::fs::create_dir_all(dir);
+                    }
+                    let _ = std::fs::remove_file(dir.join("pairing.mobiledevicepairing"));
+                    let _ = std::fs::remove_file(dir.join("pairing.plist"));
+                    let _ = std::fs::write(dir.join("remote_pairing.plist"), data);
+                }
+                Ok(remote_pairing_unsupported_report(self.host.clone(), self.port))
+            }
+            Err(err) => Err(err),
         }
-        self.active_pairing = Some(parsed);
-
-        // Verify connectivity over tunnel without crashing or blocking indefinitely
-        self.check_status_report()
     }
 
     fn candidate_ips(&self) -> Vec<String> {
@@ -111,12 +128,18 @@ impl LocalDevManager {
         ips
     }
 
-    /// Evaluates current LocalDev status and returns structured report (`code` 1..6)
+    /// Evaluates current LocalDev status and returns structured report (`code` 1..7)
     pub fn check_status_report(&mut self) -> Result<LocalDevStatusReport, String> {
-        // Sync with disk in case user cleared `.localdev/pairing.*` from Sandbox UI
+        // Sync with disk in case user cleared `.localdev/pairing.*` or saved a Remote Pairing plist
         if let Some(ref dir) = self.storage_dir {
+            let remote_path = dir.join("remote_pairing.plist");
             let has_saved = dir.join("pairing.mobiledevicepairing").exists()
                 || dir.join("pairing.plist").exists();
+            if remote_path.exists() && !has_saved {
+                self.active_pairing = None;
+                self.heartbeat.stop();
+                return Ok(remote_pairing_unsupported_report(self.host.clone(), self.port));
+            }
             if !has_saved {
                 self.active_pairing = None;
                 self.heartbeat.stop();
@@ -273,6 +296,18 @@ fn build_failure_report(
             udid: Some(udid.to_string()),
             is_heartbeat_alive: false,
         },
+    }
+}
+
+fn remote_pairing_unsupported_report(host: String, port: u16) -> LocalDevStatusReport {
+    LocalDevStatusReport {
+        code: LocalDevStatusCode::RemotePairingUnsupported as i32,
+        status: "CHƯA HỖ TRỢ REMOTE PAIRING".to_string(),
+        message: "File pairing này thuộc chuẩn Remote Pairing (idevice pair v1.2.0: public_key / private_key / identifier / alt_irk). Core libsec_core.dylib hiện chỉ hỗ trợ USB Lockdown X.509 cổ điển (HostCertificate & HostID) qua cổng 62078. Hãy tạo/nhập tệp .mobiledevicepairing chuẩn Lockdown, hoặc tắt LocalDev để dùng thẳng Sandbox & Nhật ký USB.".to_string(),
+        host,
+        port,
+        udid: None,
+        is_heartbeat_alive: false,
     }
 }
 
