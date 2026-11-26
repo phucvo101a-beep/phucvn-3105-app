@@ -154,6 +154,37 @@ public struct LocalDevStatusCard: View {
                     }
                 }
 
+                if let host = bridge.currentStatus.host, !host.isEmpty {
+                    let port = bridge.currentStatus.port ?? 62078
+                    let ifaceSuffix = bridge.currentStatus.interface_name.map { " (\($0))" } ?? ""
+                    HStack(spacing: 4) {
+                        Text("ENDPOINT:")
+                            .font(.system(size: 9, weight: .bold, design: .monospaced))
+                            .foregroundStyle(AppTheme.subduedText)
+                        Text("\(host):\(port)\(ifaceSuffix)")
+                            .font(.system(size: 9, weight: .semibold, design: .monospaced))
+                            .foregroundStyle(Color.white.opacity(0.75))
+                            .lineLimit(1)
+                            .truncationMode(.middle)
+                    }
+                } else if !bridge.detectedTunnelEndpoints.isEmpty {
+                    let utunList = bridge.detectedTunnelEndpoints
+                        .filter { ($0.iface ?? "") != "lo0" && $0.iface != nil }
+                        .map { "\($0.host):\($0.port) (\($0.iface ?? ""))" }
+                    if !utunList.isEmpty {
+                        HStack(spacing: 4) {
+                            Text("UTUN:")
+                                .font(.system(size: 9, weight: .bold, design: .monospaced))
+                                .foregroundStyle(AppTheme.subduedText)
+                            Text(utunList.joined(separator: ", "))
+                                .font(.system(size: 9, weight: .semibold, design: .monospaced))
+                                .foregroundStyle(Color.white.opacity(0.70))
+                                .lineLimit(1)
+                                .truncationMode(.middle)
+                        }
+                    }
+                }
+
                 // Action buttons
                 VStack(spacing: 8) {
                     HStack(spacing: 8) {

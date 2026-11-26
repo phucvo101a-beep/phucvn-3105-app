@@ -34,12 +34,29 @@ pub enum LocalDevStatusCode {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TunnelCandidate {
+    pub host: String,
+    #[serde(default = "default_tunnel_port")]
+    pub port: u16,
+    #[serde(default)]
+    pub iface: Option<String>,
+    #[serde(default)]
+    pub source: Option<String>,
+}
+
+fn default_tunnel_port() -> u16 {
+    DEFAULT_LOCKDOWN_PORT
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct LocalDevStatusReport {
     pub code: i32,
     pub status: String,
     pub message: String,
     pub host: String,
     pub port: u16,
+    #[serde(default)]
+    pub interface_name: Option<String>,
     pub udid: Option<String>,
     pub is_heartbeat_alive: bool,
 }
@@ -47,6 +64,9 @@ pub struct LocalDevStatusReport {
 pub struct LocalDevManager {
     pub host: String,
     pub port: u16,
+    pub active_iface: Option<String>,
+    pub candidates: Vec<TunnelCandidate>,
+    pub local_network_state: i32,
     pub storage_dir: Option<PathBuf>,
     pub active_pairing: Option<PairingFile>,
     pub heartbeat: HeartbeatService,
@@ -63,10 +83,99 @@ impl LocalDevManager {
         Self {
             host: DEFAULT_LOCALDEV_IP.to_string(),
             port: DEFAULT_LOCKDOWN_PORT,
+            active_iface: None,
+            candidates: Vec::new(),
+            local_network_state: 0,
             storage_dir: None,
             active_pairing: None,
             heartbeat: HeartbeatService::new(),
         }
+    }
+
+    /// Updates dynamic tunnel candidate endpoints discovered via Swift `getifaddrs()` (`utun`)
+    pub fn set_candidates(&mut self, candidates: Vec<TunnelCandidate>, local_network_state: i32) {
+        let mut cleaned = Vec::new();
+        for mut c in candidates {
+            let trimmed = c.host.trim().to_string();
+            if trimmed.is_empty() {
+                continue;
+            }
+            c.host = trimmed;
+            if c.port == 0 {
+                c.port = self.port;
+            }
+            if !cleaned.iter().any(|e: &TunnelCandidate| e.host == c.host && e.port == c.port) {
+                cleaned.push(c);
+            }
+        }
+        if let Some(first) = cleaned.first() {
+            if self.active_iface.is_none() || self.host == "127.0.0.1" {
+                self.host = first.host.clone();
+                self.port = first.port;
+                self.active_iface = first.iface.clone();
+            }
+        }
+        self.candidates = cleaned;
+        self.local_network_state = local_network_state;
+    }
+
+    pub fn effective_candidates(&self) -> Vec<TunnelCandidate> {
+        let mut ordered: Vec<TunnelCandidate> = Vec::new();
+        let mut push_unique = |cand: TunnelCandidate| {
+            let trimmed = cand.host.trim();
+            if trimmed.is_empty() {
+                return;
+            }
+            let port = if cand.port > 0 { cand.port } else { DEFAULT_LOCKDOWN_PORT };
+            if !ordered.iter().any(|e| e.host == trimmed && e.port == port) {
+                ordered.push(TunnelCandidate {
+                    host: trimmed.to_string(),
+                    port,
+                    iface: cand.iface,
+                    source: cand.source,
+                });
+            }
+        };
+
+        // Keep previously verified working non-loopback endpoint first only if still listed or live
+        if self.active_iface.is_some() && self.host != "127.0.0.1" {
+            let present = self
+                .candidates
+                .iter()
+                .find(|c| c.host == self.host && c.port == self.port)
+                .cloned();
+            if let Some(c) = present {
+                push_unique(c);
+            }
+        }
+
+        for c in &self.candidates {
+            push_unique(c.clone());
+        }
+
+        if self.host != "127.0.0.1" && !self.host.trim().is_empty() {
+            push_unique(TunnelCandidate {
+                host: self.host.clone(),
+                port: self.port,
+                iface: self.active_iface.clone(),
+                source: Some("configured-host".to_string()),
+            });
+        }
+
+        for (ip, src) in [
+            ("10.7.0.1", "standard-localdev"),
+            ("10.7.0.0", "standard-localdev"),
+            ("127.0.0.1", "loopback-fallback"),
+        ] {
+            push_unique(TunnelCandidate {
+                host: ip.to_string(),
+                port: DEFAULT_LOCKDOWN_PORT,
+                iface: if ip == "127.0.0.1" { Some("lo0".to_string()) } else { None },
+                source: Some(src.to_string()),
+            });
+        }
+
+        ordered
     }
 
     /// Initializes storage directory and loads saved pairing file
@@ -118,16 +227,6 @@ impl LocalDevManager {
         }
     }
 
-    fn candidate_ips(&self) -> Vec<String> {
-        let mut ips = vec![self.host.clone()];
-        for fallback in ["127.0.0.1", "10.7.0.1", "10.7.1.1"] {
-            if !ips.iter().any(|existing| existing == fallback) {
-                ips.push(fallback.to_string());
-            }
-        }
-        ips
-    }
-
     /// Evaluates current LocalDev status and returns structured report (`code` 1..7)
     pub fn check_status_report(&mut self) -> Result<LocalDevStatusReport, String> {
         // Sync with disk in case user cleared `.localdev/pairing.*` or saved a Remote Pairing plist
@@ -159,6 +258,7 @@ impl LocalDevManager {
                                 message: format!("Không thể phân tích tệp pairing đã lưu: {}", err),
                                 host: self.host.clone(),
                                 port: self.port,
+                                interface_name: self.active_iface.clone(),
                                 udid: None,
                                 is_heartbeat_alive: false,
                             });
@@ -178,20 +278,29 @@ impl LocalDevManager {
                     message: "Vui lòng nhập tệp .mobiledevicepairing để kết nối LocalDev (Sandbox & Nhật ký USB vẫn dùng bình thường).".to_string(),
                     host: self.host.clone(),
                     port: self.port,
+                    interface_name: self.active_iface.clone(),
                     udid: None,
                     is_heartbeat_alive: false,
                 });
             }
         };
 
-        // 2. Connect directly once per candidate IP (avoid opening a throwaway pre-probe socket that causes RST)
-        let mut last_failure: Option<(String, LockdownError)> = None;
+        // 2. Probe all dynamic candidates sequentially (`utun dstaddr` -> `10.7.0.1` -> `10.7.0.0` -> `127.0.0.1`)
+        let candidates = self.effective_candidates();
+        let mut attempts: Vec<EndpointAttempt> = Vec::with_capacity(candidates.len());
 
-        for ip in self.candidate_ips() {
-            match LockdownClient::connect_with_retry(&ip, self.port, &pairing, MAX_HANDSHAKE_ATTEMPTS)
-            {
+        for cand in candidates {
+            match LockdownClient::connect_with_retry(
+                &cand.host,
+                cand.port,
+                &pairing,
+                MAX_HANDSHAKE_ATTEMPTS,
+            ) {
                 Ok(client) => {
-                    self.host = ip.clone();
+                    self.host = cand.host.clone();
+                    self.port = cand.port;
+                    self.active_iface = cand.iface.clone();
+
                     let verified_udid = client
                         .device_udid
                         .filter(|u| !u.is_empty())
@@ -202,45 +311,37 @@ impl LocalDevManager {
                             .start(pairing.clone(), self.host.clone(), self.port);
                     }
 
+                    let via_str = cand
+                        .iface
+                        .as_deref()
+                        .map(|i| format!(" qua {}", i))
+                        .unwrap_or_default();
+
                     return Ok(LocalDevStatusReport {
                         code: LocalDevStatusCode::Live as i32,
                         status: "LOCALDEV LIVE".to_string(),
-                        message: format!("Kết nối LocalDev thành công (UDID: {})", verified_udid),
+                        message: format!(
+                            "Kết nối LocalDev thành công tại {}:{}{} (UDID: {})",
+                            self.host, self.port, via_str, verified_udid
+                        ),
                         host: self.host.clone(),
                         port: self.port,
+                        interface_name: self.active_iface.clone(),
                         udid: Some(verified_udid),
                         is_heartbeat_alive: true,
                     });
                 }
                 Err(err) => {
-                    let priority = error_priority(&err);
-                    let replace = last_failure
-                        .as_ref()
-                        .map(|(_, prev)| priority > error_priority(prev))
-                        .unwrap_or(true);
-                    if replace {
-                        last_failure = Some((ip.clone(), err));
-                    }
-                    // Permission denied applies app-wide; no need to probe remaining IPs
-                    if priority == 4 {
-                        break;
-                    }
+                    attempts.push(EndpointAttempt { cand, err });
                 }
             }
         }
 
-        let (failed_ip, err) = last_failure.unwrap_or_else(|| {
-            (
-                self.host.clone(),
-                LockdownError::new(
-                    LockdownErrorKind::TunnelUnreachable,
-                    LockdownStage::TcpConnect,
-                    "Không có phản hồi từ tunnel LocalDev",
-                ),
-            )
-        });
-
-        Ok(build_failure_report(failed_ip, self.port, &pairing.udid, &err))
+        Ok(build_multi_failure_report(
+            &attempts,
+            self.local_network_state,
+            &pairing.udid,
+        ))
     }
 
     /// Scans installed applications over `installation_proxy`
@@ -249,92 +350,196 @@ impl LocalDevManager {
             .active_pairing
             .as_ref()
             .ok_or_else(|| "Chưa có pairing file".to_string())?;
-        apps::AppScanner::scan_user_apps(&self.host, self.port, pairing)
+        let candidate_pairs: Vec<(String, u16)> = self
+            .effective_candidates()
+            .into_iter()
+            .map(|c| (c.host, c.port))
+            .collect();
+        let (apps, connected_host, connected_port) =
+            apps::AppScanner::scan_user_apps_with_candidates(&candidate_pairs, pairing)?;
+        self.host = connected_host;
+        self.port = connected_port;
+        Ok(apps)
     }
 }
 
-fn error_priority(err: &LockdownError) -> u8 {
-    match err.kind {
-        LockdownErrorKind::PermissionDenied => 4,
-        LockdownErrorKind::PairingRejected => 3,
-        LockdownErrorKind::SocketReset | LockdownErrorKind::ProtocolError => 2,
-        LockdownErrorKind::Timeout | LockdownErrorKind::TunnelUnreachable => 1,
-    }
+struct EndpointAttempt {
+    cand: TunnelCandidate,
+    err: LockdownError,
 }
 
-fn build_failure_report(
-    host: String,
-    port: u16,
+fn format_attempts_summary(attempts: &[EndpointAttempt]) -> String {
+    attempts
+        .iter()
+        .map(|a| {
+            let via = a
+                .cand
+                .iface
+                .as_deref()
+                .map(|i| format!(" [{}]", i))
+                .unwrap_or_default();
+            format!("{}:{}{} -> {}", a.cand.host, a.cand.port, via, a.err.errno_label())
+        })
+        .collect::<Vec<_>>()
+        .join(" | ")
+}
+
+fn build_multi_failure_report(
+    attempts: &[EndpointAttempt],
+    local_network_state: i32,
     udid: &str,
-    err: &LockdownError,
 ) -> LocalDevStatusReport {
-    match err.kind {
-        LockdownErrorKind::PermissionDenied => {
-            let (bundle_id, _, _) = crate::integrity::read_bundle_identity();
-            if bundle_id.starts_with("com.apple.") {
-                LocalDevStatusReport {
-                    code: LocalDevStatusCode::LocalNetworkDenied as i32,
-                    status: "BỊ CHẶN DO BUNDLE ID HỆ THỐNG".to_string(),
-                    message: format!(
-                        "Bundle ID '{}' có tiền tố 'com.apple.' khiến iOS 26/27 chặn EPERM tới {}:{} và ẩn công tắc Mạng cục bộ trong Cài đặt. Cần build lại bằng Bundle ID riêng (ví dụ: com.phucvn.threeoneosfive). Chi tiết: {}",
-                        bundle_id, host, port, err.detail
-                    ),
-                    host,
-                    port,
-                    udid: Some(udid.to_string()),
-                    is_heartbeat_alive: false,
-                }
-            } else {
-                LocalDevStatusReport {
-                    code: LocalDevStatusCode::LocalNetworkDenied as i32,
-                    status: "CHƯA CẤP QUYỀN MẠNG CỤC BỘ".to_string(),
-                    message: format!(
-                        "iOS đang chặn kết nối tới tunnel {}:{} (EPERM — {}). Hãy bấm 'Kích hoạt quyền Mạng cục bộ' -> Cho phép, hoặc bật công tắc 'Mạng cục bộ' trong Cài đặt -> 3105 x PHUCVN rồi quay lại app.",
-                        host, port, err.detail
-                    ),
-                    host,
-                    port,
-                    udid: Some(udid.to_string()),
-                    is_heartbeat_alive: false,
-                }
-            }
-        }
-        LockdownErrorKind::PairingRejected => LocalDevStatusReport {
+    let summary = format_attempts_summary(attempts);
+    let fallback = EndpointAttempt {
+        cand: TunnelCandidate {
+            host: DEFAULT_LOCALDEV_IP.to_string(),
+            port: DEFAULT_LOCKDOWN_PORT,
+            iface: None,
+            source: None,
+        },
+        err: LockdownError::new(
+            LockdownErrorKind::TunnelUnreachable,
+            LockdownStage::TcpConnect,
+            "Không có phản hồi từ tunnel LocalDev",
+        ),
+    };
+
+    // 1. Pairing rejected on any endpoint takes highest diagnostic precedence
+    if let Some(a) = attempts
+        .iter()
+        .find(|a| a.err.kind == LockdownErrorKind::PairingRejected)
+    {
+        return LocalDevStatusReport {
             code: LocalDevStatusCode::PairingExpiredOrCorrupt as i32,
             status: "PAIRING FILE HẾT HẠN / LỖI".to_string(),
             message: format!(
-                "Thiết bị từ chối tệp pairing tại bước [{}]: {}. Hãy tạo lại hoặc nhập tệp .mobiledevicepairing mới.",
-                err.stage, err.detail
+                "Thiết bị tại {}:{} từ chối tệp pairing ở bước [{}]: {}. Thử: [{}]",
+                a.cand.host, a.cand.port, a.err.stage, a.err.detail, summary
             ),
-            host,
-            port,
+            host: a.cand.host.clone(),
+            port: a.cand.port,
+            interface_name: a.cand.iface.clone(),
             udid: Some(udid.to_string()),
             is_heartbeat_alive: false,
-        },
-        LockdownErrorKind::SocketReset | LockdownErrorKind::ProtocolError => LocalDevStatusReport {
+        };
+    }
+
+    // 2. TCP connected then reset/protocol mismatch
+    if let Some(a) = attempts.iter().find(|a| {
+        matches!(
+            a.err.kind,
+            LockdownErrorKind::SocketReset | LockdownErrorKind::ProtocolError
+        )
+    }) {
+        let via = a
+            .cand
+            .iface
+            .as_deref()
+            .map(|i| format!(" ({})", i))
+            .unwrap_or_default();
+        return LocalDevStatusReport {
             code: LocalDevStatusCode::TunnelReset as i32,
             status: "SOCKET/DAEMON RESET KHI BẮT TAY".to_string(),
             message: format!(
-                "Socket {}:{} bị ngắt/reset ở bước [{}] ({}). Đây là lỗi tunnel LocalDevVPN hoặc daemon iOS ngắt kết nối cổng 62078 (không mặc định là file pairing hỏng). Hãy tắt/bật lại LocalDevVPN; Sandbox & Nhật ký USB vẫn hoạt động bình thường.",
-                host, port, err.stage, err.detail
+                "Socket {}:{}{} bị ngắt ở bước [{}] ({}). Thử: [{}]. Sandbox & Nhật ký USB vẫn hoạt động bình thường.",
+                a.cand.host, a.cand.port, via, a.err.stage, a.err.detail, summary
             ),
-            host,
-            port,
+            host: a.cand.host.clone(),
+            port: a.cand.port,
+            interface_name: a.cand.iface.clone(),
             udid: Some(udid.to_string()),
             is_heartbeat_alive: false,
-        },
-        LockdownErrorKind::Timeout | LockdownErrorKind::TunnelUnreachable => LocalDevStatusReport {
-            code: LocalDevStatusCode::VpnDisconnected as i32,
-            status: "CHƯA BẬT LOCALDEV VPN".to_string(),
+        };
+    }
+
+    // Prefer reporting real `utun` / non-loopback endpoint before loopback fallback
+    let primary = attempts
+        .iter()
+        .find(|a| a.cand.host != "127.0.0.1")
+        .or_else(|| attempts.first())
+        .unwrap_or(&fallback);
+    let primary_via = primary
+        .cand
+        .iface
+        .as_deref()
+        .map(|i| format!(" qua {}", i))
+        .unwrap_or_default();
+
+    let (bundle_id, _, _) = crate::integrity::read_bundle_identity();
+    if bundle_id.starts_with("com.apple.")
+        && attempts
+            .iter()
+            .any(|a| a.err.kind == LockdownErrorKind::PermissionDenied)
+    {
+        return LocalDevStatusReport {
+            code: LocalDevStatusCode::LocalNetworkDenied as i32,
+            status: "BỊ CHẶN DO BUNDLE ID HỆ THỐNG".to_string(),
             message: format!(
-                "Không thể kết nối {}:{}. Hãy bật LocalDevVPN hoặc StosVPN.",
-                host, port
+                "Bundle ID '{}' có tiền tố 'com.apple.' khiến iOS 26/27 ẩn công tắc Mạng cục bộ. Endpoint thử: [{}]",
+                bundle_id, summary
             ),
-            host,
-            port,
+            host: primary.cand.host.clone(),
+            port: primary.cand.port,
+            interface_name: primary.cand.iface.clone(),
             udid: Some(udid.to_string()),
             is_heartbeat_alive: false,
-        },
+        };
+    }
+
+    // 3. Do NOT lump every EPERM into "CHƯA CẤP QUYỀN MẠNG CỤC BỘ" when Local Network is already confirmed OK
+    // or when `utun` timed out / refused while only loopback `127.0.0.1` hit `EPERM`.
+    let has_utun_network_failure = attempts
+        .iter()
+        .any(|a| a.cand.host != "127.0.0.1" && a.err.kind != LockdownErrorKind::PermissionDenied);
+
+    if local_network_state == -1
+        || (local_network_state == 0
+            && !has_utun_network_failure
+            && attempts
+                .iter()
+                .any(|a| a.cand.host != "127.0.0.1" && a.err.kind == LockdownErrorKind::PermissionDenied))
+    {
+        return LocalDevStatusReport {
+            code: LocalDevStatusCode::LocalNetworkDenied as i32,
+            status: "CHƯA CẤP QUYỀN MẠNG CỤC BỘ".to_string(),
+            message: format!(
+                "Kết nối tới {}:{}{} bị từ chối ({}). Hãy bật 'Mạng cục bộ' trong Cài đặt -> 3105 x PHUCVN hoặc bấm 'Kích hoạt quyền Mạng cục bộ'. Chi tiết thử: [{}]",
+                primary.cand.host,
+                primary.cand.port,
+                primary_via,
+                primary.err.errno_label(),
+                summary
+            ),
+            host: primary.cand.host.clone(),
+            port: primary.cand.port,
+            interface_name: primary.cand.iface.clone(),
+            udid: Some(udid.to_string()),
+            is_heartbeat_alive: false,
+        };
+    }
+
+    let status_title = if primary.err.kind == LockdownErrorKind::PermissionDenied {
+        "MẠNG CỤC BỘ ĐÃ BẬT — LỖI POLICY TUNNEL"
+    } else {
+        "CHƯA BẬT / KHÔNG TỚI ĐƯỢC LOCALDEV VPN"
+    };
+
+    LocalDevStatusReport {
+        code: LocalDevStatusCode::VpnDisconnected as i32,
+        status: status_title.to_string(),
+        message: format!(
+            "Đã kiểm tra Mạng cục bộ OK nhưng không kết nối được tunnel (ưu tiên {}:{}{}: {}). Kết quả từng endpoint: [{}]. Hãy mở app LocalDevVPN đảm bảo VPN Connected (utun đang chạy).",
+            primary.cand.host,
+            primary.cand.port,
+            primary_via,
+            primary.err.errno_label(),
+            summary
+        ),
+        host: primary.cand.host.clone(),
+        port: primary.cand.port,
+        interface_name: primary.cand.iface.clone(),
+        udid: Some(udid.to_string()),
+        is_heartbeat_alive: false,
     }
 }
 
@@ -345,6 +550,7 @@ fn remote_pairing_unsupported_report(host: String, port: u16) -> LocalDevStatusR
         message: "File pairing này thuộc chuẩn Remote Pairing (idevice pair v1.2.0: public_key / private_key / identifier / alt_irk). Core libsec_core.dylib hiện chỉ hỗ trợ USB Lockdown X.509 cổ điển (HostCertificate & HostID) qua cổng 62078. Hãy tạo/nhập tệp .mobiledevicepairing chuẩn Lockdown, hoặc tắt LocalDev để dùng thẳng Sandbox & Nhật ký USB.".to_string(),
         host,
         port,
+        interface_name: None,
         udid: None,
         is_heartbeat_alive: false,
     }

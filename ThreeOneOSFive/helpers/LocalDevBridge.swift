@@ -9,6 +9,7 @@ private typealias CLocalDevInit = @convention(c) (UnsafePointer<CChar>?, UnsafeP
 private typealias CLocalDevNwPrewarmCallback = @convention(c) (UnsafePointer<CChar>?, UInt16) -> Int32
 private typealias CLocalDevNwRelayConnectCallback = @convention(c) (UnsafePointer<CChar>?, UInt16, UInt32, UnsafeMutablePointer<Int32>?) -> Int32
 private typealias CLocalDevRegisterNwCallbacks = @convention(c) (CLocalDevNwPrewarmCallback?, CLocalDevNwRelayConnectCallback?) -> Int32
+private typealias CLocalDevSetCandidates = @convention(c) (UnsafePointer<CChar>?, Int32) -> Int32
 private typealias CLocalDevImportPairing = @convention(c) (UnsafePointer<UInt8>, Int) -> UnsafePointer<CChar>?
 private typealias CLocalDevStatus = @convention(c) () -> UnsafePointer<CChar>?
 private typealias CLocalDevScanApps = @convention(c) () -> UnsafePointer<CChar>?
@@ -21,8 +22,9 @@ private typealias CLocalDevFreeBytes = @convention(c) (UnsafeMutablePointer<UInt
 private func localdevSwiftNwPrewarmTrampoline(_ hostPtr: UnsafePointer<CChar>?, _ port: UInt16) -> Int32 {
     let targetHost = hostPtr.flatMap { String(cString: $0) }
     let targetPort = port > 0 ? port : 62078
+    let hosts = targetHost.flatMap { $0.isEmpty ? nil : [$0] }
     return LocalDevBridge.shared.prewarmLocalNetworkSynchronously(
-        targetHost: targetHost,
+        targetHosts: hosts,
         port: targetPort,
         force: true,
         timeoutMs: 1200
@@ -230,7 +232,7 @@ private final class NWConnectionRelaySession {
         }
 
         conn.start(queue: queue)
-        let clampedMs = Int(min(max(timeoutMs, 250), 15_000))
+        let clampedMs = Int(min(max(timeoutMs, 250), 1500))
         _ = semaphore.wait(timeout: .now() + .milliseconds(clampedMs))
 
         connectLock.lock()
@@ -404,6 +406,7 @@ private final class LocalDevLib {
 
     var fnInit: CLocalDevInit?
     var fnRegisterNwCallbacks: CLocalDevRegisterNwCallbacks?
+    var fnSetCandidates: CLocalDevSetCandidates?
     var fnImportPairing: CLocalDevImportPairing?
     var fnStatus: CLocalDevStatus?
     var fnScanApps: CLocalDevScanApps?
@@ -444,6 +447,9 @@ private final class LocalDevLib {
         }
         if let sym = dlsym(symTarget, "localdev_register_nw_callbacks") {
             fnRegisterNwCallbacks = unsafeBitCast(sym, to: CLocalDevRegisterNwCallbacks.self)
+        }
+        if let sym = dlsym(symTarget, "localdev_set_candidates") {
+            fnSetCandidates = unsafeBitCast(sym, to: CLocalDevSetCandidates.self)
         }
         if let sym = dlsym(symTarget, "localdev_import_pairing") {
             fnImportPairing = unsafeBitCast(sym, to: CLocalDevImportPairing.self)
@@ -488,12 +494,21 @@ public enum LocalDevCode: Int {
     case remotePairingUnsupported = 7
 }
 
+public struct LocalDevTunnelEndpoint: Codable, Hashable, Identifiable {
+    public var id: String { "\(host):\(port)|\(iface ?? "")" }
+    public let host: String
+    public let port: UInt16
+    public let iface: String?
+    public let source: String?
+}
+
 public struct LocalDevStatus: Codable {
     public let code: Int
     public let status: String
     public let message: String
     public let host: String?
     public let port: UInt16?
+    public let interface_name: String?
     public let udid: String?
     public let is_heartbeat_alive: Bool?
 
@@ -594,6 +609,7 @@ public final class LocalDevBridge: ObservableObject {
     @Published public var isModuleEnabled: Bool
     @Published public var currentStatus: LocalDevStatus
     @Published public var installedApps: [LocalDevApp] = []
+    @Published public var detectedTunnelEndpoints: [LocalDevTunnelEndpoint] = []
     @Published public var isScanning: Bool = false
     @Published public var isCheckingStatus: Bool = false
     @Published public var lastError: String?
@@ -617,6 +633,8 @@ public final class LocalDevBridge: ObservableObject {
     private var lastAutoRefreshUptime: TimeInterval = 0
     private var lastPrewarmUptime: TimeInterval = 0
     private var lastReadyRefreshUptime: TimeInterval = 0
+    private var lastLocalNetworkState: Int32 = 0 // 1 = OK, -1 = Denied, 0 = Unknown
+    private var lastLoggedDiscoveryKey: String = ""
     private let workerQueue = DispatchQueue(label: "com.phucvn.3105.localdev.worker", qos: .userInitiated)
     private let networkProbeQueue = DispatchQueue(label: "com.phucvn.3105.localdev.nwprobe", qos: .utility)
     private var activeProbeCancelWorkItem: DispatchWorkItem?
@@ -638,8 +656,9 @@ public final class LocalDevBridge: ObservableObject {
             code: LocalDevCode.disabled.rawValue,
             status: "LOCALDEV ĐÃ TẮT (BỎ QUA)",
             message: "Đang tắt module LocalDev/Pairing. Hộp cát ứng dụng (Sandbox) & Nhật ký USB Diagnostics vẫn hoạt động bình thường.",
-            host: "127.0.0.1",
+            host: nil,
             port: 62078,
+            interface_name: nil,
             udid: nil,
             is_heartbeat_alive: false
         )
@@ -650,8 +669,9 @@ public final class LocalDevBridge: ObservableObject {
             code: LocalDevCode.missingPairing.rawValue,
             status: "CHƯA CÓ PAIRING FILE",
             message: "Chưa nạp file ghép nối .mobiledevicepairing",
-            host: "127.0.0.1",
+            host: nil,
             port: 62078,
+            interface_name: nil,
             udid: nil,
             is_heartbeat_alive: false
         )
@@ -662,8 +682,9 @@ public final class LocalDevBridge: ObservableObject {
             code: LocalDevCode.remotePairingUnsupported.rawValue,
             status: "CHƯA HỖ TRỢ REMOTE PAIRING",
             message: "Đã nhận diện tệp Remote Pairing từ idevice pair v1.2.0 (public_key / private_key / identifier / alt_irk). Tuy nhiên core libsec_core.dylib hiện chỉ hỗ trợ chuẩn Lockdown X.509 cổ điển (có HostCertificate & HostID trên cổng 62078). Hãy xuất lại file pairing ở tab Pairing (Lockdown), hoặc tắt LocalDev để dùng Sandbox & Nhật ký USB.",
-            host: "127.0.0.1",
+            host: nil,
             port: 62078,
+            interface_name: nil,
             udid: udid,
             is_heartbeat_alive: false
         )
@@ -678,9 +699,10 @@ public final class LocalDevBridge: ObservableObject {
             normalizedStatus = LocalDevStatus(
                 code: status.code,
                 status: "BỊ CHẶN DO BUNDLE ID 'com.apple.'",
-                message: "Bundle ID '\(bundleID)' bắt đầu bằng 'com.apple.' nên iOS 26/27 ẩn công tắc Mạng cục bộ và chặn kết nối EPERM tới \(status.host ?? "127.0.0.1"):\(status.port ?? 62078). Hãy dùng Bundle ID riêng (com.phucvn.threeoneosfive).",
+                message: "Bundle ID '\(bundleID)' bắt đầu bằng 'com.apple.' nên iOS 26/27 ẩn công tắc Mạng cục bộ và chặn kết nối EPERM tới \(status.host ?? "tunnel"):\(status.port ?? 62078). Hãy dùng Bundle ID riêng (com.phucvn.threeoneosfive).",
                 host: status.host,
                 port: status.port,
+                interface_name: status.interface_name,
                 udid: status.udid,
                 is_heartbeat_alive: status.is_heartbeat_alive
             )
@@ -725,10 +747,176 @@ public final class LocalDevBridge: ObservableObject {
             localdevSwiftNwPrewarmTrampoline,
             localdevSwiftNwRelayConnectTrampoline
         )
+        let candidates = detectTunnelEndpoints(port: 62078)
+        syncCandidatesToCore(candidates)
         let path = storageDirectory.path
-        let host = "127.0.0.1"
-        _ = LocalDevLib.shared.fnInit?(path, host, 62078)
+        let initialHost = candidates.first?.host ?? "10.7.0.1"
+        _ = LocalDevLib.shared.fnInit?(path, initialHost, 62078)
         isCoreInitialized = true
+    }
+
+    private static func extractIPv4HostOrder(from saPtr: UnsafeMutablePointer<sockaddr>?) -> UInt32? {
+        guard let saPtr, saPtr.pointee.sa_family == sa_family_t(AF_INET) else { return nil }
+        var sin = sockaddr_in()
+        let copyLen = saPtr.pointee.sa_len > 0
+            ? min(Int(saPtr.pointee.sa_len), MemoryLayout<sockaddr_in>.size)
+            : MemoryLayout<sockaddr_in>.size
+        Darwin.memcpy(&sin, saPtr, copyLen)
+        return UInt32(bigEndian: sin.sin_addr.s_addr)
+    }
+
+    private static func formatIPv4(_ hostOrder: UInt32) -> String {
+        let a = (hostOrder >> 24) & 0xFF
+        let b = (hostOrder >> 16) & 0xFF
+        let c = (hostOrder >> 8) & 0xFF
+        let d = hostOrder & 0xFF
+        return "\(a).\(b).\(c).\(d)"
+    }
+
+    private static func isPrivateOrTunnelIPv4(_ ip: UInt32) -> Bool {
+        if ip == 0 || (ip >> 24) == 127 || (ip >> 16) == 0xA9FE {
+            return false
+        }
+        if (ip >> 24) == 10 { return true }
+        if (ip & 0xFFF0_0000) == 0xAC10_0000 { return true }
+        if (ip & 0xFFFF_0000) == 0xC0A8_0000 { return true }
+        if (ip & 0xFFC0_0000) == 0x6440_0000 { return true }
+        return false
+    }
+
+    /// Scans active `utun` interfaces via `getifaddrs()` (`IFF_UP | IFF_RUNNING`, IPv4 + `ifa_dstaddr`)
+    /// and orders tunnel endpoints: `utun dstaddr` -> `utun` peer / `10.7.0.1` & `10.7.0.0` -> `127.0.0.1` fallback.
+    @discardableResult
+    public func detectTunnelEndpoints(port: UInt16 = 62078) -> [LocalDevTunnelEndpoint] {
+        var dstEndpoints: [LocalDevTunnelEndpoint] = []
+        var gatewayEndpoints: [LocalDevTunnelEndpoint] = []
+        var preferred107Iface: String? = nil
+        var utunSummaries: [String] = []
+
+        var ifaddrPtr: UnsafeMutablePointer<ifaddrs>?
+        if Darwin.getifaddrs(&ifaddrPtr) == 0, let firstAddr = ifaddrPtr {
+            defer { Darwin.freeifaddrs(firstAddr) }
+            var cursor: UnsafeMutablePointer<ifaddrs>? = firstAddr
+            while let ptr = cursor {
+                let ifa = ptr.pointee
+                cursor = ifa.ifa_next
+
+                let flags = Int32(ifa.ifa_flags)
+                let isUpRunning = (flags & (IFF_UP | IFF_RUNNING)) == (IFF_UP | IFF_RUNNING)
+                let isLoopback = (flags & IFF_LOOPBACK) != 0
+                guard isUpRunning, !isLoopback, let cName = ifa.ifa_name else { continue }
+                let name = String(cString: cName)
+                guard name.hasPrefix("utun") else { continue }
+                guard let localIP = Self.extractIPv4HostOrder(from: ifa.ifa_addr),
+                      Self.isPrivateOrTunnelIPv4(localIP) else { continue }
+
+                let localStr = Self.formatIPv4(localIP)
+                let is107Range = (localIP & 0xFFFF_0000) == 0x0A07_0000
+                if is107Range && preferred107Iface == nil {
+                    preferred107Iface = name
+                }
+
+                var dstStrForLog = "none"
+                if (flags & IFF_POINTOPOINT) != 0,
+                   let dstIP = Self.extractIPv4HostOrder(from: ifa.ifa_dstaddr),
+                   dstIP != 0,
+                   (dstIP >> 24) != 127,
+                   dstIP != localIP {
+                    let dstStr = Self.formatIPv4(dstIP)
+                    dstStrForLog = dstStr
+                    dstEndpoints.append(LocalDevTunnelEndpoint(
+                        host: dstStr,
+                        port: port,
+                        iface: name,
+                        source: "utun-dstaddr"
+                    ))
+                }
+
+                let maskIP = Self.extractIPv4HostOrder(from: ifa.ifa_netmask)
+                let effectiveMask: UInt32 = {
+                    if let m = maskIP, m != 0, m != 0xFFFF_FFFF, (m & 0xFFFF_0000) == 0xFFFF_0000 {
+                        return m
+                    }
+                    return 0xFFFF_FF00
+                }()
+                let netBase = localIP & effectiveMask
+                let peerIP = netBase | 1
+                if peerIP != localIP && peerIP != 0 {
+                    gatewayEndpoints.append(LocalDevTunnelEndpoint(
+                        host: Self.formatIPv4(peerIP),
+                        port: port,
+                        iface: name,
+                        source: "utun-peer"
+                    ))
+                }
+                if is107Range {
+                    gatewayEndpoints.append(LocalDevTunnelEndpoint(
+                        host: "10.7.0.1",
+                        port: port,
+                        iface: name,
+                        source: "utun-localdev"
+                    ))
+                    gatewayEndpoints.append(LocalDevTunnelEndpoint(
+                        host: "10.7.0.0",
+                        port: port,
+                        iface: name,
+                        source: "utun-subnet"
+                    ))
+                }
+                utunSummaries.append("\(name)(\(localStr)->\(dstStrForLog))")
+            }
+        }
+
+        // Prioritize LocalDevVPN 10.7.x endpoints ahead of non-10.7 system `utun` interfaces
+        dstEndpoints.sort { ($0.host.hasPrefix("10.7.") ? 0 : 1) < ($1.host.hasPrefix("10.7.") ? 0 : 1) }
+        gatewayEndpoints.sort { ($0.host.hasPrefix("10.7.") ? 0 : 1) < ($1.host.hasPrefix("10.7.") ? 0 : 1) }
+
+        var rawOrdered: [LocalDevTunnelEndpoint] = []
+        rawOrdered.append(contentsOf: dstEndpoints)
+        rawOrdered.append(contentsOf: gatewayEndpoints)
+        rawOrdered.append(LocalDevTunnelEndpoint(host: "10.7.0.1", port: port, iface: preferred107Iface, source: "standard-localdev"))
+        rawOrdered.append(LocalDevTunnelEndpoint(host: "10.7.0.0", port: port, iface: preferred107Iface, source: "standard-localdev"))
+        rawOrdered.append(LocalDevTunnelEndpoint(host: "127.0.0.1", port: port, iface: "lo0", source: "loopback-fallback"))
+
+        var deduplicated: [LocalDevTunnelEndpoint] = []
+        var seenKeys: Set<String> = []
+        for item in rawOrdered {
+            let k = "\(item.host):\(item.port)"
+            if seenKeys.insert(k).inserted {
+                deduplicated.append(item)
+            }
+        }
+
+        let summaryKey = "\(utunSummaries.joined(separator: ","))|\(deduplicated.map { "\($0.host):\($0.port)@\($0.iface ?? "-")" }.joined(separator: ","))"
+        probeLock.lock()
+        let changed = (summaryKey != lastLoggedDiscoveryKey)
+        if changed {
+            lastLoggedDiscoveryKey = summaryKey
+        }
+        probeLock.unlock()
+        if changed {
+            let utunDesc = utunSummaries.isEmpty ? "none" : utunSummaries.joined(separator: ", ")
+            let candDesc = deduplicated.map { "\($0.host):\($0.port)[\($0.iface ?? $0.source ?? "-")]" }.joined(separator: " -> ")
+            log("localdev: getifaddrs utun=[\(utunDesc)] candidates=[\(candDesc)]")
+        }
+
+        DispatchQueue.main.async {
+            self.detectedTunnelEndpoints = deduplicated
+        }
+        return deduplicated
+    }
+
+    private func syncCandidatesToCore(_ candidates: [LocalDevTunnelEndpoint]) {
+        LocalDevLib.shared.resolveSymbols()
+        guard let fnSet = LocalDevLib.shared.fnSetCandidates,
+              let data = try? JSONEncoder().encode(candidates),
+              let jsonStr = String(data: data, encoding: .utf8) else { return }
+        probeLock.lock()
+        let netState = lastLocalNetworkState
+        probeLock.unlock()
+        _ = jsonStr.withCString { ptr in
+            fnSet(ptr, netState)
+        }
     }
 
     private func logStatusIfChanged(_ status: LocalDevStatus) {
@@ -738,10 +926,10 @@ public final class LocalDevBridge: ObservableObject {
         log("localdev: code=\(status.code) [\(status.status)] — \(status.message)")
     }
 
-    /// Pre-warms iOS Local Network NECP policy using `Network.framework` (`NWPathMonitor` + `NWListener` + `NWBrowser` on declared `NSBonjourServices` + `NWConnection` toward `127.0.0.1:62078` & `10.7.0.1:62078`) and waits until `.ready`, denial, or bounded timeout before Rust opens sockets.
+    /// Pre-warms iOS Local Network NECP policy using `Network.framework` (`NWPathMonitor` + `NWListener` + `NWBrowser` on declared `NSBonjourServices` + `NWConnection` toward discovered `utun`/LocalDev targets) and waits until `.ready`, denial, or bounded timeout (~1.5s) before Rust opens sockets.
     @discardableResult
     public func prewarmLocalNetworkSynchronously(
-        targetHost: String? = nil,
+        targetHosts: [String]? = nil,
         port: UInt16 = 62078,
         force: Bool = false,
         timeoutMs: Int = 1500
@@ -753,9 +941,10 @@ public final class LocalDevBridge: ObservableObject {
             return 1
         }
         if force && (now - lastPrewarmUptime) < 0.6 {
+            let cachedState = lastLocalNetworkState
             probeLock.unlock()
             Thread.sleep(forTimeInterval: 0.15)
-            return 0
+            return cachedState
         }
         didTriggerLocalNetworkProbe = true
         lastPrewarmUptime = now
@@ -768,10 +957,22 @@ public final class LocalDevBridge: ObservableObject {
             log("localdev: bundleID '\(bundleID)' starts with 'com.apple.' — iOS 26/27 Settings may hide Local Network toggle for Apple-prefixed bundle IDs")
         }
 
+        let probeTargets: [String] = {
+            if let explicit = targetHosts, !explicit.isEmpty {
+                return explicit
+            }
+            let nonLoopback = detectTunnelEndpoints(port: port)
+                .map(\.host)
+                .filter { $0 != "127.0.0.1" }
+            return nonLoopback.isEmpty ? ["10.7.0.1", "10.7.0.0"] : Array(nonLoopback.prefix(3))
+        }()
+
         let semaphore = DispatchSemaphore(value: 0)
         let settleLock = NSLock()
         var settled = false
         var outcome: Int32 = 0 // 1 = ready/satisfied, -1 = EPERM denied, 0 = inconclusive
+        var sawBrowserReady = false
+        var sawExplicitDenial = false
 
         let settle: (Int32, Bool, UInt16, String?) -> Void = { code, becameReady, readyPort, readyHost in
             settleLock.lock()
@@ -802,6 +1003,12 @@ public final class LocalDevBridge: ObservableObject {
             monitor.pathUpdateHandler = { path in
                 if #available(iOS 14.2, *), path.status == .unsatisfied, path.unsatisfiedReason == .localNetworkDenied {
                     log("localdev: NWPathMonitor reported localNetworkDenied")
+                    settleLock.lock()
+                    sawExplicitDenial = true
+                    settleLock.unlock()
+                    self.probeLock.lock()
+                    self.lastLocalNetworkState = -1
+                    self.probeLock.unlock()
                     settle(-1, false, port, nil)
                 }
             }
@@ -825,7 +1032,7 @@ public final class LocalDevBridge: ObservableObject {
                 self.activeProbeListener = listener
             }
 
-            // 3. Browse all declared NSBonjourServices to trigger/register iOS Local Network NECP policy
+            // 3. Browse all declared NSBonjourServices to confirm Local Network permission & trigger NECP
             let bonjourTypes = [
                 "_apple-mobdev2._tcp",
                 "_remotepairing._tcp",
@@ -840,12 +1047,27 @@ public final class LocalDevBridge: ObservableObject {
                 browser.stateUpdateHandler = { state in
                     switch state {
                     case .ready:
+                        settleLock.lock()
+                        sawBrowserReady = true
+                        let denied = sawExplicitDenial
+                        settleLock.unlock()
+                        if !denied {
+                            self.probeLock.lock()
+                            self.lastLocalNetworkState = 1
+                            self.probeLock.unlock()
+                        }
                         if serviceType == "_apple-mobdev2._tcp" || serviceType == "_remotepairing._tcp" {
                             log("localdev: NWBrowser(\(serviceType)) ready")
                         }
                     case .waiting(let err):
                         if case .posix(let code) = err, code == .EPERM {
                             log("localdev: NWBrowser(\(serviceType)) waiting EPERM")
+                            settleLock.lock()
+                            sawExplicitDenial = true
+                            settleLock.unlock()
+                            self.probeLock.lock()
+                            self.lastLocalNetworkState = -1
+                            self.probeLock.unlock()
                             settle(-1, false, port, nil)
                         }
                     case .failed(let err):
@@ -860,20 +1082,10 @@ public final class LocalDevBridge: ObservableObject {
             }
             self.activeProbeBrowsers = browsers
 
-            // 4. NWConnection pre-warm probes toward `127.0.0.1:62078` (primary) and alternate tunnel IP
-            var probeHosts: [String] = []
-            if let explicit = targetHost, !explicit.isEmpty {
-                probeHosts.append(explicit)
-            }
-            for fallback in ["127.0.0.1", "10.7.0.1"] {
-                if !probeHosts.contains(fallback) {
-                    probeHosts.append(fallback)
-                }
-            }
-
+            // 4. NWConnection pre-warm probes toward prioritized dynamic `utun` / LocalDev hosts
             if let nwPort = NWEndpoint.Port(rawValue: port) {
                 var conns: [NWConnection] = []
-                for probeHost in probeHosts {
+                for probeHost in probeTargets {
                     let tcpOptions = NWProtocolTCP.Options()
                     tcpOptions.noDelay = true
                     let connParams = NWParameters(tls: nil, tcp: tcpOptions)
@@ -883,15 +1095,24 @@ public final class LocalDevBridge: ObservableObject {
                         switch state {
                         case .ready:
                             log("localdev: NWConnection(\(probeHost):\(port)) ready")
+                            self.probeLock.lock()
+                            self.lastLocalNetworkState = 1
+                            self.probeLock.unlock()
                             conn.cancel()
                             settle(1, true, port, probeHost)
                         case .waiting(let nwErr):
                             if let code = NWConnectionRelaySession.extractPosixErrno(from: nwErr, path: conn.currentPath) {
-                                if code == EPERM || code == EACCES {
-                                    log("localdev: NWConnection(\(probeHost):\(port)) waiting EPERM")
+                                if #available(iOS 14.2, *),
+                                   let path = conn.currentPath,
+                                   path.status == .unsatisfied,
+                                   path.unsatisfiedReason == .localNetworkDenied {
+                                    self.probeLock.lock()
+                                    self.lastLocalNetworkState = -1
+                                    self.probeLock.unlock()
+                                    log("localdev: NWConnection(\(probeHost):\(port)) localNetworkDenied")
                                     settle(-1, false, port, nil)
-                                } else if code == ECONNREFUSED {
-                                    log("localdev: NWConnection(\(probeHost):\(port)) waiting ECONNREFUSED")
+                                } else {
+                                    log("localdev: NWConnection(\(probeHost):\(port)) waiting errno=\(code)")
                                 }
                             }
                         case .failed(let nwErr):
@@ -907,7 +1128,10 @@ public final class LocalDevBridge: ObservableObject {
             }
 
             let workItem = DispatchWorkItem { [weak self] in
-                settle(0, false, port, nil)
+                settleLock.lock()
+                let confirmed = sawBrowserReady && !sawExplicitDenial
+                settleLock.unlock()
+                settle(confirmed ? 1 : 0, false, port, nil)
                 self?.cancelActiveNetworkProbeOnProbeQueue()
             }
             self.activeProbeCancelWorkItem = workItem
@@ -915,7 +1139,6 @@ public final class LocalDevBridge: ObservableObject {
         }
 
         _ = semaphore.wait(timeout: .now() + .milliseconds(max(timeoutMs, 300) + 150))
-        // Cancel ephemeral pre-warm probe connections immediately so target port 62078 is free for Rust / relay
         networkProbeQueue.async { [weak self] in
             self?.activeProbeConnections.forEach { $0.cancel() }
             self?.activeProbeConnections.removeAll()
@@ -975,13 +1198,15 @@ public final class LocalDevBridge: ObservableObject {
         }
         workerQueue.async { [weak self] in
             guard let self else { return }
+            let candidates = self.detectTunnelEndpoints(port: 62078)
+            let targets = candidates.map(\.host).filter { $0 != "127.0.0.1" }
             _ = self.prewarmLocalNetworkSynchronously(
-                targetHost: "127.0.0.1",
+                targetHosts: targets.isEmpty ? ["10.7.0.1", "10.7.0.0"] : targets,
                 port: 62078,
                 force: true,
-                timeoutMs: 1800
+                timeoutMs: 1500
             )
-            self.refreshStatusOnWorkerQueue(forcePrewarm: false)
+            self.refreshStatusOnWorkerQueue(forcePrewarm: false, precomputedCandidates: candidates)
         }
     }
 
@@ -1005,10 +1230,18 @@ public final class LocalDevBridge: ObservableObject {
         }
         workerQueue.async { [weak self] in
             guard let self else { return }
-            _ = self.prewarmLocalNetworkSynchronously(targetHost: "127.0.0.1", port: 62078, force: true, timeoutMs: 1500)
+            let candidates = self.detectTunnelEndpoints(port: 62078)
+            let targets = candidates.map(\.host).filter { $0 != "127.0.0.1" }
+            _ = self.prewarmLocalNetworkSynchronously(
+                targetHosts: targets.isEmpty ? ["10.7.0.1", "10.7.0.0"] : targets,
+                port: 62078,
+                force: true,
+                timeoutMs: 1500
+            )
             self.ensureCoreInitialized()
+            self.syncCandidatesToCore(candidates)
             if !self.autoDiscoverPairingFiles() {
-                self.refreshStatusOnWorkerQueue(forcePrewarm: false)
+                self.refreshStatusOnWorkerQueue(forcePrewarm: false, precomputedCandidates: candidates)
             }
         }
     }
@@ -1019,10 +1252,18 @@ public final class LocalDevBridge: ObservableObject {
             guard self.isModuleEnabled else { return }
             self.workerQueue.async {
                 guard self.isModuleEnabled else { return }
-                _ = self.prewarmLocalNetworkSynchronously(targetHost: "127.0.0.1", port: 62078, force: false, timeoutMs: 1500)
+                let candidates = self.detectTunnelEndpoints(port: 62078)
+                let targets = candidates.map(\.host).filter { $0 != "127.0.0.1" }
+                _ = self.prewarmLocalNetworkSynchronously(
+                    targetHosts: targets.isEmpty ? ["10.7.0.1", "10.7.0.0"] : targets,
+                    port: 62078,
+                    force: false,
+                    timeoutMs: 1500
+                )
                 self.ensureCoreInitialized()
+                self.syncCandidatesToCore(candidates)
                 if !self.autoDiscoverPairingFiles() {
-                    self.refreshStatusOnWorkerQueue(forcePrewarm: false)
+                    self.refreshStatusOnWorkerQueue(forcePrewarm: false, precomputedCandidates: candidates)
                 }
             }
         }
@@ -1135,7 +1376,10 @@ public final class LocalDevBridge: ObservableObject {
         }
     }
 
-    private func refreshStatusOnWorkerQueue(forcePrewarm: Bool) {
+    private func refreshStatusOnWorkerQueue(
+        forcePrewarm: Bool,
+        precomputedCandidates: [LocalDevTunnelEndpoint]? = nil
+    ) {
         statusLock.lock()
         isRefreshInFlight = true
         let wasDenied = (_threadSafeStatus.code == LocalDevCode.localNetworkDenied.rawValue)
@@ -1152,13 +1396,16 @@ public final class LocalDevBridge: ObservableObject {
             return
         }
 
+        let candidates = precomputedCandidates ?? detectTunnelEndpoints(port: 62078)
+        let nonLoopbackTargets = candidates.map(\.host).filter { $0 != "127.0.0.1" }
         _ = prewarmLocalNetworkSynchronously(
-            targetHost: "127.0.0.1",
+            targetHosts: nonLoopbackTargets.isEmpty ? ["10.7.0.1", "10.7.0.0"] : nonLoopbackTargets,
             port: 62078,
             force: forcePrewarm || wasDenied,
             timeoutMs: 1500
         )
         ensureCoreInitialized()
+        syncCandidatesToCore(candidates)
         guard let fnStatus = LocalDevLib.shared.fnStatus,
               let cStr = fnStatus() else {
             DispatchQueue.main.async { self.isCheckingStatus = false }
@@ -1206,8 +1453,9 @@ public final class LocalDevBridge: ObservableObject {
                 code: LocalDevCode.missingPairing.rawValue,
                 status: "CHƯA CÓ PAIRING FILE",
                 message: "Đã xóa tệp pairing đã lưu. Bạn vẫn có thể duyệt Sandbox & Nhật ký USB bình thường.",
-                host: "127.0.0.1",
+                host: nil,
                 port: 62078,
+                interface_name: nil,
                 udid: nil,
                 is_heartbeat_alive: false
             )
@@ -1454,8 +1702,16 @@ public final class LocalDevBridge: ObservableObject {
         // 2. Forward to Rust core on workerQueue so TLS handshake never blocks UI
         workerQueue.async { [weak self] in
             guard let self else { return }
-            _ = self.prewarmLocalNetworkSynchronously(targetHost: "127.0.0.1", port: 62078, force: false, timeoutMs: 1500)
+            let candidates = self.detectTunnelEndpoints(port: 62078)
+            let nonLoopback = candidates.map(\.host).filter { $0 != "127.0.0.1" }
+            _ = self.prewarmLocalNetworkSynchronously(
+                targetHosts: nonLoopback.isEmpty ? ["10.7.0.1", "10.7.0.0"] : nonLoopback,
+                port: 62078,
+                force: false,
+                timeoutMs: 1500
+            )
             self.ensureCoreInitialized()
+            self.syncCandidatesToCore(candidates)
             if let fnImport = LocalDevLib.shared.fnImportPairing {
                 let bytes = [UInt8](data)
                 if let cStr = fnImport(bytes, bytes.count) {
@@ -1484,8 +1740,9 @@ public final class LocalDevBridge: ObservableObject {
                 code: LocalDevCode.live.rawValue,
                 status: "ĐÃ KẾT NỐI LOCALDEV (LIVE)",
                 message: "Ghép nối thiết bị thành công! Sẵn sàng quét dữ liệu.",
-                host: "127.0.0.1",
+                host: "10.7.0.1",
                 port: 62078,
+                interface_name: nil,
                 udid: fallbackUDID,
                 is_heartbeat_alive: true
             )
@@ -1508,7 +1765,9 @@ public final class LocalDevBridge: ObservableObject {
         lastError = nil
 
         workerQueue.async {
+            let candidates = self.detectTunnelEndpoints(port: 62078)
             self.ensureCoreInitialized()
+            self.syncCandidatesToCore(candidates)
             guard let fnScan = LocalDevLib.shared.fnScanApps,
                   let cStr = fnScan() else {
                 DispatchQueue.main.async {

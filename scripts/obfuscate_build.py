@@ -39,6 +39,7 @@ SEC_CABI_SYMBOLS = [
 LOCALDEV_CABI_SYMBOLS = [
     "localdev_init",
     "localdev_register_nw_callbacks",
+    "localdev_set_candidates",
     "localdev_import_pairing",
     "localdev_status",
     "localdev_scan_apps",

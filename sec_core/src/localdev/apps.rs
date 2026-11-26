@@ -24,36 +24,44 @@ pub struct AppScanner;
 
 impl AppScanner {
     /// Scans installed user applications via `com.apple.mobile.installation_proxy`
-    pub fn scan_user_apps(
-        ip: &str,
-        port: u16,
+    pub fn scan_user_apps_with_candidates(
+        candidates: &[(String, u16)],
         pairing: &PairingFile,
-    ) -> Result<Vec<LocalDevAppInfo>, String> {
-        let mut candidate_ips = vec![ip];
-        for fallback in ["127.0.0.1", "10.7.0.1", "10.7.1.1"] {
-            if !candidate_ips.contains(&fallback) {
-                candidate_ips.push(fallback);
+    ) -> Result<(Vec<LocalDevAppInfo>, String, u16), String> {
+        let mut candidate_endpoints: Vec<(String, u16)> = Vec::new();
+        for (h, p) in candidates {
+            if !candidate_endpoints.iter().any(|(eh, ep)| eh == h && *ep == *p) {
+                candidate_endpoints.push((h.clone(), *p));
+            }
+        }
+        for fallback in ["10.7.0.1", "10.7.0.0", "127.0.0.1"] {
+            if !candidate_endpoints.iter().any(|(eh, ep)| eh == fallback && *ep == 62078) {
+                candidate_endpoints.push((fallback.to_string(), 62078));
             }
         }
 
         let mut lockdown_client = None;
-        let mut last_err = String::new();
+        let mut connected_host = String::new();
+        let mut connected_port = 62078u16;
+        let mut errors = Vec::new();
 
-        for target_ip in candidate_ips {
-            match LockdownClient::connect(target_ip, port, pairing) {
+        for (target_ip, target_port) in candidate_endpoints {
+            match LockdownClient::connect(&target_ip, target_port, pairing) {
                 Ok(client) => {
+                    connected_host = target_ip;
+                    connected_port = target_port;
                     lockdown_client = Some(client);
                     break;
                 }
-                Err(e) => last_err = e,
+                Err(e) => errors.push(format!("{}:{} -> {}", target_ip, target_port, e)),
             }
         }
 
         let mut lockdown = lockdown_client.ok_or_else(|| {
-            if last_err.is_empty() {
-                format!("Failed to connect to LocalDev on candidate IPs at port {}", port)
+            if errors.is_empty() {
+                "Failed to connect to LocalDev on any tunnel endpoint".to_string()
             } else {
-                last_err
+                errors.join(" | ")
             }
         })?;
 
@@ -110,7 +118,7 @@ impl AppScanner {
 
         // Sort apps alphabetically by display name
         discovered_apps.sort_by(|a, b| a.display_name.to_lowercase().cmp(&b.display_name.to_lowercase()));
-        Ok(discovered_apps)
+        Ok((discovered_apps, connected_host, connected_port))
     }
 }
 

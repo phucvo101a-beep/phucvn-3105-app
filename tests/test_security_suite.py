@@ -1320,15 +1320,21 @@ class SecuritySuiteTests(unittest.TestCase):
 
         ffi_rs = (REPO_ROOT / "sec_core" / "src" / "localdev" / "ffi.rs").read_text("utf-8")
         self.assertIn("localdev_register_nw_callbacks", ffi_rs)
+        self.assertIn("localdev_set_candidates", ffi_rs)
 
         ld_swift = (REPO_ROOT / "ThreeOneOSFive" / "helpers" / "LocalDevBridge.swift").read_text("utf-8")
         for needle in (
             "NWConnectionRelaySession",
             "NWPathMonitor",
             "NWBrowser",
-            "127.0.0.1",
+            "getifaddrs",
+            "IFF_POINTOPOINT",
+            "detectTunnelEndpoints",
+            "10.7.0.1",
+            "10.7.0.0",
             "willEnterForegroundNotification",
             "localdev_register_nw_callbacks",
+            "localdev_set_candidates",
         ):
             self.assertIn(needle, ld_swift)
         self.assertNotIn("sendUDPLocalBroadcastProbe", ld_swift)

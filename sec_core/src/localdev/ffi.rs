@@ -52,6 +52,28 @@ pub unsafe extern "C" fn localdev_register_nw_callbacks(
     0
 }
 
+/// Receives dynamically discovered `utun` endpoints (JSON array) and Swift Local Network state (`1` OK, `-1` denied, `0` unknown)
+#[no_mangle]
+pub unsafe extern "C" fn localdev_set_candidates(
+    candidates_json: *const c_char,
+    local_network_state: i32,
+) -> i32 {
+    let candidates = if !candidates_json.is_null() {
+        CStr::from_ptr(candidates_json)
+            .to_str()
+            .ok()
+            .and_then(|s| serde_json::from_str::<Vec<super::TunnelCandidate>>(s).ok())
+            .unwrap_or_default()
+    } else {
+        Vec::new()
+    };
+
+    with_manager(|mgr| {
+        mgr.set_candidates(candidates, local_network_state);
+    });
+    0
+}
+
 /// Imports raw bytes of a .mobiledevicepairing or .plist file
 /// Returns JSON status report string
 #[no_mangle]

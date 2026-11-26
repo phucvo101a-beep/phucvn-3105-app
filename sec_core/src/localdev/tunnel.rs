@@ -22,10 +22,10 @@ use rustls::{
     StreamOwned,
 };
 
-pub const DEFAULT_LOCALDEV_IP: &str = "127.0.0.1";
+pub const DEFAULT_LOCALDEV_IP: &str = "10.7.0.1";
 pub const DEFAULT_LOCKDOWN_PORT: u16 = 62078;
 pub const REACHABILITY_TIMEOUT_MS: u64 = 1500;
-pub const HANDSHAKE_CONNECT_TIMEOUT_MS: u64 = 2200;
+pub const HANDSHAKE_CONNECT_TIMEOUT_MS: u64 = 1500;
 pub const HANDSHAKE_IO_TIMEOUT_SECS: u64 = 5;
 pub const SERVICE_CONNECT_TIMEOUT_SECS: u64 = 4;
 pub const MAX_HANDSHAKE_ATTEMPTS: usize = 2;
@@ -90,7 +90,7 @@ fn invoke_nw_relay_connect(
             let _ = fd;
         }
     }
-    let code = if raw_errno > 0 { raw_errno } else { 1 };
+    let code = if raw_errno > 0 { raw_errno } else { 60 };
     let io_err = io::Error::from_raw_os_error(code);
     Some(Err(classify_io_error(
         io_err,
@@ -140,6 +140,7 @@ pub struct LockdownError {
     pub kind: LockdownErrorKind,
     pub stage: LockdownStage,
     pub detail: String,
+    pub errno_code: Option<i32>,
 }
 
 impl LockdownError {
@@ -148,6 +149,46 @@ impl LockdownError {
             kind,
             stage,
             detail: detail.into(),
+            errno_code: None,
+        }
+    }
+
+    pub fn with_errno(
+        kind: LockdownErrorKind,
+        stage: LockdownStage,
+        errno_code: Option<i32>,
+        detail: impl Into<String>,
+    ) -> Self {
+        Self {
+            kind,
+            stage,
+            detail: detail.into(),
+            errno_code,
+        }
+    }
+
+    pub fn errno_label(&self) -> String {
+        match self.errno_code {
+            Some(1) => "EPERM (os error 1)".to_string(),
+            Some(13) => "EACCES (os error 13)".to_string(),
+            Some(32) => "EPIPE (os error 32)".to_string(),
+            Some(50) => "ENETDOWN (os error 50)".to_string(),
+            Some(51) => "ENETUNREACH (os error 51)".to_string(),
+            Some(53) => "ECONNABORTED (os error 53)".to_string(),
+            Some(54) => "ECONNRESET (os error 54)".to_string(),
+            Some(60) | Some(110) => "ETIMEDOUT (os error 60)".to_string(),
+            Some(61) | Some(111) => "ECONNREFUSED (os error 61)".to_string(),
+            Some(64) => "EHOSTDOWN (os error 64)".to_string(),
+            Some(65) | Some(113) => "EHOSTUNREACH (os error 65)".to_string(),
+            Some(code) => format!("os error {}", code),
+            None => match self.kind {
+                LockdownErrorKind::PermissionDenied => "EPERM".to_string(),
+                LockdownErrorKind::Timeout => "ETIMEDOUT".to_string(),
+                LockdownErrorKind::TunnelUnreachable => "ECONNREFUSED/UNREACHABLE".to_string(),
+                LockdownErrorKind::SocketReset => "ECONNRESET".to_string(),
+                LockdownErrorKind::PairingRejected => "PAIRING_REJECTED".to_string(),
+                LockdownErrorKind::ProtocolError => "PROTOCOL_ERROR".to_string(),
+            },
         }
     }
 
@@ -215,7 +256,7 @@ fn classify_io_error(err: io::Error, stage: LockdownStage, prefix: &str) -> Lock
         LockdownErrorKind::ProtocolError
     };
 
-    LockdownError::new(kind, stage, format!("{}: {}", prefix, msg))
+    LockdownError::with_errno(kind, stage, raw, format!("{}: {}", prefix, msg))
 }
 
 fn read_exact_safe<R: Read>(
