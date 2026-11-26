@@ -12,6 +12,15 @@ import os
 import struct
 from typing import Tuple
 
+try:
+    from cryptography.hazmat.primitives.ciphers.aead import (
+        AESGCM as _FastAESGCM,
+        ChaCha20Poly1305 as _FastChaCha20Poly1305,
+    )
+except Exception:
+    _FastAESGCM = None
+    _FastChaCha20Poly1305 = None
+
 # ---------------------------------------------------------------------------
 # HKDF-SHA256 (RFC 5869)
 # ---------------------------------------------------------------------------
@@ -87,16 +96,23 @@ def hchacha20(key32: bytes, nonce16: bytes) -> bytes:
     return struct.pack("<8I", *(working[0:4] + working[12:16]))
 
 
+def _xor_equal_prefix(data: bytes, ks: bytes) -> bytes:
+    n = len(data)
+    return (int.from_bytes(data, "little") ^ int.from_bytes(ks[:n], "little")).to_bytes(n, "little")
+
+
 def _chacha20_xor(key32: bytes, counter: int, nonce12: bytes, data: bytes) -> bytes:
-    out = bytearray(len(data))
+    n = len(data)
+    if n == 0:
+        return b""
+    chunks = []
     blk_idx = 0
-    for off in range(0, len(data), 64):
+    for off in range(0, n, 64):
         ks = chacha20_block(key32, counter + blk_idx, nonce12)
-        chunk = data[off : off + 64]
-        for i, b in enumerate(chunk):
-            out[off + i] = b ^ ks[i]
+        blk = data[off : off + 64]
+        chunks.append(_xor_equal_prefix(blk, ks))
         blk_idx += 1
-    return bytes(out)
+    return b"".join(chunks)
 
 
 def _poly1305_mac(msg: bytes, key32: bytes) -> bytes:
@@ -119,6 +135,8 @@ def _pad16(x: bytes) -> bytes:
 
 
 def chacha20_poly1305_encrypt(key32: bytes, nonce12: bytes, plaintext: bytes, aad: bytes) -> bytes:
+    if _FastChaCha20Poly1305 is not None:
+        return _FastChaCha20Poly1305(key32).encrypt(nonce12, plaintext, aad)
     otk = chacha20_block(key32, 0, nonce12)[:32]
     ct = _chacha20_xor(key32, 1, nonce12, plaintext)
     mac_data = (
@@ -135,6 +153,11 @@ def chacha20_poly1305_encrypt(key32: bytes, nonce12: bytes, plaintext: bytes, aa
 def chacha20_poly1305_decrypt(key32: bytes, nonce12: bytes, ciphertext_with_tag: bytes, aad: bytes) -> bytes:
     if len(ciphertext_with_tag) < 16:
         raise ValueError("Ciphertext too short")
+    if _FastChaCha20Poly1305 is not None:
+        try:
+            return _FastChaCha20Poly1305(key32).decrypt(nonce12, ciphertext_with_tag, aad)
+        except Exception as exc:
+            raise ValueError("Poly1305 authentication failed") from exc
     ct, tag = ciphertext_with_tag[:-16], ciphertext_with_tag[-16:]
     otk = chacha20_block(key32, 0, nonce12)[:32]
     mac_data = (
@@ -383,53 +406,93 @@ def _aes256_key_schedule(key32: bytes) -> list:
     return w
 
 
-def _aes256_encrypt_block(block16: bytes, rk: list) -> bytes:
-    st = [[block16[r + 4 * c] for c in range(4)] for r in range(4)]
-    for c in range(4):
-        for r in range(4):
-            st[r][c] ^= rk[c][r]
-    for rnd in range(1, 15):
-        for r in range(4):
-            for c in range(4):
-                st[r][c] = _SBOX[st[r][c]]
-        st[1] = st[1][1:] + st[1][:1]
-        st[2] = st[2][2:] + st[2][:2]
-        st[3] = st[3][3:] + st[3][:3]
-        if rnd < 14:
-            for c in range(4):
-                a0, a1, a2, a3 = st[0][c], st[1][c], st[2][c], st[3][c]
-                t = a0 ^ a1 ^ a2 ^ a3
-                st[0][c] = a0 ^ t ^ _xtime(a0 ^ a1)
-                st[1][c] = a1 ^ t ^ _xtime(a1 ^ a2)
-                st[2][c] = a2 ^ t ^ _xtime(a2 ^ a3)
-                st[3][c] = a3 ^ t ^ _xtime(a3 ^ a0)
-        for c in range(4):
-            for r in range(4):
-                st[r][c] ^= rk[rnd * 4 + c][r]
-    return bytes(st[r][c] for c in range(4) for r in range(4))
+def _build_aes_tables() -> tuple[list, list, list, list]:
+    te0, te1, te2, te3 = [], [], [], []
+    for a in range(256):
+        s = _SBOX[a]
+        s2 = _xtime(s)
+        t0 = (s2 << 24) | (s << 16) | (s << 8) | (s2 ^ s)
+        te0.append(t0)
+        te1.append(((t0 >> 8) | (t0 << 24)) & 0xFFFFFFFF)
+        te2.append(((t0 >> 16) | (t0 << 16)) & 0xFFFFFFFF)
+        te3.append(((t0 >> 24) | (t0 << 8)) & 0xFFFFFFFF)
+    return te0, te1, te2, te3
 
 
-def _gf128_mul(x: int, y: int) -> int:
+_TE0, _TE1, _TE2, _TE3 = _build_aes_tables()
+_R_POLY = 0xE1000000000000000000000000000000
+def _build_last4() -> list:
+    out = []
+    for i in range(16):
+        acc = 0
+        for b in range(4):
+            if (i >> b) & 1:
+                acc ^= (_R_POLY >> (3 - b))
+        out.append(acc)
+    return out
+
+
+_LAST4 = _build_last4()
+
+
+def _aes256_round_words(key32: bytes) -> list:
+    rk = _aes256_key_schedule(key32)
+    return [(w[0] << 24) | (w[1] << 16) | (w[2] << 8) | w[3] for w in rk]
+
+
+def _aes256_encrypt_block_words(block16: bytes, rkw: list) -> bytes:
+    s0, s1, s2, s3 = struct.unpack(">4I", block16)
+    s0 ^= rkw[0]
+    s1 ^= rkw[1]
+    s2 ^= rkw[2]
+    s3 ^= rkw[3]
+    te0, te1, te2, te3, sbox = _TE0, _TE1, _TE2, _TE3, _SBOX
+    for r in range(1, 14):
+        idx = r * 4
+        t0 = te0[s0 >> 24] ^ te1[(s1 >> 16) & 0xFF] ^ te2[(s2 >> 8) & 0xFF] ^ te3[s3 & 0xFF] ^ rkw[idx]
+        t1 = te0[s1 >> 24] ^ te1[(s2 >> 16) & 0xFF] ^ te2[(s3 >> 8) & 0xFF] ^ te3[s0 & 0xFF] ^ rkw[idx + 1]
+        t2 = te0[s2 >> 24] ^ te1[(s3 >> 16) & 0xFF] ^ te2[(s0 >> 8) & 0xFF] ^ te3[s1 & 0xFF] ^ rkw[idx + 2]
+        t3 = te0[s3 >> 24] ^ te1[(s0 >> 16) & 0xFF] ^ te2[(s1 >> 8) & 0xFF] ^ te3[s2 & 0xFF] ^ rkw[idx + 3]
+        s0, s1, s2, s3 = t0, t1, t2, t3
+    t0 = ((sbox[s0 >> 24] << 24) | (sbox[(s1 >> 16) & 0xFF] << 16) | (sbox[(s2 >> 8) & 0xFF] << 8) | sbox[s3 & 0xFF]) ^ rkw[56]
+    t1 = ((sbox[s1 >> 24] << 24) | (sbox[(s2 >> 16) & 0xFF] << 16) | (sbox[(s3 >> 8) & 0xFF] << 8) | sbox[s0 & 0xFF]) ^ rkw[57]
+    t2 = ((sbox[s2 >> 24] << 24) | (sbox[(s3 >> 16) & 0xFF] << 16) | (sbox[(s0 >> 8) & 0xFF] << 8) | sbox[s1 & 0xFF]) ^ rkw[58]
+    t3 = ((sbox[s3 >> 24] << 24) | (sbox[(s0 >> 16) & 0xFF] << 16) | (sbox[(s1 >> 8) & 0xFF] << 8) | sbox[s2 & 0xFF]) ^ rkw[59]
+    return struct.pack(">4I", t0, t1, t2, t3)
+
+
+def _ghash_table(H: int) -> list:
+    m = [0] * 16
+    m[8] = H
+    for i in (4, 2, 1):
+        v = m[i * 2]
+        m[i] = (v >> 1) ^ (_R_POLY if (v & 1) else 0)
+    for i in (2, 4, 8):
+        for j in range(1, i):
+            m[i + j] = m[i] ^ m[j]
+    return m
+
+
+def _ghash_mul_table(x: int, m: list) -> int:
     z = 0
-    v = y
-    for i in range(127, -1, -1):
-        if (x >> i) & 1:
-            z ^= v
-        lsb = v & 1
-        v >>= 1
-        if lsb:
-            v ^= 0xE1000000000000000000000000000000
+    last4 = _LAST4
+    for _ in range(32):
+        z = (z >> 4) ^ last4[z & 0xF] ^ m[x & 0xF]
+        x >>= 4
     return z
 
 
 def _ghash(H: int, aad: bytes, ct: bytes) -> int:
+    m = _ghash_table(H)
     y = 0
     for data in (aad, ct):
         for i in range(0, len(data), 16):
-            blk = data[i : i + 16].ljust(16, b"\x00")
-            y = _gf128_mul(y ^ int.from_bytes(blk, "big"), H)
+            blk = data[i : i + 16]
+            if len(blk) < 16:
+                blk = blk.ljust(16, b"\x00")
+            y = _ghash_mul_table(y ^ int.from_bytes(blk, "big"), m)
     len_blk = struct.pack(">QQ", len(aad) * 8, len(ct) * 8)
-    return _gf128_mul(y ^ int.from_bytes(len_blk, "big"), H)
+    return _ghash_mul_table(y ^ int.from_bytes(len_blk, "big"), m)
 
 
 def aes256_gcm_decrypt_combined(combined: bytes, key32: bytes, aad: bytes) -> bytes:
@@ -437,39 +500,42 @@ def aes256_gcm_decrypt_combined(combined: bytes, key32: bytes, aad: bytes) -> by
     if len(combined) < 28:
         raise ValueError("Truncated AES-GCM box")
     nonce, ct, tag = combined[:12], combined[12:-16], combined[-16:]
-    rk = _aes256_key_schedule(key32)
-    H = int.from_bytes(_aes256_encrypt_block(b"\x00" * 16, rk), "big")
+    if _FastAESGCM is not None:
+        try:
+            return _FastAESGCM(key32).decrypt(nonce, combined[12:], aad)
+        except Exception as exc:
+            raise ValueError("AES-GCM authentication failed") from exc
+    rkw = _aes256_round_words(key32)
+    H = int.from_bytes(_aes256_encrypt_block_words(b"\x00" * 16, rkw), "big")
     j0 = nonce + b"\x00\x00\x00\x01"
     s = _ghash(H, aad, ct)
-    expected_tag = (s ^ int.from_bytes(_aes256_encrypt_block(j0, rk), "big")).to_bytes(16, "big")
+    expected_tag = (s ^ int.from_bytes(_aes256_encrypt_block_words(j0, rkw), "big")).to_bytes(16, "big")
     if not hmac.compare_digest(expected_tag, tag):
         raise ValueError("AES-GCM authentication failed")
-    out = bytearray(len(ct))
+    chunks = []
     ctr = 2
     for off in range(0, len(ct), 16):
-        ks = _aes256_encrypt_block(nonce + struct.pack(">I", ctr), rk)
-        chunk = ct[off : off + 16]
-        for i, b in enumerate(chunk):
-            out[off + i] = b ^ ks[i]
+        ks = _aes256_encrypt_block_words(nonce + struct.pack(">I", ctr), rkw)
+        chunks.append(_xor_equal_prefix(ct[off : off + 16], ks))
         ctr += 1
-    return bytes(out)
+    return b"".join(chunks)
 
 
 def aes256_gcm_encrypt_combined(plaintext: bytes, key32: bytes, aad: bytes, nonce12: bytes | None = None) -> bytes:
     nonce = nonce12 if nonce12 is not None else os.urandom(12)
-    rk = _aes256_key_schedule(key32)
-    H = int.from_bytes(_aes256_encrypt_block(b"\x00" * 16, rk), "big")
-    out = bytearray(len(plaintext))
+    if _FastAESGCM is not None:
+        return nonce + _FastAESGCM(key32).encrypt(nonce, plaintext, aad)
+    rkw = _aes256_round_words(key32)
+    H = int.from_bytes(_aes256_encrypt_block_words(b"\x00" * 16, rkw), "big")
+    chunks = []
     ctr = 2
     for off in range(0, len(plaintext), 16):
-        ks = _aes256_encrypt_block(nonce + struct.pack(">I", ctr), rk)
-        chunk = plaintext[off : off + 16]
-        for i, b in enumerate(chunk):
-            out[off + i] = b ^ ks[i]
+        ks = _aes256_encrypt_block_words(nonce + struct.pack(">I", ctr), rkw)
+        chunks.append(_xor_equal_prefix(plaintext[off : off + 16], ks))
         ctr += 1
-    ct = bytes(out)
+    ct = b"".join(chunks)
     j0 = nonce + b"\x00\x00\x00\x01"
-    tag = (_ghash(H, aad, ct) ^ int.from_bytes(_aes256_encrypt_block(j0, rk), "big")).to_bytes(16, "big")
+    tag = (_ghash(H, aad, ct) ^ int.from_bytes(_aes256_encrypt_block_words(j0, rkw), "big")).to_bytes(16, "big")
     return nonce + ct + tag
 
 

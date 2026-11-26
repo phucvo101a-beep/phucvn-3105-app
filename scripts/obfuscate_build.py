@@ -443,8 +443,17 @@ enum GeneratedSecurityConfig {{
 
     # 7. Encrypt ALL bundled .3105 files into V4 (removing plaintext headers)
     packed_files: List[str] = []
+    v4_cache: Dict[tuple[str, str], bytes] = {}
     for p3105 in list(workspace.glob("*.3105")) + list((workspace / "ThreeOneOSFive").rglob("*.3105")):
-        bid = pack_3105.pack_file(p3105, p3105, b_master, v4_tag)
+        raw_bytes = p3105.read_bytes()
+        cache_key = (hashlib.sha256(raw_bytes).hexdigest(), p3105.name)
+        if cache_key in v4_cache:
+            v4_blob = v4_cache[cache_key]
+            p3105.write_bytes(v4_blob)
+            bid = v4_blob[4:20].hex()
+        else:
+            bid = pack_3105.pack_file(p3105, p3105, b_master, v4_tag)
+            v4_cache[cache_key] = p3105.read_bytes()
         packed_files.append(f"{p3105.relative_to(workspace)}:{bid}")
 
     return {

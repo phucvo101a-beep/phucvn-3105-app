@@ -1970,6 +1970,51 @@ struct ProxyModPreset: Identifiable {
             iconName: "figure.stand",
             subtitle: "Hỗ trợ ghim tâm Aim Body • Free Fire",
             detailDescription: "Tối ưu hóa độ nhạy và hỗ trợ ghim tâm vùng thân (Aim Body) ổn định khi giao tranh trong Free Fire."
+        ),
+        ProxyModPreset(
+            id: UUID(uuidString: "7EEDB6F5-3FE1-458C-B3A1-E39D72815AAA") ?? UUID(),
+            category: .modskin,
+            name: "MODSKIN 1",
+            fileName: "MODSKIN FFVN PHUCVN (1).3105",
+            iconName: "sparkles",
+            subtitle: "MODSKIN FFVN PHUCVN • Free Fire",
+            detailDescription: "Gói Mod Skin nhân vật & trang phục Free Fire • MODSKIN FFVN PHUCVN (Phiên bản 1)."
+        ),
+        ProxyModPreset(
+            id: UUID(uuidString: "4070AFA4-A4D2-4758-A7E6-6818FDCD0397") ?? UUID(),
+            category: .modskin,
+            name: "MODSKIN 2",
+            fileName: "MODSKIN FFVN PHUCVN (2).3105",
+            iconName: "sparkles",
+            subtitle: "MODSKIN FFVN PHUCVN • Free Fire",
+            detailDescription: "Gói Mod Skin nhân vật & trang phục Free Fire • MODSKIN FFVN PHUCVN (Phiên bản 2)."
+        ),
+        ProxyModPreset(
+            id: UUID(uuidString: "20FF58CB-D69C-4714-AAC9-23AC249D5A30") ?? UUID(),
+            category: .modskin,
+            name: "MODSKIN 3",
+            fileName: "MODSKIN FFVN PHUCVN (3).3105",
+            iconName: "sparkles",
+            subtitle: "MODSKIN FFVN PHUCVN • Free Fire",
+            detailDescription: "Gói Mod Skin nhân vật & trang phục Free Fire • MODSKIN FFVN PHUCVN (Phiên bản 3)."
+        ),
+        ProxyModPreset(
+            id: UUID(uuidString: "7E0CDA42-4019-4958-A15C-24DCE1751464") ?? UUID(),
+            category: .modskin,
+            name: "MODSKIN 4",
+            fileName: "MODSKIN FFVN PHUCVN (4).3105",
+            iconName: "sparkles",
+            subtitle: "MODSKIN FFVN PHUCVN • Free Fire",
+            detailDescription: "Gói Mod Skin nhân vật & trang phục Free Fire • MODSKIN FFVN PHUCVN (Phiên bản 4)."
+        ),
+        ProxyModPreset(
+            id: UUID(uuidString: "83E9E9A7-67AC-4D87-823D-3778D897551E") ?? UUID(),
+            category: .modskin,
+            name: "MODSKIN 5",
+            fileName: "MODSKIN FFVN PHUCVN (5).3105",
+            iconName: "sparkles",
+            subtitle: "MODSKIN FFVN PHUCVN • Free Fire",
+            detailDescription: "Gói Mod Skin nhân vật & trang phục Free Fire • MODSKIN FFVN PHUCVN (Phiên bản 5)."
         )
     ]
 
