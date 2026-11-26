@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Comprehensive 5-Scenario Zero-Trust Security Verification Suite for PHUCVN 3105.
+Comprehensive 5-Scenario Zero-Trust Security Verification Suite for Tobi Aim 3105.
 Runs natively on Python 3.12 stdlib AND optionally cross-tests live compiled
 `serverkey_core` (--rust-bin) or `php` (--php-bin) engines when present.
 """
@@ -49,13 +49,13 @@ class InProcessV3Server:
 
     BUNDLED = [
         "AIM BODY FFVN (1).3105",
-        "Aim_Neck_PhucVN_FFVN.3105",
-        "AimDrag_85_Antena_PhucVN_FFVN.3105",
-        "AimDrag_85_PhucVN_FFVN.3105",
-        "AimNeck_Antena_PhucVN_FFVN.3105",
-        "Antena_PhucVN_FFVN.3105",
-        "DinhVi_Chams_PhucVN_FFVN.3105",
-        "DinhVi_Sung_PhucVN_FFVN.3105",
+        "Aim_Neck_TobiAim_FFVN.3105",
+        "AimDrag_85_Antena_TobiAim_FFVN.3105",
+        "AimDrag_85_TobiAim_FFVN.3105",
+        "AimNeck_Antena_TobiAim_FFVN.3105",
+        "Antena_TobiAim_FFVN.3105",
+        "DinhVi_Chams_TobiAim_FFVN.3105",
+        "DinhVi_Sung_TobiAim_FFVN.3105",
     ]
 
     def __init__(self, data_dir: Path, secrets_map: Dict[str, str]):
@@ -472,7 +472,7 @@ class SecuritySuiteTests(unittest.TestCase):
         srv.ci_register(self.pkg, "2.0", "8", self.app_hash_v20, self.sec_hash_v20)
         srv.keys.append(
             {
-                "key": "PHUCVN-30D-VALID-0001",
+                "key": "TOBIAIM-30D-VALID-0001",
                 "duration": "30d",
                 "status": "active",
                 "is_used": False,
@@ -482,7 +482,7 @@ class SecuritySuiteTests(unittest.TestCase):
         )
         srv.keys.append(
             {
-                "key": "PHUCVN-BANNED-0002",
+                "key": "TOBIAIM-BANNED-0002",
                 "duration": "permanent",
                 "status": "revoked",
                 "is_used": False,
@@ -620,7 +620,7 @@ class SecuritySuiteTests(unittest.TestCase):
             st, _, dec = client_build_and_decrypt(
                 self.x_pub, self.ed_pub, self.pepper.encode(),
                 op, self.pkg, "2.1.0", "9", self.fp_main,
-                self.app_hash_v21, self.sec_hash_v21, "PHUCVN-30D-VALID-0001", srv.process_v3
+                self.app_hash_v21, self.sec_hash_v21, "TOBIAIM-30D-VALID-0001", srv.process_v3
             )
             self.assertEqual(st, 200)
             self.assertEqual(dec["code"], "SERVER_CLOSED")
@@ -638,7 +638,7 @@ class SecuritySuiteTests(unittest.TestCase):
         _, _, dec = client_build_and_decrypt(
             self.x_pub, self.ed_pub, self.pepper.encode(),
             "activate", self.pkg, "2.1.0", "9", self.fp_main,
-            self.app_hash_v21, self.sec_hash_v21, "PHUCVN-30D-VALID-0001", srv.process_v3
+            self.app_hash_v21, self.sec_hash_v21, "TOBIAIM-30D-VALID-0001", srv.process_v3
         )
         self.assertEqual(dec["code"], "SERVER_CLOSED")
         self.assertIsNone(dec["ephemeral_session_key"])
@@ -649,7 +649,7 @@ class SecuritySuiteTests(unittest.TestCase):
         _, _, dec_ok = client_build_and_decrypt(
             self.x_pub, self.ed_pub, self.pepper.encode(),
             "activate", self.pkg, "2.1.0", "9", self.fp_main,
-            self.app_hash_v21, self.sec_hash_v21, "PHUCVN-30D-VALID-0001", srv.process_v3
+            self.app_hash_v21, self.sec_hash_v21, "TOBIAIM-30D-VALID-0001", srv.process_v3
         )
         self.assertEqual(dec_ok["code"], "OK")
         self.assertTrue(dec_ok["server_open"])
@@ -664,7 +664,7 @@ class SecuritySuiteTests(unittest.TestCase):
         _, _, dec = client_build_and_decrypt(
             self.x_pub, self.ed_pub, self.pepper.encode(),
             "activate", self.pkg, "2.1.0", "9", self.fp_main,
-            self.app_hash_v21, self.sec_hash_v21, "PHUCVN-30D-VALID-0001", srv.process_v3
+            self.app_hash_v21, self.sec_hash_v21, "TOBIAIM-30D-VALID-0001", srv.process_v3
         )
         self.assertEqual(dec["code"], "OK")
         self.assertTrue(dec["license"]["valid"])
@@ -672,7 +672,7 @@ class SecuritySuiteTests(unittest.TestCase):
 
         # Decrypt REAL packed V4 presets using server-returned bundle_keys
         v4_tag = bytes.fromhex(self.obf_report["v4_tag_hex"])
-        for preset_name in ("Aim_Neck_PhucVN_FFVN.3105", "AIM BODY FFVN (1).3105"):
+        for preset_name in ("Aim_Neck_TobiAim_FFVN.3105", "AIM BODY FFVN (1).3105"):
             v4_file = (self.stage / preset_name).read_bytes()
             bid_hex = v4_file[4:20].hex()
             self.assertIn(bid_hex, dec["bundle_keys"], f"Missing bundle_key for {preset_name}")
@@ -694,7 +694,7 @@ class SecuritySuiteTests(unittest.TestCase):
         _, _, dec2 = client_build_and_decrypt(
             self.x_pub, self.ed_pub, self.pepper.encode(),
             "activate", self.pkg, "2.1.0", "9", self.fp_other,
-            self.app_hash_v21, self.sec_hash_v21, "PHUCVN-30D-VALID-0001", srv.process_v3
+            self.app_hash_v21, self.sec_hash_v21, "TOBIAIM-30D-VALID-0001", srv.process_v3
         )
         self.assertEqual(dec2["code"], "DEVICE_LIMIT")
         self.assertIsNone(dec2["ephemeral_session_key"])
@@ -713,7 +713,7 @@ class SecuritySuiteTests(unittest.TestCase):
         _, _, dec = client_build_and_decrypt(
             self.x_pub, self.ed_pub, self.pepper.encode(),
             "activate", self.pkg, "2.0", "8", self.fp_main,
-            self.app_hash_v20, self.sec_hash_v20, "PHUCVN-30D-VALID-0001", srv.process_v3
+            self.app_hash_v20, self.sec_hash_v20, "TOBIAIM-30D-VALID-0001", srv.process_v3
         )
         self.assertEqual(dec["code"], "FORCE_UPDATE")
         self.assertTrue(dec["force_update"])
@@ -725,7 +725,7 @@ class SecuritySuiteTests(unittest.TestCase):
         _, _, dec_spoof = client_build_and_decrypt(
             self.x_pub, self.ed_pub, self.pepper.encode(),
             "activate", self.pkg, "2.1.0", "9", self.fp_main,
-            self.app_hash_v20, self.sec_hash_v20, "PHUCVN-30D-VALID-0001", srv.process_v3
+            self.app_hash_v20, self.sec_hash_v20, "TOBIAIM-30D-VALID-0001", srv.process_v3
         )
         self.assertEqual(dec_spoof["code"], "TAMPER_DETECTED")
         self.assertIsNone(dec_spoof["ephemeral_session_key"])
@@ -738,7 +738,7 @@ class SecuritySuiteTests(unittest.TestCase):
 
         # 5a. "No key" / UI patch: cannot decrypt V4 .3105 without valid server-derived bundle_key
         v4_tag = bytes.fromhex(self.obf_report["v4_tag_hex"])
-        v4_file = (self.stage / "Antena_PhucVN_FFVN.3105").read_bytes()
+        v4_file = (self.stage / "Antena_TobiAim_FFVN.3105").read_bytes()
         with self.assertRaises(ValueError):
             pack_3105.unpack_v4_bytes(v4_file, os.urandom(32), expected_tag4=v4_tag)
 
@@ -783,7 +783,7 @@ class SecuritySuiteTests(unittest.TestCase):
             self.x_pub, self.ed_pub, self.pepper.encode(),
             "activate", self.pkg, "2.1.0", "9", self.fp_main,
             hashlib.sha256(b"CRACKED-NOP-PATCH").hexdigest(), self.sec_hash_v21,
-            "PHUCVN-30D-VALID-0001", srv.process_v3
+            "TOBIAIM-30D-VALID-0001", srv.process_v3
         )
         self.assertEqual(dec_patched["code"], "TAMPER_DETECTED")
         self.assertIsNone(dec_patched["ephemeral_session_key"])
@@ -792,7 +792,7 @@ class SecuritySuiteTests(unittest.TestCase):
             self.x_pub, self.ed_pub, self.pepper.encode(),
             "activate", self.pkg, "2.1.0", "9", self.fp_main,
             self.app_hash_v21, self.sec_hash_v21,
-            "PHUCVN-30D-VALID-0001", srv.process_v3, tamper_flags=0x40
+            "TOBIAIM-30D-VALID-0001", srv.process_v3, tamper_flags=0x40
         )
         self.assertEqual(dec_flags["code"], "TAMPER_DETECTED")
 
@@ -828,11 +828,11 @@ class SecuritySuiteTests(unittest.TestCase):
             st_r, _, dec_r = client_build_and_decrypt(
                 self.x_pub, self.ed_pub, self.pepper.encode(),
                 "activate", self.pkg, "2.1.0", "9", self.fp_main,
-                self.app_hash_v21, self.sec_hash_v21, "PHUCVN-30D-VALID-0001", rust_exec
+                self.app_hash_v21, self.sec_hash_v21, "TOBIAIM-30D-VALID-0001", rust_exec
             )
             self.assertEqual(st_r, 200)
             self.assertEqual(dec_r["code"], "OK")
-            self.assertIn(hashlib.sha256(b"BUNDLE|Aim_Neck_PhucVN_FFVN.3105").digest()[:16].hex(), dec_r["bundle_keys"])
+            self.assertIn(hashlib.sha256(b"BUNDLE|Aim_Neck_TobiAim_FFVN.3105").digest()[:16].hex(), dec_r["bundle_keys"])
 
     # -----------------------------------------------------------------------
     # SCENARIO 6: Device HWID Ban & Unban Enforcement
@@ -841,7 +841,7 @@ class SecuritySuiteTests(unittest.TestCase):
         srv = self._new_server()
         srv.keys.append(
             {
-                "key": "PHUCVN-30D-FRESH-9999",
+                "key": "TOBIAIM-30D-FRESH-9999",
                 "duration": "30d",
                 "status": "active",
                 "is_used": False,
@@ -854,7 +854,7 @@ class SecuritySuiteTests(unittest.TestCase):
         _, _, dec1 = client_build_and_decrypt(
             self.x_pub, self.ed_pub, self.pepper.encode(),
             "activate", self.pkg, "2.1.0", "9", self.fp_main,
-            self.app_hash_v21, self.sec_hash_v21, "PHUCVN-30D-VALID-0001", srv.process_v3
+            self.app_hash_v21, self.sec_hash_v21, "TOBIAIM-30D-VALID-0001", srv.process_v3
         )
         self.assertEqual(dec1["code"], "OK")
 
@@ -864,7 +864,7 @@ class SecuritySuiteTests(unittest.TestCase):
                 "hwid": self.fp_main.upper(),
                 "reason": "Phát hiện share key & thử hook binary",
                 "active": True,
-                "source_key": "PHUCVN-30D-VALID-0001",
+                "source_key": "TOBIAIM-30D-VALID-0001",
             }
         )
 
@@ -884,7 +884,7 @@ class SecuritySuiteTests(unittest.TestCase):
         _, _, dec_hb = client_build_and_decrypt(
             self.x_pub, self.ed_pub, self.pepper.encode(),
             "heartbeat", self.pkg, "2.1.0", "9", self.fp_main,
-            self.app_hash_v21, self.sec_hash_v21, "PHUCVN-30D-VALID-0001", srv.process_v3
+            self.app_hash_v21, self.sec_hash_v21, "TOBIAIM-30D-VALID-0001", srv.process_v3
         )
         self.assertEqual(dec_hb["code"], "DEVICE_BANNED")
         self.assertIsNone(dec_hb["ephemeral_session_key"])
@@ -893,17 +893,17 @@ class SecuritySuiteTests(unittest.TestCase):
         _, _, dec_new = client_build_and_decrypt(
             self.x_pub, self.ed_pub, self.pepper.encode(),
             "activate", self.pkg, "2.1.0", "9", self.fp_main,
-            self.app_hash_v21, self.sec_hash_v21, "PHUCVN-30D-FRESH-9999", srv.process_v3
+            self.app_hash_v21, self.sec_hash_v21, "TOBIAIM-30D-FRESH-9999", srv.process_v3
         )
         self.assertEqual(dec_new["code"], "DEVICE_BANNED")
-        fresh_rec = next(k for k in srv.keys if k["key"] == "PHUCVN-30D-FRESH-9999")
+        fresh_rec = next(k for k in srv.keys if k["key"] == "TOBIAIM-30D-FRESH-9999")
         self.assertFalse(fresh_rec["is_used"])
 
         # Unbanned device fp_other continues working normally
         _, _, dec_other = client_build_and_decrypt(
             self.x_pub, self.ed_pub, self.pepper.encode(),
             "activate", self.pkg, "2.1.0", "9", self.fp_other,
-            self.app_hash_v21, self.sec_hash_v21, "PHUCVN-30D-FRESH-9999", srv.process_v3
+            self.app_hash_v21, self.sec_hash_v21, "TOBIAIM-30D-FRESH-9999", srv.process_v3
         )
         self.assertEqual(dec_other["code"], "OK")
         self.assertIsNotNone(dec_other["ephemeral_session_key"])
@@ -913,7 +913,7 @@ class SecuritySuiteTests(unittest.TestCase):
         _, _, dec_unban = client_build_and_decrypt(
             self.x_pub, self.ed_pub, self.pepper.encode(),
             "activate", self.pkg, "2.1.0", "9", self.fp_main,
-            self.app_hash_v21, self.sec_hash_v21, "PHUCVN-30D-VALID-0001", srv.process_v3
+            self.app_hash_v21, self.sec_hash_v21, "TOBIAIM-30D-VALID-0001", srv.process_v3
         )
         self.assertEqual(dec_unban["code"], "OK")
         self.assertIsNotNone(dec_unban["ephemeral_session_key"])
@@ -937,7 +937,7 @@ class SecuritySuiteTests(unittest.TestCase):
         self.assertIn("adminDeviceFp", admin_text)
 
         # Deterministic Python verification mirroring config.php HMAC cookie + HWID binding
-        secret = hashlib.sha256(b"PHUCVN-DEV-COOKIE|unit-test-pepper").digest()
+        secret = hashlib.sha256(b"TOBIAIM-DEV-COOKIE|unit-test-pepper").digest()
 
         def ua_family(ua: str) -> str:
             u = ua.lower()
@@ -1187,7 +1187,7 @@ class SecuritySuiteTests(unittest.TestCase):
         srv = self._new_server()
         srv.keys.append(
             {
-                "key": "PHUCVN-PRESET-0001",
+                "key": "TOBIAIM-PRESET-0001",
                 "duration": "30d",
                 "status": "active",
                 "is_used": False,
@@ -1196,7 +1196,7 @@ class SecuritySuiteTests(unittest.TestCase):
             }
         )
         aim_bid = v3_crypto.derive_bundle_id("AIM BODY FFVN (1).3105").hex()
-        antena_bid = v3_crypto.derive_bundle_id("Antena_PhucVN_FFVN.3105").hex()
+        antena_bid = v3_crypto.derive_bundle_id("Antena_TobiAim_FFVN.3105").hex()
 
         # Put AIM BODY into maintenance on Server Key while keeping Antena stable
         srv.settings["preset_policies"] = {
@@ -1204,13 +1204,13 @@ class SecuritySuiteTests(unittest.TestCase):
                 "status": "maintenance",
                 "message": "Đang cập nhật AIM BODY theo bản mới.",
             },
-            "Antena_PhucVN_FFVN.3105": {"status": "stable", "message": ""},
+            "Antena_TobiAim_FFVN.3105": {"status": "stable", "message": ""},
         }
 
         st, _, dec_maint = client_build_and_decrypt(
             self.x_pub, self.ed_pub, self.pepper.encode(),
             "activate", self.pkg, "2.1.0", "9", self.fp_main,
-            self.app_hash_v21, self.sec_hash_v21, "PHUCVN-PRESET-0001", srv.process_v3,
+            self.app_hash_v21, self.sec_hash_v21, "TOBIAIM-PRESET-0001", srv.process_v3,
         )
         self.assertEqual(st, 200)
         self.assertEqual(dec_maint["preset_statuses"][aim_bid]["status"], "maintenance")
@@ -1224,7 +1224,7 @@ class SecuritySuiteTests(unittest.TestCase):
         st2, _, dec_stable = client_build_and_decrypt(
             self.x_pub, self.ed_pub, self.pepper.encode(),
             "heartbeat", self.pkg, "2.1.0", "9", self.fp_main,
-            self.app_hash_v21, self.sec_hash_v21, "PHUCVN-PRESET-0001", srv.process_v3,
+            self.app_hash_v21, self.sec_hash_v21, "TOBIAIM-PRESET-0001", srv.process_v3,
         )
         self.assertEqual(st2, 200)
         self.assertEqual(dec_stable["preset_statuses"][aim_bid]["status"], "stable")

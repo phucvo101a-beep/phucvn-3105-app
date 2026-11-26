@@ -1345,14 +1345,14 @@ private struct PatchActivityView: UIViewControllerRepresentable {
 class ProxyManager: ObservableObject {
     static let shared = ProxyManager()
 
-    private let enabledKey = "PHUCVN_PROXY_ENABLED"
-    private let hostKey = "PHUCVN_PROXY_HOST"
-    private let portKey = "PHUCVN_PROXY_PORT"
-    private let typeKey = "PHUCVN_PROXY_TYPE"
-    private let userKey = "PHUCVN_PROXY_USERNAME"
-    private let passKey = "PHUCVN_PROXY_PASSWORD"
-    private let bypassAntiCheatKey = "PHUCVN_PROXY_BYPASS_AC"
-    private let optimizePingKey = "PHUCVN_PROXY_OPTIMIZE_PING"
+    private let enabledKey = "TOBIAIM_PROXY_ENABLED"
+    private let hostKey = "TOBIAIM_PROXY_HOST"
+    private let portKey = "TOBIAIM_PROXY_PORT"
+    private let typeKey = "TOBIAIM_PROXY_TYPE"
+    private let userKey = "TOBIAIM_PROXY_USERNAME"
+    private let passKey = "TOBIAIM_PROXY_PASSWORD"
+    private let bypassAntiCheatKey = "TOBIAIM_PROXY_BYPASS_AC"
+    private let optimizePingKey = "TOBIAIM_PROXY_OPTIMIZE_PING"
 
     @Published var isEnabled: Bool {
         didSet { UserDefaults.standard.set(isEnabled, forKey: enabledKey) }
@@ -1380,14 +1380,14 @@ class ProxyManager: ObservableObject {
     }
 
     init() {
-        self.isEnabled = UserDefaults.standard.bool(forKey: "PHUCVN_PROXY_ENABLED")
-        self.host = UserDefaults.standard.string(forKey: "PHUCVN_PROXY_HOST") ?? ""
-        self.port = UserDefaults.standard.string(forKey: "PHUCVN_PROXY_PORT") ?? "8080"
-        self.proxyType = UserDefaults.standard.string(forKey: "PHUCVN_PROXY_TYPE") ?? "HTTP"
-        self.username = UserDefaults.standard.string(forKey: "PHUCVN_PROXY_USERNAME") ?? ""
-        self.password = UserDefaults.standard.string(forKey: "PHUCVN_PROXY_PASSWORD") ?? ""
-        self.bypassAntiCheat = UserDefaults.standard.object(forKey: "PHUCVN_PROXY_BYPASS_AC") as? Bool ?? true
-        self.optimizePing = UserDefaults.standard.object(forKey: "PHUCVN_PROXY_OPTIMIZE_PING") as? Bool ?? true
+        self.isEnabled = UserDefaults.standard.bool(forKey: "TOBIAIM_PROXY_ENABLED")
+        self.host = UserDefaults.standard.string(forKey: "TOBIAIM_PROXY_HOST") ?? ""
+        self.port = UserDefaults.standard.string(forKey: "TOBIAIM_PROXY_PORT") ?? "8080"
+        self.proxyType = UserDefaults.standard.string(forKey: "TOBIAIM_PROXY_TYPE") ?? "HTTP"
+        self.username = UserDefaults.standard.string(forKey: "TOBIAIM_PROXY_USERNAME") ?? ""
+        self.password = UserDefaults.standard.string(forKey: "TOBIAIM_PROXY_PASSWORD") ?? ""
+        self.bypassAntiCheat = UserDefaults.standard.object(forKey: "TOBIAIM_PROXY_BYPASS_AC") as? Bool ?? true
+        self.optimizePing = UserDefaults.standard.object(forKey: "TOBIAIM_PROXY_OPTIMIZE_PING") as? Bool ?? true
     }
 
     func testConnection(completion: @escaping (Bool, String) -> Void) {
@@ -1796,7 +1796,7 @@ struct ProxyModPreset: Identifiable {
         ProxyModPreset(
             id: UUID(uuidString: "16A78656-EE0A-41F9-B0FA-5F9F44973BBE") ?? UUID(),
             name: "ANTENA",
-            fileName: "Antena_PhucVN_FFVN.3105",
+            fileName: "Antena_TobiAim_FFVN.3105",
             iconName: "antenna.radiowaves.left.and.right",
             subtitle: "Antena định vị vị trí người chơi • Free Fire",
             detailDescription: "Hiển thị cột Antena định vị vị trí đối thủ từ khoảng cách xa trên bản đồ Free Fire."
@@ -1804,7 +1804,7 @@ struct ProxyModPreset: Identifiable {
         ProxyModPreset(
             id: UUID(uuidString: "DFC0AF84-76EF-49AF-9945-E8307FAE5C2B") ?? UUID(),
             name: "DRAG 85%",
-            fileName: "AimDrag_85_PhucVN_FFVN.3105",
+            fileName: "AimDrag_85_TobiAim_FFVN.3105",
             iconName: "scope",
             subtitle: "Hỗ trợ kéo tâm Aim Drag 85% • Free Fire",
             detailDescription: "Tối ưu hóa độ nhạy và hỗ trợ thao tác kéo tâm chuẩn xác 85% khi giao tranh trong Free Fire."
@@ -1812,7 +1812,7 @@ struct ProxyModPreset: Identifiable {
         ProxyModPreset(
             id: UUID(uuidString: "B8192D12-7013-4420-8073-794D00FB4200") ?? UUID(),
             name: "CHAMS",
-            fileName: "DinhVi_Chams_PhucVN_FFVN.3105",
+            fileName: "DinhVi_Chams_TobiAim_FFVN.3105",
             iconName: "eye.fill",
             subtitle: "Định vị Chams xuyên vật thể • Free Fire",
             detailDescription: "Làm nổi bật màu sắc mô hình nhân vật đối thủ xuyên qua các chướng ngại vật trong Free Fire."
@@ -1820,7 +1820,7 @@ struct ProxyModPreset: Identifiable {
         ProxyModPreset(
             id: UUID(uuidString: "855F300E-A213-45B6-8A14-D1EFA8D0F7AE") ?? UUID(),
             name: "DINHVI SUNG KEO",
-            fileName: "DinhVi_Sung_PhucVN_FFVN.3105",
+            fileName: "DinhVi_Sung_TobiAim_FFVN.3105",
             iconName: "cross.circle.fill",
             subtitle: "Định vị súng và bom keo • Free Fire",
             detailDescription: "Hiển thị vị trí trang bị vũ khí, súng và bom keo trên bản đồ Free Fire."
@@ -1828,7 +1828,7 @@ struct ProxyModPreset: Identifiable {
         ProxyModPreset(
             id: UUID(uuidString: "C0CA95DF-CD18-4F4A-A3CD-56DA11324716") ?? UUID(),
             name: "AIM NECK",
-            fileName: "Aim_Neck_PhucVN_FFVN.3105",
+            fileName: "Aim_Neck_TobiAim_FFVN.3105",
             iconName: "person.crop.circle.badge.checkmark",
             subtitle: "Hỗ trợ ghim tâm Aim Neck • Free Fire",
             detailDescription: "Tối ưu hóa độ nhạy và hỗ trợ ghim tâm vào vùng cổ đối thủ khi giao tranh trong Free Fire."
@@ -1836,7 +1836,7 @@ struct ProxyModPreset: Identifiable {
         ProxyModPreset(
             id: UUID(uuidString: "5A53E415-D850-4722-ADF3-1FAE7E73F9AB") ?? UUID(),
             name: "AIM NECK ANTENA",
-            fileName: "AimNeck_Antena_PhucVN_FFVN.3105",
+            fileName: "AimNeck_Antena_TobiAim_FFVN.3105",
             iconName: "antenna.radiowaves.left.and.right",
             subtitle: "Hỗ trợ ghim tâm Aim Neck & Antena • Free Fire",
             detailDescription: "Kết hợp ghim tâm vùng cổ (Aim Neck) và cột Antena định vị vị trí đối thủ tầm xa trong Free Fire."
@@ -1844,7 +1844,7 @@ struct ProxyModPreset: Identifiable {
         ProxyModPreset(
             id: UUID(uuidString: "233DAE36-3734-4E2B-8C66-C491B540B4B5") ?? UUID(),
             name: "AIM DRAG ANTENA",
-            fileName: "AimDrag_85_Antena_PhucVN_FFVN.3105",
+            fileName: "AimDrag_85_Antena_TobiAim_FFVN.3105",
             iconName: "scope",
             subtitle: "Hỗ trợ kéo tâm Aim Drag 85% & Antena • Free Fire",
             detailDescription: "Kết hợp trợ lực kéo tâm 85% (Aim Drag) và cột Antena định vị đối thủ tầm xa trong Free Fire."

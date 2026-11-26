@@ -1,4 +1,4 @@
-# Nginx Hardening Snippet for PHUCVN 3105 Server Key
+# Nginx Hardening Snippet for Tobi Aim 3105 Server Key
 # Include inside `server { ... }` block.
 
 location = /api/v3 {

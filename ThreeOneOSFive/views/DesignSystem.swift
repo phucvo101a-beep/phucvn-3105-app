@@ -1,9 +1,9 @@
 import SwiftUI
 
-/// Shared visual language for the 3105 × PHUCVN interface.
+/// Shared visual language for the 3105 × Tobi Aim interface.
 /// Presentation-only components live here; file, patch and device services are untouched.
 enum AppBrand {
-    static let name = "3105 × PHUCVN"
+    static let name = "3105 × Tobi Aim"
     static let artworkAsset = "BrandArtwork"
 }
 

@@ -661,7 +661,7 @@ struct KeyGatekeeperView: View {
                         HStack(spacing: 10) {
                             Image(systemName: "key.fill")
                                 .foregroundStyle(AppTheme.accent)
-                            TextField("PHUCVN-XXXX-XXXX-XXXX", text: $inputKey)
+                            TextField("TOBIAIM-XXXX-XXXX-XXXX", text: $inputKey)
                                 .textInputAutocapitalization(.characters)
                                 .autocorrectionDisabled(true)
                                 .font(.system(size: 14, weight: .bold, design: .monospaced))

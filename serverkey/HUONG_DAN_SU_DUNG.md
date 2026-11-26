@@ -1,14 +1,14 @@
-# HỆ THỐNG MÁY CHỦ BẢN QUYỀN KEY & XÁC THỰC - PHUCVN STUDIO
-Dành riêng cho ứng dụng iOS **3105 x PHUCVN**
+# HỆ THỐNG MÁY CHỦ BẢN QUYỀN KEY & XÁC THỰC - Tobi Aim STUDIO
+Dành riêng cho ứng dụng iOS **3105 x Tobi Aim**
 
 ---
 
 ## 1. TỔNG QUAN & GIẢI THÍCH 2 VẤN ĐỀ QUAN TRỌNG
 
 ### ❓ Vấn đề 1: Vì sao 1 Key trước đây lại xài được trên nhiều thiết bị?
-- **Nguyên nhân**: Trên app iOS có cơ chế *Offline Fallback*. Khi app không kết nối được tới Server (hoặc link server bị trả về lỗi `404 Not Found` do chưa up đúng file), app tự động kiểm tra cú pháp Key cục bộ theo Regex. Nếu đúng cú pháp `PHUCVN-...`, app sẽ tự động mở khóa offline cho người dùng.
+- **Nguyên nhân**: Trên app iOS có cơ chế *Offline Fallback*. Khi app không kết nối được tới Server (hoặc link server bị trả về lỗi `404 Not Found` do chưa up đúng file), app tự động kiểm tra cú pháp Key cục bộ theo Regex. Nếu đúng cú pháp `TOBIAIM-...`, app sẽ tự động mở khóa offline cho người dùng.
 - Do đó, khi link server bị 404, bất kỳ máy iPhone nào nhập Key đó đều được app tự động duyệt qua offline -> dẫn đến tình trạng 1 key xài được trên vô số máy!
-- **Khắc phục**: Chúng tôi đã cập nhật app: chỉ có các mã Master Test Key (`PHUCVN-*-TEST-*`) mới được phép offline. Mọi Key bản quyền thương mại khác bắt buộc phải kết nối thành công và xác thực qua Server mới được duyệt.
+- **Khắc phục**: Chúng tôi đã cập nhật app: chỉ có các mã Master Test Key (`TOBIAIM-*-TEST-*`) mới được phép offline. Mọi Key bản quyền thương mại khác bắt buộc phải kết nối thành công và xác thực qua Server mới được duyệt.
 
 ### ❓ Vấn đề 2: Vì sao Key nhập trên app rồi mà trên Server Hosting vẫn báo "Chưa dùng"?
 - **Nguyên nhân chính**: App gửi request đến Server nhưng bị lỗi `404 Not Found` (Ví dụ app đang gọi đến `https://phuciosvn.com/serverkey/api.php` nhưng trên hosting file này chưa có ở đường dẫn đó hoặc tên miền chưa trỏ đúng thư mục).
@@ -41,11 +41,11 @@ Hệ thống hiện đã hỗ trợ đầy đủ quản lý đa thiết bị:
 ## 3. DANH SÁCH MÃ KEY TEST CÓ SẴN
 | Mã Key | Loại Thời Hạn | Thiết Bị Tối Đa | Cấp Độ | Trạng Thái |
 | :--- | :--- | :--- | :--- | :--- |
-| `PHUCVN-LIFE-TEST-0001` | Vĩnh Viễn | 1 Máy | VIP | Sẵn sàng sử dụng |
-| `PHUCVN-30D-TEST-0001` | 30 Ngày | 1 Máy | VIP | Sẵn sàng sử dụng |
-| `PHUCVN-7D-TEST-0001` | 7 Ngày | 1 Máy | VIP | Sẵn sàng sử dụng |
-| `PHUCVN-1D-TEST-0001` | 1 Ngày | 1 Máy | VIP | Sẵn sàng sử dụng |
-| `PHUCVN-1H-TEST-0001` | 1 Giờ | 1 Máy | VIP | Sẵn sàng sử dụng |
+| `TOBIAIM-LIFE-TEST-0001` | Vĩnh Viễn | 1 Máy | VIP | Sẵn sàng sử dụng |
+| `TOBIAIM-30D-TEST-0001` | 30 Ngày | 1 Máy | VIP | Sẵn sàng sử dụng |
+| `TOBIAIM-7D-TEST-0001` | 7 Ngày | 1 Máy | VIP | Sẵn sàng sử dụng |
+| `TOBIAIM-1D-TEST-0001` | 1 Ngày | 1 Máy | VIP | Sẵn sàng sử dụng |
+| `TOBIAIM-1H-TEST-0001` | 1 Giờ | 1 Máy | VIP | Sẵn sàng sử dụng |
 
 ---
 
@@ -66,7 +66,7 @@ Hệ thống hiện đã hỗ trợ đầy đủ quản lý đa thiết bị:
 
 ### Bước 3: Đăng nhập Quản Trị Admin
 - Link: `https://domain-cua-ban.com/admin.php` (hoặc `https://domain-cua-ban.com/serverkey/admin.php`)
-- Tài khoản quản trị mặc định: `phucvn`
+- Tài khoản quản trị mặc định: `tobiaim_admin`
 - Mật khẩu quản trị mặc định: `1231234aZ@1`
 
 ### Bước 4: Kiểm tra và Nhập Link Server trên App iOS

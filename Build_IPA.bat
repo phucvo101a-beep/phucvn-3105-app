@@ -1,6 +1,6 @@
 @echo off
-title 3105 x PHUCVN - Build IPA Tool
-cd /d "C:\Users\phuc vo\Downloads\nminhios-ipa-main"
+title 3105 x Tobi Aim - Build IPA Tool
+cd /d "%~dp0"
 
 python build_ipa.py
 if %errorlevel% neq 0 (

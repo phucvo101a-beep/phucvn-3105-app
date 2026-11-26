@@ -48,13 +48,13 @@ pub fn hmac_sha256(key: &[u8], parts: &[&[u8]]) -> [u8; 32] {
 /// Official 3105 bundled preset filenames mapped deterministically to V4 bundle IDs.
 pub const BUNDLED_PRESET_FILENAMES: &[&str] = &[
     "AIM BODY FFVN (1).3105",
-    "Aim_Neck_PhucVN_FFVN.3105",
-    "AimDrag_85_Antena_PhucVN_FFVN.3105",
-    "AimDrag_85_PhucVN_FFVN.3105",
-    "AimNeck_Antena_PhucVN_FFVN.3105",
-    "Antena_PhucVN_FFVN.3105",
-    "DinhVi_Chams_PhucVN_FFVN.3105",
-    "DinhVi_Sung_PhucVN_FFVN.3105",
+    "Aim_Neck_TobiAim_FFVN.3105",
+    "AimDrag_85_Antena_TobiAim_FFVN.3105",
+    "AimDrag_85_TobiAim_FFVN.3105",
+    "AimNeck_Antena_TobiAim_FFVN.3105",
+    "Antena_TobiAim_FFVN.3105",
+    "DinhVi_Chams_TobiAim_FFVN.3105",
+    "DinhVi_Sung_TobiAim_FFVN.3105",
 ];
 
 /// Cryptographic keys held in memory by the server engine.
@@ -315,13 +315,13 @@ pub struct PresetStatusPayload {
 fn preset_label(fname: &str) -> &'static str {
     match fname {
         "AIM BODY FFVN (1).3105" => "AIM BODY",
-        "Aim_Neck_PhucVN_FFVN.3105" => "AIM NECK",
-        "AimDrag_85_Antena_PhucVN_FFVN.3105" => "AIM DRAG ANTENA",
-        "AimDrag_85_PhucVN_FFVN.3105" => "DRAG 85%",
-        "AimNeck_Antena_PhucVN_FFVN.3105" => "AIM NECK ANTENA",
-        "Antena_PhucVN_FFVN.3105" => "ANTENA",
-        "DinhVi_Chams_PhucVN_FFVN.3105" => "CHAMS",
-        "DinhVi_Sung_PhucVN_FFVN.3105" => "DINHVI SUNG KEO",
+        "Aim_Neck_TobiAim_FFVN.3105" => "AIM NECK",
+        "AimDrag_85_Antena_TobiAim_FFVN.3105" => "AIM DRAG ANTENA",
+        "AimDrag_85_TobiAim_FFVN.3105" => "DRAG 85%",
+        "AimNeck_Antena_TobiAim_FFVN.3105" => "AIM NECK ANTENA",
+        "Antena_TobiAim_FFVN.3105" => "ANTENA",
+        "DinhVi_Chams_TobiAim_FFVN.3105" => "CHAMS",
+        "DinhVi_Sung_TobiAim_FFVN.3105" => "DINHVI SUNG KEO",
         _ => "MOD PRESET",
     }
 }

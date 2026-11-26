@@ -2,7 +2,7 @@
 name = "serverkey_core"
 version = "3.0.0"
 edition = "2021"
-description = "Compiled zero-trust cryptographic core for PhucVN 3105 Key Server"
+description = "Compiled zero-trust cryptographic core for Tobi Aim 3105 Key Server"
 
 [dependencies]
 x25519-dalek = { version = "2.0", features = ["static_secrets"] }

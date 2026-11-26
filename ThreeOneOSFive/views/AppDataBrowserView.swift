@@ -221,7 +221,7 @@ struct AppDataBrowserView: View {
 
             VStack(alignment: .leading, spacing: 14) {
                 HStack {
-                    StudioEyebrow(text: "PHUCVN  /  DATA STUDIO")
+                    StudioEyebrow(text: "TOBI AIM  /  DATA STUDIO")
                     Spacer(minLength: 8)
                     HStack(spacing: 6) {
                         Circle()

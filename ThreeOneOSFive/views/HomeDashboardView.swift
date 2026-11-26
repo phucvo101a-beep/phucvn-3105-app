@@ -395,7 +395,7 @@ struct HomeDashboardView: View {
             Capsule()
                 .fill(AppTheme.accentSoft.opacity(0.45))
                 .frame(width: 20, height: 2)
-            Text("3105 × PHUCVN")
+            Text("3105 × Tobi Aim")
                 .font(.system(size: 9, weight: .bold, design: .rounded))
                 .tracking(1.6)
                 .foregroundStyle(AppTheme.subduedText.opacity(0.7))

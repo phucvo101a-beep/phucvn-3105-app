@@ -163,7 +163,7 @@ fn keychain_write_string(_service: &str, _account: &str, _val: &str) -> bool {
 /// Computes persistent hardware-bound SHA-256 device fingerprint (64 hex chars).
 pub fn get_device_fingerprint() -> String {
     let hw = get_hardware_machine();
-    let svc = obfstr!("com.phucvn.3105.devfp").to_string();
+    let svc = obfstr!("com.tobiaim.3105.devfp").to_string();
     let acc = obfstr!("device_secret_id").to_string();
 
     let persistent_id = match keychain_read_string(&svc, &acc) {
@@ -177,7 +177,7 @@ pub fn get_device_fingerprint() -> String {
         }
     };
 
-    let hwid_tag = obfstr!("PHUCVN3105-HWID-V3|").to_string();
+    let hwid_tag = obfstr!("TOBIAIM3105-HWID-V3|").to_string();
     let mut hasher = Sha256::new();
     hasher.update(hwid_tag.as_bytes());
     hasher.update(hw.as_bytes());

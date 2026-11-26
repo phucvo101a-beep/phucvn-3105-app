@@ -43,7 +43,7 @@ struct SettingsView: View {
                         SettingsValueRow(
                             symbol: "person.crop.circle.fill",
                             title: "Tác giả / Phát triển",
-                            value: "PHUCVN"
+                            value: "Tobi Aim"
                         )
                     }
 
@@ -318,7 +318,7 @@ struct SettingsView: View {
                         .font(.system(size: 8, weight: .bold, design: .rounded))
                         .tracking(1.2)
                         .foregroundStyle(AppTheme.subduedText)
-                    Text("3105 × PHUCVN")
+                    Text("3105 × Tobi Aim")
                         .font(.system(size: 12, weight: .bold, design: .rounded))
                         .foregroundStyle(.white)
                 }
@@ -346,7 +346,7 @@ struct SettingsView: View {
 
     private var footer: some View {
         VStack(spacing: 6) {
-            Text("3105 × PHUCVN")
+            Text("3105 × Tobi Aim")
                 .font(.system(size: 10, weight: .heavy, design: .rounded))
                 .tracking(1.75)
                 .foregroundStyle(AppTheme.accentSoft.opacity(0.8))
