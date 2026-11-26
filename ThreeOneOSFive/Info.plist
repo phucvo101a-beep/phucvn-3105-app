@@ -104,11 +104,12 @@
         </dict>
     </array>
     <key>NSLocalNetworkUsageDescription</key>
-    <string>3105 x PHUCVN cần quyền Mạng cục bộ để kết nối dịch vụ LocalDev/Lockdown trên thiết bị phục vụ việc đọc tệp và quản lý bản vá.</string>
+    <string>3105 x PHUCVN cần quyền Mạng cục bộ để kết nối dịch vụ LocalDev/Lockdown (10.7.0.1:62078) phục vụ đọc dữ liệu mở rộng; Sandbox và Nhật ký USB vẫn hoạt động không cần quyền này.</string>
     <key>NSBonjourServices</key>
     <array>
         <string>_apple-mobdev2._tcp</string>
         <string>_remotepairing._tcp</string>
+        <string>_lockdown._tcp</string>
     </array>
     <key>LSApplicationQueriesSchemes</key>
     <array>

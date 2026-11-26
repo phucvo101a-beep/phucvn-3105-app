@@ -9,6 +9,7 @@ public struct LocalDevStatusCard: View {
 
     private var statusColor: Color {
         switch bridge.currentStatus.code {
+        case 0: return Color.secondary
         case 1: return Color.green
         case 2: return Color.orange
         case 3: return Color.orange
@@ -21,6 +22,7 @@ public struct LocalDevStatusCard: View {
 
     private var statusIcon: String {
         switch bridge.currentStatus.code {
+        case 0: return "pause.circle.fill"
         case 1: return "checkmark.shield.fill"
         case 2: return "doc.badge.plus"
         case 3: return "network.badge.shield.half.filled"
@@ -62,23 +64,25 @@ public struct LocalDevStatusCard: View {
 
                 Spacer()
 
-                Button {
-                    bridge.refreshStatus()
-                } label: {
-                    if bridge.isCheckingStatus {
-                        ProgressView().controlSize(.mini).tint(AppTheme.accent)
-                            .frame(width: 28, height: 28)
-                    } else {
-                        Image(systemName: "arrow.clockwise")
-                            .font(.system(size: 13, weight: .bold))
-                            .foregroundStyle(AppTheme.accent)
-                            .frame(width: 28, height: 28)
-                            .background(AppTheme.accent.opacity(0.12), in: Circle())
+                if bridge.isModuleEnabled {
+                    Button {
+                        bridge.refreshStatus()
+                    } label: {
+                        if bridge.isCheckingStatus {
+                            ProgressView().controlSize(.mini).tint(AppTheme.accent)
+                                .frame(width: 28, height: 28)
+                        } else {
+                            Image(systemName: "arrow.clockwise")
+                                .font(.system(size: 13, weight: .bold))
+                                .foregroundStyle(AppTheme.accent)
+                                .frame(width: 28, height: 28)
+                                .background(AppTheme.accent.opacity(0.12), in: Circle())
+                        }
                     }
+                    .disabled(bridge.isCheckingStatus)
+                    .buttonStyle(AppPressableStyle())
+                    .accessibilityLabel("Kiểm tra lại kết nối")
                 }
-                .disabled(bridge.isCheckingStatus)
-                .buttonStyle(AppPressableStyle())
-                .accessibilityLabel("Kiểm tra lại kết nối")
             }
 
             // Description message
@@ -102,111 +106,159 @@ public struct LocalDevStatusCard: View {
                 .background(AppTheme.success.opacity(0.10), in: RoundedRectangle(cornerRadius: 8, style: .continuous))
             }
 
-            if let err = bridge.lastError, !err.isEmpty {
-                HStack(alignment: .top, spacing: 6) {
-                    Image(systemName: "exclamationmark.triangle.fill")
-                        .font(.system(size: 10, weight: .bold))
-                        .foregroundStyle(Color.orange)
-                    Text(err)
-                        .font(.system(size: 10, weight: .medium))
-                        .foregroundStyle(Color.white)
-                        .fixedSize(horizontal: false, vertical: true)
-                }
-                .padding(.horizontal, 9)
-                .padding(.vertical, 6)
-                .background(Color.orange.opacity(0.18), in: RoundedRectangle(cornerRadius: 8, style: .continuous))
-            }
-
-            if let udid = bridge.currentStatus.udid, !udid.isEmpty, bridge.currentStatus.isLive {
-                HStack(spacing: 4) {
-                    Text("UDID:")
-                        .font(.system(size: 9, weight: .bold, design: .monospaced))
-                        .foregroundStyle(AppTheme.subduedText)
-                    Text(udid)
-                        .font(.system(size: 9, weight: .semibold, design: .monospaced))
-                        .foregroundStyle(Color.white.opacity(0.75))
-                        .lineLimit(1)
-                        .truncationMode(.middle)
-                }
-            }
-
-            // Action buttons
-            VStack(spacing: 8) {
-                HStack(spacing: 8) {
-                    // Button: Jump directly into LocalDev App / VPN
-                    Button {
-                        bridge.openLocalDevVPNApp()
-                    } label: {
-                        HStack(spacing: 6) {
-                            Image(systemName: "bolt.horizontal.fill")
-                                .font(.system(size: 11, weight: .bold))
-                            Text("Mở app LocalDev")
-                                .font(.system(size: 11, weight: .bold))
-                        }
-                        .foregroundStyle(.black)
-                        .padding(.horizontal, 10)
-                        .padding(.vertical, 9)
-                        .frame(maxWidth: .infinity)
-                        .background(AppTheme.accent, in: RoundedRectangle(cornerRadius: 11, style: .continuous))
-                    }
-                    .buttonStyle(AppPressableStyle())
-
-                    // Button: Import Pairing File
-                    Button {
-                        showFilePicker = true
-                    } label: {
-                        HStack(spacing: 6) {
-                            Image(systemName: bridge.currentStatus.code == 1 ? "checkmark.circle.fill" : "doc.badge.plus")
-                                .font(.system(size: 11, weight: .bold))
-                            Text(bridge.currentStatus.code == 2 ? "Chọn Pairing" : "Đổi Pairing")
-                                .font(.system(size: 11, weight: .bold))
-                        }
-                        .foregroundStyle(.white)
-                        .padding(.horizontal, 10)
-                        .padding(.vertical, 9)
-                        .frame(maxWidth: .infinity)
-                        .background(AppTheme.elevatedBackground, in: RoundedRectangle(cornerRadius: 11, style: .continuous))
-                        .overlay {
-                            RoundedRectangle(cornerRadius: 11, style: .continuous)
-                                .strokeBorder(Color.white.opacity(0.18), lineWidth: 1)
-                        }
-                    }
-                    .buttonStyle(AppPressableStyle())
-                }
-
-                if bridge.currentStatus.code != LocalDevCode.missingPairing.rawValue {
-                    Button {
-                        bridge.clearSavedPairing()
-                    } label: {
-                        HStack(spacing: 5) {
-                            Image(systemName: "trash")
-                                .font(.system(size: 10, weight: .bold))
-                            Text("Xóa Pairing đã lưu")
-                                .font(.system(size: 10.5, weight: .semibold))
-                        }
-                        .foregroundStyle(Color.white.opacity(0.75))
-                        .frame(maxWidth: .infinity)
-                        .padding(.vertical, 6)
-                        .background(Color.white.opacity(0.06), in: RoundedRectangle(cornerRadius: 9, style: .continuous))
-                    }
-                    .disabled(bridge.isCheckingStatus)
-                    .buttonStyle(AppPressableStyle())
-                }
-
-                if bridge.currentStatus.code == 4 {
-                    Button {
-                        if let url = URL(string: UIApplication.openSettingsURLString) {
-                            UIApplication.shared.open(url, options: [:], completionHandler: nil)
-                        }
-                    } label: {
-                        Text("Cấp quyền Mạng cục bộ trong Cài Đặt")
+            if !bridge.isModuleEnabled {
+                Button {
+                    bridge.setModuleEnabled(true)
+                } label: {
+                    HStack(spacing: 6) {
+                        Image(systemName: "power")
                             .font(.system(size: 11, weight: .bold))
-                            .foregroundStyle(.white)
-                            .frame(maxWidth: .infinity)
-                            .padding(.vertical, 7)
-                            .background(Color.red.opacity(0.3), in: RoundedRectangle(cornerRadius: 9, style: .continuous))
+                        Text("Bật lại module LocalDev")
+                            .font(.system(size: 11, weight: .bold))
                     }
-                    .buttonStyle(AppPressableStyle())
+                    .foregroundStyle(.black)
+                    .frame(maxWidth: .infinity)
+                    .padding(.vertical, 9)
+                    .background(AppTheme.accent, in: RoundedRectangle(cornerRadius: 11, style: .continuous))
+                }
+                .buttonStyle(AppPressableStyle())
+            } else {
+                if let err = bridge.lastError, !err.isEmpty {
+                    HStack(alignment: .top, spacing: 6) {
+                        Image(systemName: "exclamationmark.triangle.fill")
+                            .font(.system(size: 10, weight: .bold))
+                            .foregroundStyle(Color.orange)
+                        Text(err)
+                            .font(.system(size: 10, weight: .medium))
+                            .foregroundStyle(Color.white)
+                            .fixedSize(horizontal: false, vertical: true)
+                    }
+                    .padding(.horizontal, 9)
+                    .padding(.vertical, 6)
+                    .background(Color.orange.opacity(0.18), in: RoundedRectangle(cornerRadius: 8, style: .continuous))
+                }
+
+                if let udid = bridge.currentStatus.udid, !udid.isEmpty, bridge.currentStatus.isLive {
+                    HStack(spacing: 4) {
+                        Text("UDID:")
+                            .font(.system(size: 9, weight: .bold, design: .monospaced))
+                            .foregroundStyle(AppTheme.subduedText)
+                        Text(udid)
+                            .font(.system(size: 9, weight: .semibold, design: .monospaced))
+                            .foregroundStyle(Color.white.opacity(0.75))
+                            .lineLimit(1)
+                            .truncationMode(.middle)
+                    }
+                }
+
+                // Action buttons
+                VStack(spacing: 8) {
+                    HStack(spacing: 8) {
+                        Button {
+                            bridge.openLocalDevVPNApp()
+                        } label: {
+                            HStack(spacing: 6) {
+                                Image(systemName: "bolt.horizontal.fill")
+                                    .font(.system(size: 11, weight: .bold))
+                                Text("Mở app LocalDev")
+                                    .font(.system(size: 11, weight: .bold))
+                            }
+                            .foregroundStyle(.black)
+                            .padding(.horizontal, 10)
+                            .padding(.vertical, 9)
+                            .frame(maxWidth: .infinity)
+                            .background(AppTheme.accent, in: RoundedRectangle(cornerRadius: 11, style: .continuous))
+                        }
+                        .buttonStyle(AppPressableStyle())
+
+                        Button {
+                            showFilePicker = true
+                        } label: {
+                            HStack(spacing: 6) {
+                                Image(systemName: bridge.currentStatus.code == 1 ? "checkmark.circle.fill" : "doc.badge.plus")
+                                    .font(.system(size: 11, weight: .bold))
+                                Text(bridge.currentStatus.code == 2 ? "Chọn Pairing" : "Đổi Pairing")
+                                    .font(.system(size: 11, weight: .bold))
+                            }
+                            .foregroundStyle(.white)
+                            .padding(.horizontal, 10)
+                            .padding(.vertical, 9)
+                            .frame(maxWidth: .infinity)
+                            .background(AppTheme.elevatedBackground, in: RoundedRectangle(cornerRadius: 11, style: .continuous))
+                            .overlay {
+                                RoundedRectangle(cornerRadius: 11, style: .continuous)
+                                    .strokeBorder(Color.white.opacity(0.18), lineWidth: 1)
+                            }
+                        }
+                        .buttonStyle(AppPressableStyle())
+                    }
+
+                    if bridge.currentStatus.code == LocalDevCode.localNetworkDenied.rawValue {
+                        HStack(spacing: 8) {
+                            Button {
+                                bridge.requestLocalNetworkPermission()
+                            } label: {
+                                Text("Kích hoạt quyền Mạng cục bộ")
+                                    .font(.system(size: 10.5, weight: .bold))
+                                    .foregroundStyle(.black)
+                                    .frame(maxWidth: .infinity)
+                                    .padding(.vertical, 7)
+                                    .background(AppTheme.accentSoft, in: RoundedRectangle(cornerRadius: 9, style: .continuous))
+                            }
+                            .buttonStyle(AppPressableStyle())
+
+                            Button {
+                                if let url = URL(string: UIApplication.openSettingsURLString) {
+                                    UIApplication.shared.open(url, options: [:], completionHandler: nil)
+                                }
+                            } label: {
+                                Text("Mở Cài Đặt iPhone")
+                                    .font(.system(size: 10.5, weight: .bold))
+                                    .foregroundStyle(.white)
+                                    .frame(maxWidth: .infinity)
+                                    .padding(.vertical, 7)
+                                    .background(Color.red.opacity(0.32), in: RoundedRectangle(cornerRadius: 9, style: .continuous))
+                            }
+                            .buttonStyle(AppPressableStyle())
+                        }
+                    }
+
+                    HStack(spacing: 8) {
+                        if bridge.currentStatus.code != LocalDevCode.missingPairing.rawValue {
+                            Button {
+                                bridge.clearSavedPairing()
+                            } label: {
+                                HStack(spacing: 5) {
+                                    Image(systemName: "trash")
+                                        .font(.system(size: 10, weight: .bold))
+                                    Text("Xóa Pairing")
+                                        .font(.system(size: 10.5, weight: .semibold))
+                                }
+                                .foregroundStyle(Color.white.opacity(0.75))
+                                .frame(maxWidth: .infinity)
+                                .padding(.vertical, 6)
+                                .background(Color.white.opacity(0.06), in: RoundedRectangle(cornerRadius: 9, style: .continuous))
+                            }
+                            .disabled(bridge.isCheckingStatus)
+                            .buttonStyle(AppPressableStyle())
+                        }
+
+                        Button {
+                            bridge.setModuleEnabled(false)
+                        } label: {
+                            HStack(spacing: 5) {
+                                Image(systemName: "forward.end.alt")
+                                    .font(.system(size: 10, weight: .bold))
+                                Text("Bỏ qua / Tắt LocalDev")
+                                    .font(.system(size: 10.5, weight: .semibold))
+                            }
+                            .foregroundStyle(Color.white.opacity(0.85))
+                            .frame(maxWidth: .infinity)
+                            .padding(.vertical, 6)
+                            .background(Color.white.opacity(0.08), in: RoundedRectangle(cornerRadius: 9, style: .continuous))
+                        }
+                        .buttonStyle(AppPressableStyle())
+                    }
                 }
             }
         }
@@ -245,7 +297,9 @@ public struct LocalDevStatusCard: View {
             .ignoresSafeArea()
         }
         .onAppear {
-            bridge.refreshStatus()
+            if bridge.isModuleEnabled {
+                bridge.refreshStatus()
+            }
         }
     }
 }

@@ -231,7 +231,7 @@ fn build_failure_report(
         LockdownErrorKind::PermissionDenied => LocalDevStatusReport {
             code: LocalDevStatusCode::LocalNetworkDenied as i32,
             status: "CHƯA CẤP QUYỀN MẠNG CỤC BỘ".to_string(),
-            message: "Ứng dụng chưa được cấp quyền Mạng cục bộ trong Cài đặt iPhone.".to_string(),
+            message: "iOS đang chặn kết nối tới tunnel 10.7.0.1:62078 (EPERM). Hãy bấm 'Kích hoạt quyền Mạng cục bộ' rồi chọn Cho phép (hoặc tắt/bỏ qua LocalDev để dùng thẳng Sandbox & Nhật ký USB).".to_string(),
             host,
             port,
             udid: Some(udid.to_string()),

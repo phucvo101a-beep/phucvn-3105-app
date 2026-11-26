@@ -1,4 +1,5 @@
 import Foundation
+import Network
 import SwiftUI
 import UIKit
 import Darwin
@@ -89,6 +90,7 @@ public enum LocalDevServiceType: Int32 {
 }
 
 public enum LocalDevCode: Int {
+    case disabled = 0
     case live = 1
     case missingPairing = 2
     case vpnDisconnected = 3
@@ -198,15 +200,10 @@ private struct ListDirResponse: Codable {
 public final class LocalDevBridge: ObservableObject {
     public static let shared = LocalDevBridge()
 
-    @Published public var currentStatus: LocalDevStatus = LocalDevStatus(
-        code: LocalDevCode.missingPairing.rawValue,
-        status: "CHƯA CÓ PAIRING FILE",
-        message: "Chưa nạp file ghép nối .mobiledevicepairing",
-        host: "10.7.0.1",
-        port: 62078,
-        udid: nil,
-        is_heartbeat_alive: false
-    )
+    private static let enabledDefaultsKey = "3105.localdev.enabled"
+
+    @Published public var isModuleEnabled: Bool
+    @Published public var currentStatus: LocalDevStatus
     @Published public var installedApps: [LocalDevApp] = []
     @Published public var isScanning: Bool = false
     @Published public var isCheckingStatus: Bool = false
@@ -222,23 +219,41 @@ public final class LocalDevBridge: ObservableObject {
     private var isCoreInitialized = false
     private let coreInitLock = NSLock()
     private let statusLock = NSLock()
-    private var _threadSafeStatus: LocalDevStatus = LocalDevStatus(
-        code: LocalDevCode.missingPairing.rawValue,
-        status: "CHƯA CÓ PAIRING FILE",
-        message: "Chưa nạp file ghép nối .mobiledevicepairing",
-        host: "10.7.0.1",
-        port: 62078,
-        udid: nil,
-        is_heartbeat_alive: false
-    )
+    private var _threadSafeStatus: LocalDevStatus
     private var isRefreshInFlight = false
+    private var didTriggerLocalNetworkProbe = false
     private let workerQueue = DispatchQueue(label: "com.phucvn.3105.localdev.worker", qos: .userInitiated)
+    private let networkProbeQueue = DispatchQueue(label: "com.phucvn.3105.localdev.nwprobe", qos: .utility)
     private var lastLoggedStatusKey: String = ""
 
     public var currentStatusSnapshot: LocalDevStatus {
         statusLock.lock()
         defer { statusLock.unlock() }
         return _threadSafeStatus
+    }
+
+    private static func disabledStatus() -> LocalDevStatus {
+        LocalDevStatus(
+            code: LocalDevCode.disabled.rawValue,
+            status: "LOCALDEV ĐÃ TẮT (BỎ QUA)",
+            message: "Đang tắt module LocalDev/Pairing. Hộp cát ứng dụng (Sandbox) & Nhật ký USB Diagnostics vẫn hoạt động bình thường.",
+            host: "10.7.0.1",
+            port: 62078,
+            udid: nil,
+            is_heartbeat_alive: false
+        )
+    }
+
+    private static func initialMissingPairingStatus() -> LocalDevStatus {
+        LocalDevStatus(
+            code: LocalDevCode.missingPairing.rawValue,
+            status: "CHƯA CÓ PAIRING FILE",
+            message: "Chưa nạp file ghép nối .mobiledevicepairing",
+            host: "10.7.0.1",
+            port: 62078,
+            udid: nil,
+            is_heartbeat_alive: false
+        )
     }
 
     private func publishStatus(_ status: LocalDevStatus, lastError: String? = nil) {
@@ -255,6 +270,11 @@ public final class LocalDevBridge: ObservableObject {
     }
 
     private init() {
+        let savedEnabled = UserDefaults.standard.object(forKey: Self.enabledDefaultsKey) as? Bool ?? true
+        let initial = savedEnabled ? Self.initialMissingPairingStatus() : Self.disabledStatus()
+        self.isModuleEnabled = savedEnabled
+        self.currentStatus = initial
+        self._threadSafeStatus = initial
         initCore()
     }
 
@@ -276,10 +296,92 @@ public final class LocalDevBridge: ObservableObject {
         log("localdev: code=\(status.code) [\(status.status)] — \(status.message)")
     }
 
+    /// Uses Apple `Network.framework` (`NWBrowser` + `NWConnection`) so iOS displays the
+    /// Local Network permission prompt and adds the toggle in Settings -> App -> Mạng cục bộ.
+    private func triggerLocalNetworkFrameworkProbe(force: Bool) {
+        statusLock.lock()
+        if didTriggerLocalNetworkProbe && !force {
+            statusLock.unlock()
+            return
+        }
+        didTriggerLocalNetworkProbe = true
+        statusLock.unlock()
+
+        let bonjourParams = NWParameters.tcp
+        bonjourParams.includePeerToPeer = true
+        let browser = NWBrowser(for: .bonjour(type: "_apple-mobdev2._tcp", domain: nil), using: bonjourParams)
+        browser.stateUpdateHandler = { _ in }
+        browser.browseResultsChangedHandler = { _, _ in }
+        browser.start(queue: networkProbeQueue)
+
+        var probeConn: NWConnection?
+        if let port = NWEndpoint.Port(rawValue: 62078) {
+            let connParams = NWParameters.tcp
+            connParams.includePeerToPeer = true
+            let conn = NWConnection(host: NWEndpoint.Host("10.7.0.1"), port: port, using: connParams)
+            conn.stateUpdateHandler = { state in
+                if case .waiting(let nwErr) = state {
+                    log("localdev: NWConnection probe waiting (\(String(describing: nwErr)))")
+                } else if case .failed(let nwErr) = state {
+                    log("localdev: NWConnection probe failed (\(String(describing: nwErr)))")
+                }
+            }
+            conn.start(queue: networkProbeQueue)
+            probeConn = conn
+        }
+
+        networkProbeQueue.asyncAfter(deadline: .now() + 1.1) {
+            browser.cancel()
+            probeConn?.cancel()
+        }
+    }
+
+    public func requestLocalNetworkPermission() {
+        guard isModuleEnabled else { return }
+        DispatchQueue.main.async {
+            self.isCheckingStatus = true
+        }
+        triggerLocalNetworkFrameworkProbe(force: true)
+        DispatchQueue.global(qos: .userInitiated).asyncAfter(deadline: .now() + 1.0) { [weak self] in
+            self?.refreshStatus()
+        }
+    }
+
+    public func setModuleEnabled(_ enabled: Bool) {
+        UserDefaults.standard.set(enabled, forKey: Self.enabledDefaultsKey)
+        DispatchQueue.main.async {
+            self.isModuleEnabled = enabled
+        }
+
+        if !enabled {
+            DispatchQueue.main.async {
+                self.isScanning = false
+                self.installedApps = []
+            }
+            publishStatus(Self.disabledStatus(), lastError: nil)
+            return
+        }
+
+        DispatchQueue.main.async {
+            self.isCheckingStatus = true
+        }
+        workerQueue.async { [weak self] in
+            guard let self else { return }
+            self.triggerLocalNetworkFrameworkProbe(force: true)
+            self.ensureCoreInitialized()
+            if !self.autoDiscoverPairingFiles() {
+                self.refreshStatus()
+            }
+        }
+    }
+
     public func initCore() {
         DispatchQueue.global(qos: .utility).async { [weak self] in
-            self?.workerQueue.async {
-                guard let self else { return }
+            guard let self else { return }
+            guard self.isModuleEnabled else { return }
+            self.workerQueue.async {
+                guard self.isModuleEnabled else { return }
+                self.triggerLocalNetworkFrameworkProbe(force: false)
                 self.ensureCoreInitialized()
                 if !self.autoDiscoverPairingFiles() {
                     self.refreshStatus()
@@ -290,6 +392,8 @@ public final class LocalDevBridge: ObservableObject {
 
     @discardableResult
     public func autoDiscoverPairingFiles() -> Bool {
+        guard isModuleEnabled else { return false }
+
         let savedMobilePairing = storageDirectory.appendingPathComponent("pairing.mobiledevicepairing")
         let savedPlist = storageDirectory.appendingPathComponent("pairing.plist")
         if FileManager.default.fileExists(atPath: savedMobilePairing.path)
@@ -341,6 +445,11 @@ public final class LocalDevBridge: ObservableObject {
     }
 
     public func refreshStatus() {
+        guard isModuleEnabled else {
+            publishStatus(Self.disabledStatus(), lastError: nil)
+            return
+        }
+
         statusLock.lock()
         if isRefreshInFlight {
             statusLock.unlock()
@@ -360,6 +469,12 @@ public final class LocalDevBridge: ObservableObject {
                 self.isRefreshInFlight = false
                 self.statusLock.unlock()
             }
+            guard self.isModuleEnabled else {
+                self.publishStatus(Self.disabledStatus(), lastError: nil)
+                return
+            }
+
+            self.triggerLocalNetworkFrameworkProbe(force: false)
             self.ensureCoreInitialized()
             guard let fnStatus = LocalDevLib.shared.fnStatus,
                   let cStr = fnStatus() else {
@@ -386,11 +501,15 @@ public final class LocalDevBridge: ObservableObject {
         }
         workerQueue.async { [weak self] in
             guard let self else { return }
-            self.ensureCoreInitialized()
             let dir = self.storageDirectory
             for name in ["pairing.plist", "pairing.mobiledevicepairing"] {
                 try? FileManager.default.removeItem(at: dir.appendingPathComponent(name))
             }
+            if !self.isModuleEnabled {
+                self.publishStatus(Self.disabledStatus(), lastError: nil)
+                return
+            }
+            self.ensureCoreInitialized()
             if let fnStatus = LocalDevLib.shared.fnStatus,
                let cStr = fnStatus() {
                 defer { LocalDevLib.shared.fnFreeString?(cStr) }
@@ -487,13 +606,18 @@ public final class LocalDevBridge: ObservableObject {
             return false
         }
 
-        // 2. Also forward to Rust core on workerQueue so TLS handshake never blocks UI
+        // Re-enable module automatically if user explicitly imports a pairing file
+        UserDefaults.standard.set(true, forKey: Self.enabledDefaultsKey)
         let fallbackUDID = parsedUDID ?? filename
         DispatchQueue.main.async {
+            self.isModuleEnabled = true
             self.isCheckingStatus = true
         }
+
+        // 2. Forward to Rust core on workerQueue so TLS handshake never blocks UI
         workerQueue.async { [weak self] in
             guard let self else { return }
+            self.triggerLocalNetworkFrameworkProbe(force: false)
             self.ensureCoreInitialized()
             if let fnImport = LocalDevLib.shared.fnImportPairing {
                 let bytes = [UInt8](data)
@@ -524,6 +648,15 @@ public final class LocalDevBridge: ObservableObject {
     }
 
     public func scanApplications(completion: @escaping ([LocalDevApp]) -> Void = { _ in }) {
+        guard isModuleEnabled else {
+            DispatchQueue.main.async {
+                self.isScanning = false
+                self.installedApps = []
+                completion([])
+            }
+            return
+        }
+
         isScanning = true
         lastError = nil
 
@@ -574,6 +707,9 @@ public final class LocalDevBridge: ObservableObject {
         bundleID: String?,
         path: String
     ) -> LocalDevDirListing {
+        guard isModuleEnabled else {
+            return LocalDevDirListing(success: false, mode: nil, error: "LocalDev đang tắt", items: [])
+        }
         ensureCoreInitialized()
         guard let fnList = LocalDevLib.shared.fnListDir,
               let cStr = fnList(service.rawValue, bundleID, path) else {
@@ -595,6 +731,7 @@ public final class LocalDevBridge: ObservableObject {
     }
 
     public func readFile(service: LocalDevServiceType, bundleID: String?, path: String) -> Data? {
+        guard isModuleEnabled else { return nil }
         ensureCoreInitialized()
         guard let fnRead = LocalDevLib.shared.fnReadFile else { return nil }
         var outLen = 0
@@ -606,6 +743,7 @@ public final class LocalDevBridge: ObservableObject {
     }
 
     public func writeFile(service: LocalDevServiceType, bundleID: String?, path: String, data: Data) -> Bool {
+        guard isModuleEnabled else { return false }
         ensureCoreInitialized()
         guard let fnWrite = LocalDevLib.shared.fnWriteFile else { return false }
         let bytes = [UInt8](data)

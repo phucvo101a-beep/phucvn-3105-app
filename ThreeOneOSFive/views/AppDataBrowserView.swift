@@ -528,7 +528,11 @@ struct AppDataBrowserView: View {
                     Text("Kho dữ liệu ứng dụng")
                         .font(.system(size: 13, weight: .bold, design: .rounded))
                         .foregroundStyle(.white)
-                    Text(apps.isEmpty ? "Chỉ quét khi bạn cần mở thư mục Data riêng của app khác" : "Đã phát hiện \(apps.count) vùng dữ liệu ứng dụng")
+                    Text(
+                        !localDevBridge.isModuleEnabled
+                            ? "LocalDev đang tắt — đang duyệt an toàn trong Hộp cát (Sandbox) của app"
+                            : (apps.isEmpty ? "Chỉ quét khi bạn cần mở thư mục Data riêng của app khác" : "Đã phát hiện \(apps.count) vùng dữ liệu ứng dụng")
+                    )
                         .font(.system(size: 10, weight: .medium))
                         .foregroundStyle(AppTheme.subduedText)
                 }
