@@ -89,6 +89,44 @@ enum ContainerStore {
     private static let privilegedLock = NSLock()
     private static var didLogSandboxNotice = false
     private static var registeredAppGroupRootPaths = Set<String>()
+    private static var activeWorseQueryHandles: [String: Int64] = [:]
+
+    static var shouldUseWorseQuery: Bool {
+        let v = ProcessInfo.processInfo.operatingSystemVersion
+        if v.majorVersion == 26 {
+            return v.minorVersion > 6 || (v.minorVersion == 6 && v.patchVersion >= 2)
+        }
+        if v.majorVersion == 27 {
+            return v.minorVersion <= 3
+        }
+        return false
+    }
+
+    @discardableResult
+    static func ensureWorseQueryGrant(groupID: String? = nil) -> Bool {
+        guard shouldUseWorseQuery else { return false }
+        let trimmed = groupID?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        let key = trimmed.isEmpty ? "systemgroup.com.apple.mobilegestaltcache" : trimmed
+        privilegedLock.lock()
+        if let existing = activeWorseQueryHandles[key], existing >= 0 {
+            privilegedLock.unlock()
+            return true
+        }
+        privilegedLock.unlock()
+
+        let handle: Int64 = key.withCString { cStr in
+            worse_query(cStr)
+        }
+        if handle >= 0 {
+            privilegedLock.lock()
+            activeWorseQueryHandles[key] = handle
+            privilegedLock.unlock()
+            log("[3105] access=worse_query group=\(key) handle=\(handle)")
+            return true
+        }
+        log("worse_query grant refused for \(key)")
+        return false
+    }
 
     // MARK: - Standard iOS Sandbox Roots
 
@@ -306,6 +344,23 @@ enum ContainerStore {
             return ownSandboxRootURL.path
         }
 
+        if shouldUseWorseQuery {
+            _ = ensureWorseQueryGrant()
+            var mcmLookupError: NSString?
+            if let path = MCMContainerPathForIdentifier(2, bundleID, false, &mcmLookupError),
+               isApplicationContainerPath(path) {
+                log("patch: worse_query resolved \(bundleID) -> \(path)")
+                return path
+            }
+            if let actPath = MCMActivateContainerPath(2, bundleID, false, &mcmLookupError),
+               isApplicationContainerPath(actPath) {
+                log("patch: worse_query resolved \(bundleID) -> \(actPath)")
+                return actPath
+            }
+            let detail = mcmLookupError.map(String.init) ?? "unavailable"
+            log("patch: worse_query could not grant \(bundleID), detail=\(detail)")
+        }
+
         guard hasPrivilegedContainerAccess() else {
             logSandboxModeNoticeOnce(context: "resolve")
             return nil
@@ -375,6 +430,13 @@ enum ContainerStore {
         appGroupIdentifiers: [String] = [],
         requireWritable: Bool = true
     ) -> URL? {
+        if shouldUseWorseQuery {
+            _ = ensureWorseQueryGrant()
+            for grp in appGroupIdentifiers {
+                _ = ensureWorseQueryGrant(groupID: grp)
+            }
+        }
+
         if !appGroupIdentifiers.isEmpty,
            let groupURL = resolvePermittedAppGroupURL(identifiers: appGroupIdentifiers, requireWritable: requireWritable) {
             return groupURL

@@ -1266,8 +1266,8 @@ class SecuritySuiteTests(unittest.TestCase):
     def test_10_non_jb_sandbox_safety_and_usb_diagnostics(self):
         bad_query_c = (REPO_ROOT / "ThreeOneOSFive" / "exploit" / "bad_query.c").read_text("utf-8")
         self.assertNotIn("../", bad_query_c)
-        self.assertNotIn("daemon returned no result (denied?)", bad_query_c)
-        self.assertNotIn("libsystem_containermanager.dylib", bad_query_c)
+        self.assertIn("int64_t worse_query(const char *group_identifier)", bad_query_c)
+        self.assertIn("sandbox_extension_consume", bad_query_c)
         self.assertIn("bad_query_is_within_sandbox", bad_query_c)
 
         for rel in (
@@ -2131,6 +2131,21 @@ class SecuritySuiteTests(unittest.TestCase):
         settle_branch = airlift_tx[airlift_tx.index("if directReadDisabled {"):airlift_tx.index("manifest.status = .applied")]
         self.assertIn("try verifyRemoteSettleCheck(descriptor: desc)", settle_branch)
         self.assertIn("writeRes.writtenBytes == desc.replacementData.count", settle_branch)
+
+
+
+    def test_22_worse_query_ios27_direct_container_resolution(self):
+        bad_query_h = (REPO_ROOT / "ThreeOneOSFive" / "exploit" / "bad_query.h").read_text("utf-8")
+        bad_query_c = (REPO_ROOT / "ThreeOneOSFive" / "exploit" / "bad_query.c").read_text("utf-8")
+        container_sw = (REPO_ROOT / "ThreeOneOSFive" / "helpers" / "ContainerStore.swift").read_text("utf-8")
+
+        self.assertIn("int64_t worse_query(const char *group_identifier);", bad_query_h)
+        self.assertIn("systemgroup.com.apple.mobilegestaltcache", bad_query_c)
+        self.assertIn("container_copy_sandbox_token", bad_query_c)
+        self.assertIn("sandbox_extension_consume", bad_query_c)
+        self.assertIn("static var shouldUseWorseQuery: Bool", container_sw)
+        self.assertIn("static func ensureWorseQueryGrant", container_sw)
+        self.assertIn("MCMContainerPathForIdentifier(2, bundleID, false, &mcmLookupError)", container_sw)
 
 
 def main():
