@@ -12,7 +12,10 @@ REQUIRED_BONJOUR_SERVICES = (
     "_remotepairing._tcp",
     "_lockdown._tcp",
     "_localdev._tcp",
+    "_3105airlift._tcp",
+    "_remotepairing-pairable-host._tcp",
 )
+REQUIRED_BACKGROUND_MODES = ("audio",)
 
 # Setup colorama for Windows terminal
 try:
@@ -76,20 +79,26 @@ def get_latest_run():
     return None
 
 def validate_info_plist_dict(plist_data: dict, source_label: str) -> bool:
-    """Verify NSLocalNetworkUsageDescription and required NSBonjourServices are intact."""
+    """Verify NSLocalNetworkUsageDescription, required NSBonjourServices, and UIBackgroundModes are intact."""
     desc = str(plist_data.get("NSLocalNetworkUsageDescription", "")).strip()
     bonjour = plist_data.get("NSBonjourServices", [])
     if not isinstance(bonjour, list):
         bonjour = []
+    bg_modes = plist_data.get("UIBackgroundModes", [])
+    if not isinstance(bg_modes, list):
+        bg_modes = []
     missing_services = [svc for svc in REQUIRED_BONJOUR_SERVICES if svc not in bonjour]
-    if not desc or missing_services:
-        print(f"{RED}[!] {source_label} thiếu cấu hình Mạng cục bộ:{RESET}")
+    missing_bg = [m for m in REQUIRED_BACKGROUND_MODES if m not in bg_modes]
+    if not desc or missing_services or missing_bg:
+        print(f"{RED}[!] {source_label} thiếu cấu hình Mạng cục bộ / Chạy ngầm:{RESET}")
         if not desc:
             print(f"{RED}    - Thiếu key NSLocalNetworkUsageDescription{RESET}")
         if missing_services:
             print(f"{RED}    - Thiếu NSBonjourServices: {', '.join(missing_services)}{RESET}")
+        if missing_bg:
+            print(f"{RED}    - Thiếu UIBackgroundModes: {', '.join(missing_bg)}{RESET}")
         return False
-    print(f"{GREEN}[OK] {source_label} giữ đủ NSLocalNetworkUsageDescription & {len(REQUIRED_BONJOUR_SERVICES)} NSBonjourServices{RESET}")
+    print(f"{GREEN}[OK] {source_label} giữ đủ NSLocalNetworkUsageDescription, {len(REQUIRED_BONJOUR_SERVICES)} NSBonjourServices & UIBackgroundModes(audio){RESET}")
     return True
 
 

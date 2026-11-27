@@ -1930,50 +1930,90 @@ impl RsdTunnelSession {
         let inst_classic = obfstr!("com.apple.mobile.installation_proxy").to_string();
         let inst_candidates = [inst_rsd.as_str(), inst_classic.as_str()];
 
-        let mut primary_apps: Option<Vec<LocalDevAppInfo>> = None;
+        let mut merged_apps: Vec<LocalDevAppInfo> = Vec::new();
+        let mut have_inst_apps = false;
+        let mut inst_complete = false;
         let mut inst_err: Option<String> = None;
 
         if let Ok(stream) = self.open_checked_in_service(&inst_candidates) {
-            match super::apps::AppScanner::scan_user_apps_over_stream(
+            let rep = super::apps::AppScanner::scan_user_apps_report(
                 super::tunnel::LockdownStream::RsdTunnel(stream),
-            ) {
-                Ok(list) if !list.is_empty() => {
-                    primary_apps = Some(list);
+            );
+            eprintln!(
+                "localdev: scan_apps browse count={} chunks={} complete={} err={:?}",
+                rep.apps.len(),
+                rep.chunks,
+                rep.saw_complete,
+                rep.error
+            );
+            if !rep.apps.is_empty() {
+                have_inst_apps = true;
+                super::apps::merge_app_lists(&mut merged_apps, rep.apps);
+            }
+            inst_complete = rep.saw_complete;
+            inst_err = rep.error;
+        }
+
+        // If `Browse` failed, returned 0, or aborted early before `Status == "Complete"`,
+        // recover remaining apps via `Lookup` and/or classic minimal-attributes `Browse`.
+        if !inst_complete || !have_inst_apps {
+            if let Ok(stream) = self.open_checked_in_service(&inst_candidates) {
+                let lookup_rep = super::apps::AppScanner::lookup_user_apps_report(
+                    super::tunnel::LockdownStream::RsdTunnel(stream),
+                );
+                eprintln!(
+                    "localdev: scan_apps lookup count={} chunks={} complete={} err={:?}",
+                    lookup_rep.apps.len(),
+                    lookup_rep.chunks,
+                    lookup_rep.saw_complete,
+                    lookup_rep.error
+                );
+                if !lookup_rep.apps.is_empty() {
+                    have_inst_apps = true;
+                    super::apps::merge_app_lists(&mut merged_apps, lookup_rep.apps);
                 }
-                Ok(_) => {}
-                Err(e) => {
-                    inst_err = Some(e);
+                if lookup_rep.saw_complete {
+                    inst_complete = true;
+                    inst_err = None;
+                } else if inst_err.is_none() {
+                    inst_err = lookup_rep.error;
                 }
             }
         }
 
-        if primary_apps.is_none() {
+        if !inst_complete || !have_inst_apps {
             if let Ok(stream) = self.open_checked_in_service(&inst_candidates) {
-                match super::apps::AppScanner::lookup_user_apps_over_stream(
+                let min_rep = super::apps::AppScanner::scan_user_apps_minimal_report(
                     super::tunnel::LockdownStream::RsdTunnel(stream),
-                ) {
-                    Ok(list) if !list.is_empty() => {
-                        primary_apps = Some(list);
-                        inst_err = None;
-                    }
-                    Ok(_) => {}
-                    Err(e) => {
-                        if inst_err.is_none() {
-                            inst_err = Some(e);
-                        }
-                    }
+                );
+                eprintln!(
+                    "localdev: scan_apps minimal_browse count={} chunks={} complete={} err={:?}",
+                    min_rep.apps.len(),
+                    min_rep.chunks,
+                    min_rep.saw_complete,
+                    min_rep.error
+                );
+                if !min_rep.apps.is_empty() {
+                    have_inst_apps = true;
+                    super::apps::merge_app_lists(&mut merged_apps, min_rep.apps);
+                }
+                if min_rep.saw_complete {
+                    inst_err = None;
+                } else if inst_err.is_none() {
+                    inst_err = min_rep.error;
                 }
             }
         }
 
         let app_svc_name = obfstr!("com.apple.coredevice.appservice").to_string();
         let Some(info) = self.services.get(app_svc_name.as_str()) else {
-            return primary_apps.ok_or_else(|| {
-                inst_err.unwrap_or_else(|| {
-                    "Không tìm thấy installation_proxy.shim.remote hoặc coredevice.appservice trong RSD"
-                        .to_string()
-                })
-            });
+            if have_inst_apps {
+                return Ok(merged_apps);
+            }
+            return Err(inst_err.unwrap_or_else(|| {
+                "Không tìm thấy installation_proxy.shim.remote hoặc coredevice.appservice trong RSD"
+                    .to_string()
+            }));
         };
         let port = info.port;
 
@@ -1987,7 +2027,7 @@ impl RsdTunnelSession {
                             .await
                             .map_err(|_| "AppService connect timeout".to_string())?
                             .map_err(|e| format!("AppService connect failed: {}", e))?;
-                        tokio::time::timeout(Duration::from_secs(8), fetch_apps_via_coredevice_xpc(s))
+                        tokio::time::timeout(Duration::from_secs(12), fetch_apps_via_coredevice_xpc(s))
                             .await
                             .map_err(|_| "AppService RPC timeout".to_string())?
                     })
@@ -2004,7 +2044,7 @@ impl RsdTunnelSession {
                         )
                         .await
                         .map_err(|e| e.to_string())?;
-                        tokio::time::timeout(Duration::from_secs(8), fetch_apps_via_coredevice_xpc(s))
+                        tokio::time::timeout(Duration::from_secs(12), fetch_apps_via_coredevice_xpc(s))
                             .await
                             .map_err(|_| "AppService RPC timeout".to_string())?
                     })
@@ -2013,33 +2053,22 @@ impl RsdTunnelSession {
         };
 
         let core_result = core_device_req(&self.transport);
-        match (primary_apps, core_result) {
-            (Some(mut list), Ok(extra)) => {
-                // Giữ phân loại quyền chính xác từ installation_proxy, bổ sung các app/game còn thiếu từ CoreDevice listapps.
-                let mut idx_by_bundle: HashMap<String, usize> = list
-                    .iter()
-                    .enumerate()
-                    .map(|(i, a)| (a.bundle_id.clone(), i))
-                    .collect();
-                for app in extra {
-                    if let Some(&idx) = idx_by_bundle.get(&app.bundle_id) {
-                        if list[idx].display_name == list[idx].bundle_id && app.display_name != app.bundle_id {
-                            list[idx].display_name = app.display_name;
-                        }
-                        if list[idx].bundle_path.is_none() {
-                            list[idx].bundle_path = app.bundle_path;
-                        }
-                    } else {
-                        idx_by_bundle.insert(app.bundle_id.clone(), list.len());
-                        list.push(app);
-                    }
-                }
-                list.sort_by(|a, b| a.display_name.to_lowercase().cmp(&b.display_name.to_lowercase()));
-                Ok(list)
+        match (have_inst_apps, core_result) {
+            (true, Ok(extra)) => {
+                eprintln!(
+                    "localdev: scan_apps coredevice count={} merged_before={}",
+                    extra.len(),
+                    merged_apps.len()
+                );
+                super::apps::merge_app_lists(&mut merged_apps, extra);
+                Ok(merged_apps)
             }
-            (Some(list), Err(_)) => Ok(list),
-            (None, Ok(extra)) => Ok(extra),
-            (None, Err(core_err)) => Err(inst_err.unwrap_or(core_err)),
+            (true, Err(core_err)) => {
+                eprintln!("localdev: scan_apps coredevice fallback err={}", core_err);
+                Ok(merged_apps)
+            }
+            (false, Ok(extra)) => Ok(extra),
+            (false, Err(core_err)) => Err(inst_err.unwrap_or(core_err)),
         }
     }
 

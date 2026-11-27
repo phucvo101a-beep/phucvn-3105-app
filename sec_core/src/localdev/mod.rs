@@ -7,6 +7,7 @@ pub mod apps;
 pub mod ffi;
 pub mod heartbeat;
 pub mod house_arrest;
+pub mod mobilebackup2;
 pub mod pairing;
 pub mod plist_util;
 pub mod rsd;
@@ -16,6 +17,7 @@ pub mod tunnel;
 use afc_client::AfcClient;
 use heartbeat::HeartbeatService;
 use house_arrest::{HouseArrestClient, HouseArrestDirItem, ERR_SANDBOX_LOCKED_APPSTORE};
+use mobilebackup2::{Mb2ExtractReport, MobileBackup2Client};
 use obfstr::obfstr;
 use pairing::UnifiedPairing;
 use rsd::RsdTunnelSession;
@@ -763,6 +765,89 @@ impl LocalDevManager {
                 afc.write_file_full(&path_owned, &data_owned)
             }
         })
+    }
+
+    /// Extracts unencrypted `com.apple.mobilebackup2` snapshot over RSD (`10.7.0.1:49152`) or Lockdown
+    /// so target `AppDomain-<bundle_id>` files can be recovered into local Sandbox storage.
+    pub fn extract_backup_app(
+        &mut self,
+        bundle_id: &str,
+        staging_dir: &str,
+        free_bytes: u64,
+    ) -> Result<Mb2ExtractReport, String> {
+        let clean_bundle = bundle_id.trim();
+        let clean_staging = staging_dir.trim();
+        if clean_bundle.is_empty() || clean_staging.is_empty() {
+            return Err("Thiếu bundle_id hoặc đường dẫn thư mục tạm backup".to_string());
+        }
+
+        let mb2_rsd = obfstr!("com.apple.mobilebackup2.shim.remote").to_string();
+        let mb2_classic = obfstr!("com.apple.mobilebackup2").to_string();
+        let default_udid = self
+            .active_pairing
+            .as_ref()
+            .map(|p| p.udid.clone())
+            .filter(|s| !s.is_empty())
+            .unwrap_or_else(|| "default-device".to_string());
+
+        let is_rsd = self.ensure_backend()?;
+        if is_rsd {
+            let mut resolved_udid = default_udid.clone();
+            let stream = {
+                let sess = self
+                    .active_rsd
+                    .as_ref()
+                    .ok_or_else(|| "RSD session unavailable".to_string())?;
+                if !sess.udid.trim().is_empty() {
+                    resolved_udid = sess.udid.clone();
+                }
+                match sess.open_checked_in_service(&[mb2_rsd.as_str(), mb2_classic.as_str()]) {
+                    Ok(s) => Ok(s),
+                    Err(first_err) => {
+                        if self.reconnect_rsd_once().is_ok() {
+                            if let Some(ref new_sess) = self.active_rsd {
+                                if !new_sess.udid.trim().is_empty() {
+                                    resolved_udid = new_sess.udid.clone();
+                                }
+                                new_sess.open_checked_in_service(&[mb2_rsd.as_str(), mb2_classic.as_str()])
+                            } else {
+                                Err(first_err)
+                            }
+                        } else {
+                            Err(first_err)
+                        }
+                    }
+                }
+            }?;
+
+            let client = MobileBackup2Client::new(LockdownStream::RsdTunnel(stream));
+            return client.run_backup_into_staging(
+                &resolved_udid,
+                clean_bundle,
+                std::path::Path::new(clean_staging),
+                free_bytes,
+            );
+        }
+
+        let lockdown_pairing = self
+            .active_pairing
+            .as_ref()
+            .and_then(|p| p.lockdown.as_ref())
+            .ok_or_else(|| "Chưa có pairing file hợp lệ để kết nối mobilebackup2".to_string())?;
+        let mut lockdown = LockdownClient::connect(&self.host, self.port, lockdown_pairing)?;
+        let udid = lockdown
+            .device_udid
+            .clone()
+            .filter(|s| !s.is_empty())
+            .unwrap_or(default_udid);
+        let (sock, _, _) = lockdown.start_service(mb2_classic.as_str())?;
+        let client = MobileBackup2Client::new(sock);
+        client.run_backup_into_staging(
+            &udid,
+            clean_bundle,
+            std::path::Path::new(clean_staging),
+            free_bytes,
+        )
     }
 }
 

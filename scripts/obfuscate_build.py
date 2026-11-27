@@ -46,6 +46,9 @@ LOCALDEV_CABI_SYMBOLS = [
     "localdev_list_dir",
     "localdev_read_file",
     "localdev_write_file",
+    "localdev_mb2_extract_app",
+    "localdev_mb2_status",
+    "localdev_mb2_cancel",
     "localdev_free_string",
     "localdev_free_bytes",
 ]

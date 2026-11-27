@@ -1015,6 +1015,17 @@ pub fn send_plist<W: Write>(stream: &mut W, dict: &HashMap<String, PlistValue>) 
     send_plist_for_stage(stream, dict, LockdownStage::Protocol).map_err(|e| e.detail)
 }
 
+pub fn send_plist_value<W: Write>(stream: &mut W, val: &PlistValue) -> Result<(), String> {
+    let xml = super::plist_util::serialize_xml_value(val);
+    let bytes = xml.as_bytes();
+    let len = bytes.len() as u32;
+    let mut frame = Vec::with_capacity(4 + bytes.len());
+    frame.extend_from_slice(&len.to_be_bytes());
+    frame.extend_from_slice(bytes);
+    write_all_safe(stream, &frame, LockdownStage::Protocol, "Write plist value failed")
+        .map_err(|e| e.detail)
+}
+
 pub fn read_plist<R: Read>(stream: &mut R) -> Result<PlistValue, String> {
     read_plist_for_stage(stream, LockdownStage::Protocol).map_err(|e| e.detail)
 }

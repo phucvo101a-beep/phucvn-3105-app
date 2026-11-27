@@ -54,10 +54,20 @@ jobs:
           if not str(info.get("NSLocalNetworkUsageDescription", "")).strip():
               sys.exit("Missing NSLocalNetworkUsageDescription in ThreeOneOSFive/Info.plist")
           bonjour = set(info.get("NSBonjourServices", []))
-          required_bonjour = {"_apple-mobdev2._tcp", "_remotepairing._tcp", "_lockdown._tcp", "_localdev._tcp"}
+          required_bonjour = {
+              "_apple-mobdev2._tcp",
+              "_remotepairing._tcp",
+              "_lockdown._tcp",
+              "_localdev._tcp",
+              "_3105airlift._tcp",
+              "_remotepairing-pairable-host._tcp",
+          }
           missing = sorted(required_bonjour - bonjour)
           if missing:
               sys.exit(f"Missing NSBonjourServices in Info.plist: {missing}")
+          bg_modes = set(info.get("UIBackgroundModes", []))
+          if "audio" not in bg_modes:
+              sys.exit("Missing UIBackgroundModes 'audio' in ThreeOneOSFive/Info.plist")
           root = Path("ThreeOneOSFive/Assets.xcassets")
           for path in sorted(root.rglob("Contents.json")):
               data = json.loads(path.read_text(encoding="utf-8-sig"))
@@ -294,9 +304,19 @@ jobs:
           if not str(info.get("NSLocalNetworkUsageDescription", "")).strip():
               sys.exit("Packaged Info.plist lost NSLocalNetworkUsageDescription")
           bonjour = set(info.get("NSBonjourServices", []))
-          required = {"_apple-mobdev2._tcp", "_remotepairing._tcp", "_lockdown._tcp", "_localdev._tcp"}
+          required = {
+              "_apple-mobdev2._tcp",
+              "_remotepairing._tcp",
+              "_lockdown._tcp",
+              "_localdev._tcp",
+              "_3105airlift._tcp",
+              "_remotepairing-pairable-host._tcp",
+          }
           if not required.issubset(bonjour):
               sys.exit(f"Packaged Info.plist missing NSBonjourServices: {sorted(required - bonjour)}")
+          bg_modes = set(info.get("UIBackgroundModes", []))
+          if "audio" not in bg_modes:
+              sys.exit("Packaged Info.plist lost UIBackgroundModes 'audio'")
           print("Packaged IPA Info.plist Local Network keys verified.")
           PY
           ls -lh "$OUTPUT"

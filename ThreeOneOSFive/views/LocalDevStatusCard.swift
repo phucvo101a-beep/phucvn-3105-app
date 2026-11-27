@@ -3,6 +3,7 @@ import UniformTypeIdentifiers
 
 public struct LocalDevStatusCard: View {
     @ObservedObject private var bridge = LocalDevBridge.shared
+    @ObservedObject private var keepAlive = BackgroundKeepAliveManager.shared
     @Environment(\.scenePhase) private var scenePhase
     @State private var showFilePicker = false
 
@@ -184,6 +185,36 @@ public struct LocalDevStatusCard: View {
                         }
                     }
                 }
+
+                // Audio Background Keep-Alive toggle & live badge
+                HStack(spacing: 8) {
+                    Image(systemName: keepAlive.isActive ? "waveform.circle.fill" : "waveform.circle")
+                        .font(.system(size: 12, weight: .bold))
+                        .foregroundStyle(keepAlive.isActive ? AppTheme.success : AppTheme.subduedText)
+                    VStack(alignment: .leading, spacing: 1) {
+                        Text("Giữ RSD chạy ngầm (Audio Keep-Alive)")
+                            .font(.system(size: 10.5, weight: .semibold))
+                            .foregroundStyle(.white)
+                        Text(
+                            keepAlive.isActive
+                                ? "Đang giữ socket RSD/VPN không bị iOS ngắt khi chuyển app"
+                                : "Tự kích hoạt khi LOCALDEV LIVE hoặc đang truyền/trích xuất"
+                        )
+                        .font(.system(size: 9, weight: .medium))
+                        .foregroundStyle(AppTheme.subduedText)
+                    }
+                    Spacer(minLength: 4)
+                    Toggle("", isOn: Binding(
+                        get: { keepAlive.isUserEnabled },
+                        set: { keepAlive.setUserEnabled($0) }
+                    ))
+                    .labelsHidden()
+                    .tint(AppTheme.success)
+                    .scaleEffect(0.82)
+                }
+                .padding(.horizontal, 9)
+                .padding(.vertical, 6)
+                .background(Color.white.opacity(0.05), in: RoundedRectangle(cornerRadius: 10, style: .continuous))
 
                 // Action buttons
                 VStack(spacing: 8) {

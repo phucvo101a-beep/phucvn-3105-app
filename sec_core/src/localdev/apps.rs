@@ -20,6 +20,47 @@ pub struct LocalDevAppInfo {
     pub is_developer_signed: bool,
 }
 
+pub struct AppScanReport {
+    pub apps: Vec<LocalDevAppInfo>,
+    pub saw_complete: bool,
+    pub chunks: usize,
+    pub error: Option<String>,
+}
+
+pub fn merge_app_lists(dst: &mut Vec<LocalDevAppInfo>, extra: Vec<LocalDevAppInfo>) {
+    let mut idx_by_bundle: HashMap<String, usize> = dst
+        .iter()
+        .enumerate()
+        .map(|(i, a)| (a.bundle_id.clone(), i))
+        .collect();
+
+    for app in extra {
+        if let Some(&idx) = idx_by_bundle.get(&app.bundle_id) {
+            if dst[idx].display_name == dst[idx].bundle_id && app.display_name != app.bundle_id {
+                dst[idx].display_name = app.display_name;
+            }
+            if dst[idx].version == "1.0" && app.version != "1.0" && !app.version.is_empty() {
+                dst[idx].version = app.version;
+            }
+            if dst[idx].bundle_path.is_none() {
+                dst[idx].bundle_path = app.bundle_path;
+            }
+            if dst[idx].container_path.is_none() {
+                dst[idx].container_path = app.container_path;
+            }
+            if dst[idx].access_type == "SandboxLocked" && app.access_type != "SandboxLocked" {
+                dst[idx].access_type = app.access_type;
+                dst[idx].file_sharing_enabled = app.file_sharing_enabled;
+                dst[idx].is_developer_signed = app.is_developer_signed;
+            }
+        } else {
+            idx_by_bundle.insert(app.bundle_id.clone(), dst.len());
+            dst.push(app);
+        }
+    }
+    dst.sort_by(|a, b| a.display_name.to_lowercase().cmp(&b.display_name.to_lowercase()));
+}
+
 pub struct AppScanner;
 
 impl AppScanner {
@@ -66,97 +107,105 @@ impl AppScanner {
         })?;
 
         let (sock, _service_port, _ssl) = lockdown.start_service("com.apple.mobile.installation_proxy")?;
-        let discovered_apps = Self::scan_user_apps_over_stream(sock)?;
+        let report = Self::scan_user_apps_report(sock);
+        let mut discovered_apps = report.apps;
+
+        if !report.saw_complete || discovered_apps.is_empty() {
+            if let Ok((lookup_sock, _, _)) = lockdown.start_service("com.apple.mobile.installation_proxy") {
+                let lookup_rep = Self::lookup_user_apps_report(lookup_sock);
+                merge_app_lists(&mut discovered_apps, lookup_rep.apps);
+            }
+        }
+        if !report.saw_complete || discovered_apps.is_empty() {
+            if let Ok((min_sock, _, _)) = lockdown.start_service("com.apple.mobile.installation_proxy") {
+                let min_rep = Self::scan_user_apps_minimal_report(min_sock);
+                merge_app_lists(&mut discovered_apps, min_rep.apps);
+            }
+        }
+        if discovered_apps.is_empty() {
+            if let Some(err) = report.error {
+                return Err(err);
+            }
+        }
         Ok((discovered_apps, connected_host, connected_port))
     }
 
     /// Streams all installed `User` apps & games over any started `installation_proxy` stream (Lockdown or RSD),
     /// retaining `FullContainer`, `DocumentsOnly`, and `SandboxLocked` items alike.
-    pub fn scan_user_apps_over_stream(mut sock: LockdownStream) -> Result<Vec<LocalDevAppInfo>, String> {
-        sock.set_timeouts(25, 10);
-
-        let mut req = HashMap::new();
-        req.insert("Command".to_string(), PlistValue::String("Browse".to_string()));
-        req.insert("ClientOptions".to_string(), PlistValue::Dictionary(user_app_client_options()));
-        send_plist(&mut sock, &req)?;
-
-        let mut discovered_apps = Vec::new();
-        let mut seen_bundles = HashSet::new();
-
-        // Stream responses until Status == "Complete"
-        loop {
-            let resp = match read_plist(&mut sock) {
-                Ok(r) => r,
-                Err(_) if !discovered_apps.is_empty() => break,
-                Err(e) => return Err(e),
-            };
-            if let Some(err) = resp.get_string("Error") {
-                return Err(format!("installation_proxy error: {}", err));
-            }
-            let status = resp.get_string("Status").unwrap_or_default();
-
-            if let Some(PlistValue::Array(list)) = resp.get("CurrentList") {
-                for item in list {
-                    if let Some(app_dict) = item.as_dict() {
-                        if let Some(app) = parse_app_record(None, app_dict) {
-                            if seen_bundles.insert(app.bundle_id.clone()) {
-                                discovered_apps.push(app);
-                            }
-                        }
-                    }
-                }
-            }
-
-            if let Some(lookup_map) = resp.get("LookupResult").and_then(|v| v.as_dict()) {
-                for (bid, item) in lookup_map {
-                    if let Some(app_dict) = item.as_dict() {
-                        if let Some(app) = parse_app_record(Some(bid), app_dict) {
-                            if seen_bundles.insert(app.bundle_id.clone()) {
-                                discovered_apps.push(app);
-                            }
-                        }
-                    }
-                }
-            }
-
-            if status.eq_ignore_ascii_case("Complete") {
-                break;
+    pub fn scan_user_apps_over_stream(sock: LockdownStream) -> Result<Vec<LocalDevAppInfo>, String> {
+        let rep = Self::scan_user_apps_report(sock);
+        if rep.apps.is_empty() {
+            if let Some(err) = rep.error {
+                return Err(err);
             }
         }
-
-        // Sort apps & games alphabetically by display name
-        discovered_apps.sort_by(|a, b| a.display_name.to_lowercase().cmp(&b.display_name.to_lowercase()));
-        Ok(discovered_apps)
+        Ok(rep.apps)
     }
 
-    /// Single-shot `Lookup` fallback for firmwares/proxies that prefer `Lookup` over `Browse`.
-    pub fn lookup_user_apps_over_stream(mut sock: LockdownStream) -> Result<Vec<LocalDevAppInfo>, String> {
-        sock.set_timeouts(25, 10);
-
-        let mut req = HashMap::new();
-        req.insert("Command".to_string(), PlistValue::String("Lookup".to_string()));
-        req.insert("ClientOptions".to_string(), PlistValue::Dictionary(user_app_client_options()));
-        send_plist(&mut sock, &req)?;
-
-        let resp = read_plist(&mut sock)?;
-        if let Some(err) = resp.get_string("Error") {
-            return Err(format!("installation_proxy lookup error: {}", err));
-        }
-
-        let mut discovered_apps = Vec::new();
-        let mut seen_bundles = HashSet::new();
-
-        if let Some(lookup_map) = resp.get("LookupResult").and_then(|v| v.as_dict()) {
-            for (bid, item) in lookup_map {
-                if let Some(app_dict) = item.as_dict() {
-                    if let Some(app) = parse_app_record(Some(bid), app_dict) {
-                        if seen_bundles.insert(app.bundle_id.clone()) {
-                            discovered_apps.push(app);
-                        }
-                    }
-                }
+    /// Single-shot or streamed `Lookup` fallback for firmwares/proxies that prefer `Lookup` over `Browse`.
+    pub fn lookup_user_apps_over_stream(sock: LockdownStream) -> Result<Vec<LocalDevAppInfo>, String> {
+        let rep = Self::lookup_user_apps_report(sock);
+        if rep.apps.is_empty() {
+            if let Some(err) = rep.error {
+                return Err(err);
             }
         }
+        Ok(rep.apps)
+    }
+
+    pub fn scan_user_apps_report(sock: LockdownStream) -> AppScanReport {
+        run_apps_command(sock, "Browse", user_app_client_options())
+    }
+
+    pub fn scan_user_apps_minimal_report(sock: LockdownStream) -> AppScanReport {
+        run_apps_command(sock, "Browse", user_app_client_options_minimal())
+    }
+
+    pub fn lookup_user_apps_report(sock: LockdownStream) -> AppScanReport {
+        run_apps_command(sock, "Lookup", user_app_client_options())
+    }
+}
+
+fn run_apps_command(
+    mut sock: LockdownStream,
+    command: &str,
+    client_options: HashMap<String, PlistValue>,
+) -> AppScanReport {
+    sock.set_timeouts(30, 10);
+
+    let mut req = HashMap::new();
+    req.insert("Command".to_string(), PlistValue::String(command.to_string()));
+    req.insert("ClientOptions".to_string(), PlistValue::Dictionary(client_options));
+    if let Err(e) = send_plist(&mut sock, &req) {
+        return AppScanReport {
+            apps: Vec::new(),
+            saw_complete: false,
+            chunks: 0,
+            error: Some(e),
+        };
+    }
+
+    let mut discovered_apps = Vec::new();
+    let mut seen_bundles = HashSet::new();
+    let mut saw_complete = false;
+    let mut chunks = 0usize;
+    let mut trailing_err = None;
+
+    loop {
+        let resp = match read_plist(&mut sock) {
+            Ok(r) => r,
+            Err(e) => {
+                trailing_err = Some(e);
+                break;
+            }
+        };
+        chunks += 1;
+        if let Some(err) = resp.get_string("Error") {
+            trailing_err = Some(format!("installation_proxy {} error: {}", command, err));
+            break;
+        }
+        let status = resp.get_string("Status").unwrap_or_default();
+
         if let Some(PlistValue::Array(list)) = resp.get("CurrentList") {
             for item in list {
                 if let Some(app_dict) = item.as_dict() {
@@ -169,8 +218,30 @@ impl AppScanner {
             }
         }
 
-        discovered_apps.sort_by(|a, b| a.display_name.to_lowercase().cmp(&b.display_name.to_lowercase()));
-        Ok(discovered_apps)
+        if let Some(lookup_map) = resp.get("LookupResult").and_then(|v| v.as_dict()) {
+            for (bid, item) in lookup_map {
+                if let Some(app_dict) = item.as_dict() {
+                    if let Some(app) = parse_app_record(Some(bid), app_dict) {
+                        if seen_bundles.insert(app.bundle_id.clone()) {
+                            discovered_apps.push(app);
+                        }
+                    }
+                }
+            }
+        }
+
+        if status.eq_ignore_ascii_case("Complete") {
+            saw_complete = true;
+            break;
+        }
+    }
+
+    discovered_apps.sort_by(|a, b| a.display_name.to_lowercase().cmp(&b.display_name.to_lowercase()));
+    AppScanReport {
+        apps: discovered_apps,
+        saw_complete,
+        chunks,
+        error: trailing_err,
     }
 }
 
@@ -188,6 +259,25 @@ fn user_app_client_options() -> HashMap<String, PlistValue> {
         PlistValue::String("ApplicationType".to_string()),
         PlistValue::String("UIFileSharingEnabled".to_string()),
         PlistValue::String("LSSupportsOpeningDocumentsInPlace".to_string()),
+        PlistValue::String("Entitlements".to_string()),
+        PlistValue::String("Path".to_string()),
+        PlistValue::String("Container".to_string()),
+    ];
+    client_options.insert("ReturnAttributes".to_string(), PlistValue::Array(return_attrs));
+    client_options
+}
+
+fn user_app_client_options_minimal() -> HashMap<String, PlistValue> {
+    let mut client_options = HashMap::new();
+    client_options.insert("ApplicationType".to_string(), PlistValue::String("User".to_string()));
+
+    let return_attrs = vec![
+        PlistValue::String("CFBundleIdentifier".to_string()),
+        PlistValue::String("CFBundleDisplayName".to_string()),
+        PlistValue::String("CFBundleName".to_string()),
+        PlistValue::String("CFBundleShortVersionString".to_string()),
+        PlistValue::String("CFBundleVersion".to_string()),
+        PlistValue::String("UIFileSharingEnabled".to_string()),
         PlistValue::String("Entitlements".to_string()),
         PlistValue::String("Path".to_string()),
         PlistValue::String("Container".to_string()),
@@ -222,8 +312,14 @@ fn parse_app_record(fallback_bundle_id: Option<&str>, dict: &HashMap<String, Pli
         .or_else(|| fallback_bundle_id.map(str::trim).filter(|s| !s.is_empty()))?
         .to_string();
 
+    // Only exclude internal/background daemons and extensions; keep all apps returned for the User query
+    // (including iOS 27.2.1 shim removable/user apps even if `ApplicationType` casing or label varies).
     if let Some(app_type) = non_empty_str(dict, "ApplicationType") {
-        if !app_type.eq_ignore_ascii_case("User") {
+        let lower = app_type.to_ascii_lowercase();
+        if matches!(
+            lower.as_str(),
+            "internal" | "hidden" | "pluginkitplugin" | "vpnplugin" | "systemappplaceholder"
+        ) {
             return None;
         }
     }

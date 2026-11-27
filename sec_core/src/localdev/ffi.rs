@@ -247,6 +247,48 @@ pub unsafe extern "C" fn localdev_write_file(
     }
 }
 
+/// Runs `com.apple.mobilebackup2` snapshot/extraction into `staging_dir`
+#[no_mangle]
+pub unsafe extern "C" fn localdev_mb2_extract_app(
+    bundle_id: *const c_char,
+    staging_dir: *const c_char,
+    free_bytes: u64,
+) -> *const c_char {
+    if bundle_id.is_null() || staging_dir.is_null() {
+        return to_json_cstr(json!({
+            "success": false,
+            "error": "Tham số trích xuất Backup không hợp lệ"
+        }));
+    }
+    let b_id = CStr::from_ptr(bundle_id).to_str().unwrap_or("");
+    let st_dir = CStr::from_ptr(staging_dir).to_str().unwrap_or("");
+    let res = with_manager(|mgr| mgr.extract_backup_app(b_id, st_dir, free_bytes));
+    match res {
+        Ok(report) => to_json_cstr(json!({
+            "success": true,
+            "report": report
+        })),
+        Err(e) => to_json_cstr(json!({
+            "success": false,
+            "error": e
+        })),
+    }
+}
+
+/// Returns current progress snapshot of `mobilebackup2` transfer
+#[no_mangle]
+pub extern "C" fn localdev_mb2_status() -> *const c_char {
+    let snap = super::mobilebackup2::get_progress_snapshot();
+    to_json_cstr(json!(snap))
+}
+
+/// Requests cooperative cancellation of active `mobilebackup2` transfer
+#[no_mangle]
+pub extern "C" fn localdev_mb2_cancel() -> i32 {
+    super::mobilebackup2::request_cancel();
+    0
+}
+
 /// Frees C-string allocated by Rust
 #[no_mangle]
 pub unsafe extern "C" fn localdev_free_string(ptr: *mut c_char) {

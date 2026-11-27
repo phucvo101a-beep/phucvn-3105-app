@@ -1437,22 +1437,31 @@ class SecuritySuiteTests(unittest.TestCase):
     def test_12_full_user_apps_games_scan_and_filter(self):
         apps_rs = (REPO_ROOT / "sec_core" / "src" / "localdev" / "apps.rs").read_text(encoding="utf-8")
         for sym in (
+            "pub struct AppScanReport",
+            "pub fn merge_app_lists",
             "fn user_app_client_options()",
+            "fn user_app_client_options_minimal()",
             "LSSupportsOpeningDocumentsInPlace",
             "CFBundleExecutable",
             "ApplicationType",
             "pub fn lookup_user_apps_over_stream",
+            "pub fn scan_user_apps_minimal_report",
             "LookupResult",
+            "saw_complete",
             "fn plist_truthy",
             "SandboxLocked",
             "DocumentsOnly",
             "FullContainer",
         ):
             self.assertIn(sym, apps_rs)
+        self.assertNotIn('!app_type.eq_ignore_ascii_case("User")', apps_rs)
 
         rsd_rs = (REPO_ROOT / "sec_core" / "src" / "localdev" / "rsd.rs").read_text(encoding="utf-8")
         for sym in (
-            "lookup_user_apps_over_stream",
+            "scan_user_apps_report",
+            "lookup_user_apps_report",
+            "scan_user_apps_minimal_report",
+            "merge_app_lists",
             "SandboxLocked",
             "isAppClip",
             "fileSharingEnabled",
@@ -1487,6 +1496,79 @@ class SecuritySuiteTests(unittest.TestCase):
         file_browser_swift = (REPO_ROOT / "ThreeOneOSFive" / "views" / "FileBrowserView.swift").read_text(encoding="utf-8")
         self.assertIn("remoteErrorMessage", file_browser_swift)
         self.assertIn("SANDBOX_LOCKED", file_browser_swift)
+
+    # -----------------------------------------------------------------------
+    # SCENARIO 13: Background KeepAlive, mobilebackup2, Airlift LAN & IPA Patch
+    # -----------------------------------------------------------------------
+    def test_13_background_keepalive_mb2_airlift_and_ipa_patcher(self):
+        import plistlib
+
+        info_path = REPO_ROOT / "ThreeOneOSFive" / "Info.plist"
+        with info_path.open("rb") as f:
+            info = plistlib.load(f)
+        self.assertIn("audio", info.get("UIBackgroundModes", []))
+        for svc in (
+            "_apple-mobdev2._tcp",
+            "_remotepairing._tcp",
+            "_lockdown._tcp",
+            "_localdev._tcp",
+            "_3105airlift._tcp",
+            "_remotepairing-pairable-host._tcp",
+        ):
+            self.assertIn(svc, info.get("NSBonjourServices", []))
+
+        import build_ipa
+        self.assertTrue(build_ipa.validate_info_plist_dict(info, "ThreeOneOSFive/Info.plist"))
+
+        keepalive_swift = (REPO_ROOT / "ThreeOneOSFive" / "helpers" / "BackgroundKeepAliveManager.swift").read_text("utf-8")
+        for sym in ("AVAudioSession", ".playback", ".mixWithOthers", "AVAudioPCMBuffer", "setConnectionLive"):
+            self.assertIn(sym, keepalive_swift)
+
+        mb2_rs = (REPO_ROOT / "sec_core" / "src" / "localdev" / "mobilebackup2.rs").read_text("utf-8")
+        for sym in (
+            "pub struct MobileBackup2Client",
+            "DLMessageVersionExchange",
+            "DLVersionsOk",
+            "DLMessageDeviceReady",
+            "DLMessageUploadFiles",
+            "DLMessageDownloadFiles",
+            "run_backup_into_staging",
+        ):
+            self.assertIn(sym, mb2_rs)
+
+        ffi_rs = (REPO_ROOT / "sec_core" / "src" / "localdev" / "ffi.rs").read_text("utf-8")
+        obf_py = (REPO_ROOT / "scripts" / "obfuscate_build.py").read_text("utf-8")
+        ld_swift = (REPO_ROOT / "ThreeOneOSFive" / "helpers" / "LocalDevBridge.swift").read_text("utf-8")
+        for sym in ("localdev_mb2_extract_app", "localdev_mb2_status", "localdev_mb2_cancel"):
+            self.assertIn(sym, ffi_rs)
+            self.assertIn(sym, obf_py)
+            self.assertIn(f'"{sym}"', ld_swift)
+
+        backup_swift = (REPO_ROOT / "ThreeOneOSFive" / "helpers" / "BackupExtractorService.swift").read_text("utf-8")
+        self.assertIn("import SQLite3", backup_swift)
+        self.assertIn("Manifest.db", backup_swift)
+        self.assertIn("AppDomain-", backup_swift)
+
+        fb_swift = (REPO_ROOT / "ThreeOneOSFive" / "views" / "FileBrowserView.swift").read_text("utf-8")
+        self.assertIn("Trích xuất dữ liệu qua Backup (mobilebackup2)", fb_swift)
+
+        airlift_swift = (REPO_ROOT / "ThreeOneOSFive" / "helpers" / "AirliftLanServer.swift").read_text("utf-8")
+        for sym in ("NWListener", "_3105airlift._tcp", "detectWiFiIPv4Address", "/upload", "/download"):
+            self.assertIn(sym, airlift_swift)
+
+        ipa_swift = (REPO_ROOT / "ThreeOneOSFive" / "helpers" / "IpaFileSharingPatcher.swift").read_text("utf-8")
+        for sym in ("UIFileSharingEnabled", "LSSupportsOpeningDocumentsInPlace", "get-task-allow", "-filesharing"):
+            self.assertIn(sym, ipa_swift)
+
+        pbx = (REPO_ROOT / "ThreeOneOSFive.xcodeproj" / "project.pbxproj").read_text("utf-8")
+        for fname in (
+            "BackgroundKeepAliveManager.swift",
+            "BackupExtractorService.swift",
+            "AirliftLanServer.swift",
+            "IpaFileSharingPatcher.swift",
+            "AirliftToolsView.swift",
+        ):
+            self.assertIn(fname, pbx)
 
 
 def main():

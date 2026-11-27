@@ -16,6 +16,9 @@ private typealias CLocalDevScanApps = @convention(c) () -> UnsafePointer<CChar>?
 private typealias CLocalDevListDir = @convention(c) (Int32, UnsafePointer<CChar>?, UnsafePointer<CChar>) -> UnsafePointer<CChar>?
 private typealias CLocalDevReadFile = @convention(c) (Int32, UnsafePointer<CChar>?, UnsafePointer<CChar>, UnsafeMutablePointer<Int>) -> UnsafeMutablePointer<UInt8>?
 private typealias CLocalDevWriteFile = @convention(c) (Int32, UnsafePointer<CChar>?, UnsafePointer<CChar>, UnsafePointer<UInt8>, Int) -> UnsafePointer<CChar>?
+private typealias CLocalDevMb2ExtractApp = @convention(c) (UnsafePointer<CChar>?, UnsafePointer<CChar>?, UInt64) -> UnsafePointer<CChar>?
+private typealias CLocalDevMb2Status = @convention(c) () -> UnsafePointer<CChar>?
+private typealias CLocalDevMb2Cancel = @convention(c) () -> Int32
 private typealias CLocalDevFreeString = @convention(c) (UnsafePointer<CChar>?) -> Void
 private typealias CLocalDevFreeBytes = @convention(c) (UnsafeMutablePointer<UInt8>?, Int) -> Void
 
@@ -414,6 +417,9 @@ private final class LocalDevLib {
     var fnListDir: CLocalDevListDir?
     var fnReadFile: CLocalDevReadFile?
     var fnWriteFile: CLocalDevWriteFile?
+    var fnMb2ExtractApp: CLocalDevMb2ExtractApp?
+    var fnMb2Status: CLocalDevMb2Status?
+    var fnMb2Cancel: CLocalDevMb2Cancel?
     var fnFreeString: CLocalDevFreeString?
     var fnFreeBytes: CLocalDevFreeBytes?
 
@@ -469,6 +475,15 @@ private final class LocalDevLib {
         }
         if let sym = dlsym(symTarget, "localdev_write_file") {
             fnWriteFile = unsafeBitCast(sym, to: CLocalDevWriteFile.self)
+        }
+        if let sym = dlsym(symTarget, "localdev_mb2_extract_app") {
+            fnMb2ExtractApp = unsafeBitCast(sym, to: CLocalDevMb2ExtractApp.self)
+        }
+        if let sym = dlsym(symTarget, "localdev_mb2_status") {
+            fnMb2Status = unsafeBitCast(sym, to: CLocalDevMb2Status.self)
+        }
+        if let sym = dlsym(symTarget, "localdev_mb2_cancel") {
+            fnMb2Cancel = unsafeBitCast(sym, to: CLocalDevMb2Cancel.self)
         }
         if let sym = dlsym(symTarget, "localdev_free_string") {
             fnFreeString = unsafeBitCast(sym, to: CLocalDevFreeString.self)
@@ -571,6 +586,30 @@ public struct LocalDevDirListing {
     public let mode: String?
     public let error: String?
     public let items: [LocalDevDirItem]
+}
+
+public struct LocalDevMb2Progress: Codable, Equatable {
+    public let running: Bool
+    public let phase: String
+    public let files_received: UInt64
+    public let bytes_received: UInt64
+    public let last_path: String
+    public let error: String?
+}
+
+public struct LocalDevMb2Report: Codable {
+    public let udid: String
+    public let bundle_id: String
+    public let staging_udid_dir: String
+    public let manifest_db_path: String?
+    public let files_received: UInt64
+    public let bytes_received: UInt64
+}
+
+private struct Mb2ExtractResponse: Codable {
+    let success: Bool
+    let error: String?
+    let report: LocalDevMb2Report?
 }
 
 public enum LocalDevVirtualPath {
@@ -753,6 +792,7 @@ public final class LocalDevBridge: ObservableObject {
         statusLock.lock()
         _threadSafeStatus = normalizedStatus
         statusLock.unlock()
+        BackgroundKeepAliveManager.shared.setConnectionLive(isModuleEnabled && normalizedStatus.isLive)
         logStatusIfChanged(normalizedStatus)
         DispatchQueue.main.async {
             self.currentStatus = normalizedStatus
@@ -1949,6 +1989,8 @@ public final class LocalDevBridge: ObservableObject {
         lastError = nil
 
         workerQueue.async {
+            let keepAliveToken = BackgroundKeepAliveManager.shared.beginWorkToken()
+            defer { BackgroundKeepAliveManager.shared.endWorkToken(keepAliveToken) }
             let preferredPort = self.detectPreferredTunnelPort()
             let candidates = self.detectTunnelEndpoints(port: preferredPort)
             self.ensureCoreInitialized()
@@ -1972,7 +2014,9 @@ public final class LocalDevBridge: ObservableObject {
                 if let apps = resp.apps {
                     resultApps = apps
                 }
-                if !resp.success, let err = resp.error {
+                if resp.success {
+                    log("localdev: scanApplications -> \(resultApps.count) apps")
+                } else if let err = resp.error {
                     log("localdev: scanApplications failed — \(err)")
                     DispatchQueue.main.async {
                         self.lastError = err
@@ -2001,6 +2045,8 @@ public final class LocalDevBridge: ObservableObject {
         guard isModuleEnabled else {
             return LocalDevDirListing(success: false, mode: nil, error: "LocalDev đang tắt", items: [])
         }
+        let keepAliveToken = BackgroundKeepAliveManager.shared.beginWorkToken()
+        defer { BackgroundKeepAliveManager.shared.endWorkToken(keepAliveToken) }
         ensureCoreInitialized()
         guard let fnList = LocalDevLib.shared.fnListDir,
               let cStr = fnList(service.rawValue, bundleID, path) else {
@@ -2023,6 +2069,8 @@ public final class LocalDevBridge: ObservableObject {
 
     public func readFile(service: LocalDevServiceType, bundleID: String?, path: String) -> Data? {
         guard isModuleEnabled else { return nil }
+        let keepAliveToken = BackgroundKeepAliveManager.shared.beginWorkToken()
+        defer { BackgroundKeepAliveManager.shared.endWorkToken(keepAliveToken) }
         ensureCoreInitialized()
         guard let fnRead = LocalDevLib.shared.fnReadFile else { return nil }
         var outLen = 0
@@ -2035,6 +2083,8 @@ public final class LocalDevBridge: ObservableObject {
 
     public func writeFile(service: LocalDevServiceType, bundleID: String?, path: String, data: Data) -> Bool {
         guard isModuleEnabled else { return false }
+        let keepAliveToken = BackgroundKeepAliveManager.shared.beginWorkToken()
+        defer { BackgroundKeepAliveManager.shared.endWorkToken(keepAliveToken) }
         ensureCoreInitialized()
         guard let fnWrite = LocalDevLib.shared.fnWriteFile else { return false }
         let bytes = [UInt8](data)
@@ -2044,5 +2094,49 @@ public final class LocalDevBridge: ObservableObject {
         defer { LocalDevLib.shared.fnFreeString?(cStr) }
         let jsonStr = String(cString: cStr)
         return jsonStr.contains("\"success\":true")
+    }
+
+    public func extractBackupDomain(
+        bundleID: String,
+        stagingDirectory: URL,
+        freeBytes: UInt64
+    ) -> Result<LocalDevMb2Report, String> {
+        guard isModuleEnabled else {
+            return .failure("LocalDev đang tắt — hãy bật LocalDevVPN & Pairing để dùng mobilebackup2.")
+        }
+        let keepAliveToken = BackgroundKeepAliveManager.shared.beginWorkToken()
+        defer { BackgroundKeepAliveManager.shared.endWorkToken(keepAliveToken) }
+        ensureCoreInitialized()
+        guard let fnExtract = LocalDevLib.shared.fnMb2ExtractApp,
+              let cStr = fnExtract(bundleID, stagingDirectory.path, freeBytes) else {
+            return .failure("Chức năng mobilebackup2 chưa sẵn sàng trong libsec_core.")
+        }
+        defer { LocalDevLib.shared.fnFreeString?(cStr) }
+        let jsonStr = String(cString: cStr)
+        guard let data = jsonStr.data(using: .utf8),
+              let resp = try? JSONDecoder().decode(Mb2ExtractResponse.self, from: data) else {
+            return .failure("Phản hồi mobilebackup2 không hợp lệ")
+        }
+        if resp.success, let report = resp.report {
+            return .success(report)
+        }
+        return .failure(resp.error ?? "Trích xuất mobilebackup2 thất bại")
+    }
+
+    public func currentBackupProgress() -> LocalDevMb2Progress? {
+        ensureCoreInitialized()
+        guard let fnStatus = LocalDevLib.shared.fnMb2Status,
+              let cStr = fnStatus() else {
+            return nil
+        }
+        defer { LocalDevLib.shared.fnFreeString?(cStr) }
+        let jsonStr = String(cString: cStr)
+        guard let data = jsonStr.data(using: .utf8) else { return nil }
+        return try? JSONDecoder().decode(LocalDevMb2Progress.self, from: data)
+    }
+
+    public func cancelBackupExtraction() {
+        ensureCoreInitialized()
+        _ = LocalDevLib.shared.fnMb2Cancel?()
     }
 }

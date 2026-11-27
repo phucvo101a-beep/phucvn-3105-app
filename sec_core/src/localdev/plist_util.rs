@@ -141,9 +141,16 @@ pub fn base64_encode(input: &[u8]) -> String {
 // ==============================================================================
 
 pub fn parse_plist(data: &[u8]) -> Result<PlistValue, String> {
+    let trimmed = {
+        let mut i = 0usize;
+        while i < data.len() && data[i].is_ascii_whitespace() {
+            i += 1;
+        }
+        &data[i..]
+    };
     let bplist_magic = obfstr::obfstr!("bplist00").to_string();
-    if data.starts_with(bplist_magic.as_bytes()) {
-        parse_binary_plist(data)
+    if trimmed.starts_with(bplist_magic.as_bytes()) {
+        parse_binary_plist(trimmed)
     } else {
         let s = std::str::from_utf8(data)
             .map_err(|e| format!("Invalid UTF-8 XML plist: {}", e))?;
@@ -244,22 +251,42 @@ fn parse_xml_element(xml: &str, cursor: &mut usize) -> Result<PlistValue, String
         let content = parse_xml_leaf(xml, cursor, "<integer>", "</integer>")?;
         let num: i64 = content.trim().parse().unwrap_or(0);
         Ok(PlistValue::Integer(num))
+    } else if xml[*cursor..].starts_with("<integer/>") || xml[*cursor..].starts_with("<integer />") {
+        if let Some(end) = xml[*cursor..].find('>') {
+            *cursor += end + 1;
+        }
+        Ok(PlistValue::Integer(0))
     } else if xml[*cursor..].starts_with("<real>") {
         let content = parse_xml_leaf(xml, cursor, "<real>", "</real>")?;
         let num: f64 = content.trim().parse().unwrap_or(0.0);
         Ok(PlistValue::Real(num))
+    } else if xml[*cursor..].starts_with("<real/>") || xml[*cursor..].starts_with("<real />") {
+        if let Some(end) = xml[*cursor..].find('>') {
+            *cursor += end + 1;
+        }
+        Ok(PlistValue::Real(0.0))
     } else if xml[*cursor..].starts_with("<true/>") || xml[*cursor..].starts_with("<true />") {
         if let Some(end) = xml[*cursor..].find('>') {
             *cursor += end + 1;
         }
+        Ok(PlistValue::Boolean(true))
+    } else if xml[*cursor..].starts_with("<true></true>") {
+        *cursor += "<true></true>".len();
         Ok(PlistValue::Boolean(true))
     } else if xml[*cursor..].starts_with("<false/>") || xml[*cursor..].starts_with("<false />") {
         if let Some(end) = xml[*cursor..].find('>') {
             *cursor += end + 1;
         }
         Ok(PlistValue::Boolean(false))
+    } else if xml[*cursor..].starts_with("<false></false>") {
+        *cursor += "<false></false>".len();
+        Ok(PlistValue::Boolean(false))
     } else {
-        Err(format!("Unknown XML tag near: {}", &xml[*cursor..(*cursor + 30).min(xml.len())]))
+        let mut preview_end = (*cursor + 30).min(xml.len());
+        while preview_end > *cursor && !xml.is_char_boundary(preview_end) {
+            preview_end -= 1;
+        }
+        Err(format!("Unknown XML tag near: {}", &xml[*cursor..preview_end]))
     }
 }
 
@@ -432,16 +459,22 @@ fn parse_bplist_object(
             }
         }
         0x10 => {
-            // Integer (count is 2^count bytes)
-            let bytes_len = 1 << count;
+            // Integer (count is 2^count bytes; 16-byte values in bplist are signed 128-bit)
+            let bytes_len = 1usize << count;
             if cur + bytes_len > data.len() {
                 return Err("bplist integer out of bounds".to_string());
             }
-            let mut val = 0i64;
+            let mut val = 0u128;
             for &b in &data[cur..cur + bytes_len] {
-                val = (val << 8) | (b as i64);
+                val = (val << 8) | (b as u128);
             }
-            PlistValue::Integer(val)
+            let as_i64 = if bytes_len <= 8 && (data[cur] & 0x80) != 0 && bytes_len < 8 {
+                let shift = (8 - bytes_len) * 8;
+                ((val as i64) << shift) >> shift
+            } else {
+                val as i64
+            };
+            PlistValue::Integer(as_i64)
         }
         0x20 => {
             // Real (float, 2^count bytes)
@@ -605,6 +638,15 @@ fn read_bplist_length(
 // ==============================================================================
 // XML PLIST SERIALIZER
 // ==============================================================================
+
+pub fn serialize_xml_value(val: &PlistValue) -> String {
+    let mut xml = String::from("<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n");
+    xml.push_str("<!DOCTYPE plist PUBLIC \"-//Apple//DTD PLIST 1.0//EN\" \"http://www.apple.com/DTDs/PropertyList-1.0.dtd\">\n");
+    xml.push_str("<plist version=\"1.0\">\n");
+    serialize_value_xml(&mut xml, val, 0);
+    xml.push_str("</plist>\n");
+    xml
+}
 
 pub fn serialize_xml_dict(dict: &HashMap<String, PlistValue>) -> String {
     let mut xml = String::from("<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n");
