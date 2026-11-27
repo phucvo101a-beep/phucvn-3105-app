@@ -22,7 +22,7 @@ use rand::rngs::OsRng;
 use serde_json::{json, Value as JsonValue};
 use sha2::{Digest, Sha256, Sha512};
 use std::collections::{HashMap, HashSet, VecDeque};
-use std::io::{self, BufRead, Cursor, Read, Write};
+use std::io;
 use std::net::IpAddr;
 use std::pin::Pin;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -231,7 +231,7 @@ impl SyncTunnelStream {
     }
 }
 
-impl Read for SyncTunnelStream {
+impl std::io::Read for SyncTunnelStream {
     fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
         let rt = runtime().map_err(|e| io::Error::new(io::ErrorKind::Other, e))?;
         match self {
@@ -254,7 +254,7 @@ impl Read for SyncTunnelStream {
     }
 }
 
-impl Write for SyncTunnelStream {
+impl std::io::Write for SyncTunnelStream {
     fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
         let rt = runtime().map_err(|e| io::Error::new(io::ErrorKind::Other, e))?;
         match self {
@@ -433,9 +433,9 @@ impl RpPairingControlClient {
             .await
             .map_err(|_| {
                 RpProtocolError::Transport(LockdownError::with_errno(
-                    LockdownErrorKind::TimedOut,
+                    LockdownErrorKind::Timeout,
                     LockdownStage::Protocol,
-                    60,
+                    Some(60),
                     "Timeout writing RPPairing frame",
                 ))
             })?
@@ -444,7 +444,7 @@ impl RpPairingControlClient {
                 RpProtocolError::Transport(LockdownError::with_errno(
                     if code == 54 { LockdownErrorKind::SocketReset } else { LockdownErrorKind::ProtocolError },
                     LockdownStage::Protocol,
-                    code,
+                    Some(code),
                     format!("RPPairing write failed: {}", e),
                 ))
             })?;
@@ -469,9 +469,9 @@ impl RpPairingControlClient {
             .await
             .map_err(|_| {
                 RpProtocolError::Transport(LockdownError::with_errno(
-                    LockdownErrorKind::TimedOut,
+                    LockdownErrorKind::Timeout,
                     LockdownStage::Protocol,
-                    60,
+                    Some(60),
                     "Timeout waiting for RPPairing response header",
                 ))
             })?
@@ -480,7 +480,7 @@ impl RpPairingControlClient {
                 RpProtocolError::Transport(LockdownError::with_errno(
                     if code == 54 { LockdownErrorKind::SocketReset } else { LockdownErrorKind::ProtocolError },
                     LockdownStage::Protocol,
-                    code,
+                    Some(code),
                     format!("RPPairing magic read failed: {}", e),
                 ))
             })?;
@@ -926,6 +926,17 @@ impl XpcValue {
     }
 
     fn decode_root(buf: &[u8]) -> Result<Self, String> {
+        xpc_wire::decode_root(buf)
+    }
+}
+
+/// Isolated sync XPC wire decoder so `tokio::io::AsyncReadExt` cannot collide
+/// with `std::io::Read` on `std::io::Cursor<&[u8]>` (E0034).
+mod xpc_wire {
+    use super::{XpcValue, XPC_OBJECT_MAGIC, XPC_OBJECT_VERSION};
+    use std::io::{BufRead, Cursor, Read};
+
+    pub(super) fn decode_root(buf: &[u8]) -> Result<XpcValue, String> {
         if buf.len() < 8 {
             return Err("XPC object buffer too short".to_string());
         }
@@ -935,10 +946,10 @@ impl XpcValue {
             return Err(format!("Invalid XPC header magic={:#x} ver={}", magic, version));
         }
         let mut cursor = Cursor::new(&buf[8..]);
-        Self::decode_object(&mut cursor)
+        decode_object(&mut cursor)
     }
 
-    fn decode_object(cursor: &mut Cursor<&[u8]>) -> Result<Self, String> {
+    fn decode_object(cursor: &mut Cursor<&[u8]>) -> Result<XpcValue, String> {
         let mut b4 = [0u8; 4];
         cursor.read_exact(&mut b4).map_err(|e| e.to_string())?;
         let xtype = u32::from_le_bytes(b4);
@@ -973,7 +984,7 @@ impl XpcValue {
                 let len = u32::from_le_bytes(b4) as usize;
                 let mut data = vec![0u8; len];
                 cursor.read_exact(&mut data).map_err(|e| e.to_string())?;
-                cursor.consume(Self::padding(len));
+                cursor.consume(XpcValue::padding(len));
                 Ok(XpcValue::Data(data))
             }
             0x0000_9000 => {
@@ -981,7 +992,7 @@ impl XpcValue {
                 let len = u32::from_le_bytes(b4) as usize;
                 let mut raw = vec![0u8; len];
                 cursor.read_exact(&mut raw).map_err(|e| e.to_string())?;
-                cursor.consume(Self::padding(len));
+                cursor.consume(XpcValue::padding(len));
                 if raw.last() == Some(&0) {
                     raw.pop();
                 }
@@ -1000,7 +1011,7 @@ impl XpcValue {
                 let count = u32::from_le_bytes(b4) as usize;
                 let mut arr = Vec::with_capacity(count.min(1024));
                 for _ in 0..count {
-                    arr.push(Self::decode_object(cursor)?);
+                    arr.push(decode_object(cursor)?);
                 }
                 Ok(XpcValue::Array(arr))
             }
@@ -1017,9 +1028,9 @@ impl XpcValue {
                     if key_raw.last() == Some(&0) {
                         key_raw.pop();
                     }
-                    cursor.consume(Self::padding(raw_len));
+                    cursor.consume(XpcValue::padding(raw_len));
                     let key = String::from_utf8_lossy(&key_raw).into_owned();
-                    let val = Self::decode_object(cursor)?;
+                    let val = decode_object(cursor)?;
                     entries.push((key, val));
                 }
                 Ok(XpcValue::Dictionary(entries))
@@ -1027,7 +1038,7 @@ impl XpcValue {
             0x0001_a000 => {
                 let mut msg_id_buf = [0u8; 8];
                 cursor.read_exact(&mut msg_id_buf).map_err(|e| e.to_string())?;
-                let inner = Self::decode_object(cursor)?;
+                let inner = decode_object(cursor)?;
                 Ok(inner)
             }
             other => Err(format!("Unsupported XPC type {:#x}", other)),
@@ -1576,8 +1587,8 @@ impl RsdTunnelSession {
                     .await
                     .map_err(|e| {
                         LockdownError::new(
-                            LockdownErrorKind::TlsHandshake,
-                            LockdownStage::StartSession,
+                            LockdownErrorKind::ProtocolError,
+                            LockdownStage::TlsUpgrade,
                             format!("TLS-PSK/CDTunnel tại {}:{}: {}", host_owned, listener_port, e),
                         )
                     })?;
@@ -1600,9 +1611,9 @@ impl RsdTunnelSession {
             .await
             .map_err(|_| {
                 LockdownError::with_errno(
-                    LockdownErrorKind::TimedOut,
+                    LockdownErrorKind::Timeout,
                     LockdownStage::Protocol,
-                    60,
+                    Some(60),
                     format!("jktcp connect RSD port {} timed out", tunnel_info.server_rsd_port),
                 )
             })?
@@ -1858,17 +1869,16 @@ fn perform_rsd_checkin(stream: &mut SyncTunnelStream) -> Result<(), String> {
     let mut frame = Vec::with_capacity(4 + bytes.len());
     frame.extend_from_slice(&len.to_be_bytes());
     frame.extend_from_slice(bytes);
-    stream
-        .write_all(&frame)
+    std::io::Write::write_all(stream, &frame)
         .map_err(|e| format!("RSDCheckin write failed: {}", e))?;
-    stream.flush().map_err(|e| e.to_string())?;
+    std::io::Write::flush(stream).map_err(|e| e.to_string())?;
 
     let resp1 = super::tunnel::read_plist(stream)?;
-    if resp1.get_string("Request") != Some("RSDCheckin") {
+    if resp1.get_string("Request").as_deref() != Some("RSDCheckin") {
         return Err("RSDCheckin reply mismatch".to_string());
     }
     let resp2 = super::tunnel::read_plist(stream)?;
-    if resp2.get_string("Request") != Some("StartService") {
+    if resp2.get_string("Request").as_deref() != Some("StartService") {
         return Err("RSDCheckin StartService reply mismatch".to_string());
     }
     Ok(())

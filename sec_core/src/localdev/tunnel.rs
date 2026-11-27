@@ -536,7 +536,7 @@ fn is_permission_denied_io(err: &io::Error) -> bool {
         || matches!(err.raw_os_error(), Some(1) | Some(13))
 }
 
-fn format_endpoint_label(ip: &str, port: u16) -> String {
+pub(crate) fn format_endpoint_label(ip: &str, port: u16) -> String {
     if ip.contains(':') {
         format!("[{}]:{}", ip, port)
     } else {

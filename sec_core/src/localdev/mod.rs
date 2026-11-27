@@ -850,7 +850,7 @@ fn build_multi_failure_report(
     if let Some(a) = attempts.iter().find(|a| {
         matches!(
             a.err.kind,
-            LockdownErrorKind::SocketReset | LockdownErrorKind::ProtocolError | LockdownErrorKind::TlsHandshake
+            LockdownErrorKind::SocketReset | LockdownErrorKind::ProtocolError
         )
     }) {
         let via = a
