@@ -1,4 +1,4 @@
-﻿#!/usr/bin/env python3
+#!/usr/bin/env python3
 """
 Comprehensive 5-Scenario Zero-Trust Security Verification Suite for PHUCVN 3105.
 Runs natively on Python 3.12 stdlib AND optionally cross-tests live compiled
