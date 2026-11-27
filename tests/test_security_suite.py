@@ -23,6 +23,7 @@ from typing import Dict, Optional, Tuple
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 SCRIPTS_DIR = REPO_ROOT / "scripts"
+sys.path.insert(0, str(REPO_ROOT))
 sys.path.insert(0, str(SCRIPTS_DIR))
 
 import build_serverkey
