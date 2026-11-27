@@ -940,6 +940,13 @@ impl XpcValue {
         }
     }
 
+    pub fn as_data(&self) -> Option<&[u8]> {
+        match self {
+            XpcValue::Data(bytes) => Some(bytes.as_slice()),
+            _ => None,
+        }
+    }
+
     pub fn as_id_string(&self) -> Option<String> {
         match self {
             XpcValue::String(s) => {
@@ -963,14 +970,14 @@ impl XpcValue {
         }
     }
 
-    fn as_bool(&self) -> Option<bool> {
+    pub fn as_bool(&self) -> Option<bool> {
         match self {
             XpcValue::Bool(b) => Some(*b),
             _ => None,
         }
     }
 
-    fn as_i64(&self) -> Option<i64> {
+    pub fn as_i64(&self) -> Option<i64> {
         match self {
             XpcValue::Int64(v) => Some(*v),
             XpcValue::UInt64(v) => i64::try_from(*v).ok(),
@@ -979,7 +986,7 @@ impl XpcValue {
         }
     }
 
-    fn as_u16(&self) -> Option<u16> {
+    pub fn as_u16(&self) -> Option<u16> {
         match self {
             XpcValue::UInt64(v) => u16::try_from(*v).ok(),
             XpcValue::Int64(v) => u16::try_from(*v).ok(),
@@ -1753,6 +1760,15 @@ pub enum RsdAsyncStream {
     Direct(AsyncTransport),
 }
 
+impl std::fmt::Debug for RsdAsyncStream {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            RsdAsyncStream::Jktcp(_) => f.write_str("RsdAsyncStream::Jktcp(..)"),
+            RsdAsyncStream::Direct(d) => f.debug_tuple("RsdAsyncStream::Direct").field(d).finish(),
+        }
+    }
+}
+
 impl AsyncRead for RsdAsyncStream {
     fn poll_read(
         self: Pin<&mut Self>,
@@ -1809,6 +1825,14 @@ struct AsyncTlsStream<S> {
     conn: ClientConnection,
     out_buf: Vec<u8>,
     eof: bool,
+}
+
+impl<S: std::fmt::Debug> std::fmt::Debug for AsyncTlsStream<S> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("AsyncTlsStream")
+            .field("inner", &self.inner)
+            .finish()
+    }
 }
 
 impl<S: AsyncRead + AsyncWrite + Unpin + Send + Sync> AsyncTlsStream<S> {
@@ -1998,7 +2022,7 @@ pub struct CoreDeviceProxy<S> {
     pub info: CdTunnelInfo,
 }
 
-impl<S: AsyncRead + AsyncWrite + Unpin + Send + Sync + 'static> CoreDeviceProxy<S> {
+impl<S: AsyncRead + AsyncWrite + Unpin + Send + Sync + std::fmt::Debug + 'static> CoreDeviceProxy<S> {
     pub async fn new(stream: S) -> Result<Self, String> {
         let (stream, info) = connect_cd_tunnel_plain(stream).await?;
         Ok(Self { stream, info })
@@ -2022,7 +2046,7 @@ impl<S: AsyncRead + AsyncWrite + Unpin + Send + Sync + 'static> CoreDeviceProxy<
 }
 
 async fn complete_coredevice_proxy_tunnel<
-    S: AsyncRead + AsyncWrite + Unpin + Send + Sync + 'static,
+    S: AsyncRead + AsyncWrite + Unpin + Send + Sync + std::fmt::Debug + 'static,
 >(
     proxy: CoreDeviceProxy<S>,
     uuid_seed: Option<&str>,
@@ -2139,7 +2163,7 @@ impl RsdTransport {
         }
     }
 
-    async fn connect_service_port(
+    pub async fn connect_service_port(
         &self,
         port: u16,
         use_trusted: bool,
@@ -2261,6 +2285,22 @@ async fn async_rsd_checkin<S: AsyncRead + AsyncWrite + Unpin>(stream: &mut S) ->
     Ok(())
 }
 
+fn plist_get_ci<'a>(val: &'a PlistValue, candidates: &[&str]) -> Option<&'a PlistValue> {
+    let dict = val.as_dict()?;
+    for name in candidates {
+        if let Some(v) = dict.get(*name) {
+            return Some(v);
+        }
+    }
+    for name in candidates {
+        let target = name.to_ascii_lowercase();
+        if let Some((_, v)) = dict.iter().find(|(k, _)| k.to_ascii_lowercase() == target) {
+            return Some(v);
+        }
+    }
+    None
+}
+
 async fn async_start_service_over_lockdown_stream<
     S: AsyncRead + AsyncWrite + Unpin + Send + Sync + 'static,
 >(
@@ -2285,19 +2325,14 @@ async fn async_start_service_over_lockdown_stream<
     if let Some(err) = reply.get_string("Error") {
         return Err(format!("Lockdown StartService({}): {}", service_name, err));
     }
-    let port = reply
-        .dict_get_ci(&["Port", "port"])
+    let port = plist_get_ci(&reply, &["Port", "port"])
         .and_then(|v| match v {
             PlistValue::Integer(i) if *i > 0 && *i <= 65535 => Some(*i as u16),
             _ => None,
         })
         .ok_or_else(|| format!("Lockdown StartService({}) thiếu Port", service_name))?;
-    let enable_ssl = reply
-        .dict_get_ci(&["EnableServiceSSL", "enableServiceSSL"])
-        .and_then(|v| match v {
-            PlistValue::Boolean(b) => Some(*b),
-            _ => None,
-        })
+    let enable_ssl = plist_get_ci(&reply, &["EnableServiceSSL", "enableServiceSSL"])
+        .and_then(|v| v.as_bool())
         .unwrap_or(false);
     Ok((port, enable_ssl))
 }
@@ -2473,12 +2508,8 @@ async fn establish_coredevice_proxy_tunnel(
                     if let Some(err) = sess_resp.get_string("Error") {
                         return Err(format!("Lockdown StartSession: {}", err));
                     }
-                    let use_tls = sess_resp
-                        .dict_get_ci(&["EnableSessionSSL", "enableSessionSSL"])
-                        .and_then(|v| match v {
-                            PlistValue::Boolean(b) => Some(*b),
-                            _ => None,
-                        })
+                    let use_tls = plist_get_ci(&sess_resp, &["EnableSessionSSL", "enableSessionSSL"])
+                        .and_then(|v| v.as_bool())
                         .unwrap_or(true);
                     let (svc_port, svc_ssl) = if use_tls {
                         let tls_ctrl = AsyncTlsStream::handshake(raw, pairing).await?;
