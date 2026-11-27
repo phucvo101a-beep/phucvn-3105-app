@@ -2,6 +2,7 @@
 //! Fully compatible with iOS 15.0 - iOS 27.2.1
 
 use super::plist_util::{base64_decode, dict_key_names, parse_plist, PlistValue};
+use ed25519_dalek::{SigningKey, VerifyingKey};
 use std::collections::HashMap;
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -28,10 +29,9 @@ impl PairingFile {
         let dict = unwrap_pairing_dict(root_dict);
         let keys_summary = dict_key_names(dict).join(", ");
 
-        // Detect `idevice pair v1.2.0` Remote Pairing plist (XML or bplist00)
-        // Keys typically: `public_key`, `private_key`, `identifier`, `alt_irk`
+        // Reject pure Remote Pairing files when caller strictly requests classic Lockdown X.509
         if is_remote_pairing_dict(dict) {
-            return Err("REMOTE_PAIRING_UNSUPPORTED: Đã nhận diện tệp Remote Pairing (public_key / private_key / identifier / alt_irk), nhưng libsec_core.dylib hiện tại chỉ hỗ trợ Lockdown X.509 TLS (HostCertificate & HostPrivateKey trên cổng 62078).".to_string());
+            return Err("REMOTE_PAIRING_ONLY: Tệp sử dụng Remote Pairing (public_key / private_key / identifier / alt_irk).".to_string());
         }
 
         // 1. HostID / SystemBUID (accept SystemBUID as HostID fallback if omitted)
@@ -211,4 +211,217 @@ pub fn normalize_to_der(input: &[u8]) -> Result<Vec<u8>, String> {
 
     // Attempt direct base64 decode if stripped of headers
     base64_decode(text).map_err(|e| format!("Failed to parse PEM/DER bytes: {}", e))
+}
+
+#[allow(dead_code)]
+#[derive(Debug, Clone)]
+pub struct RemotePairingFile {
+    pub public_key: [u8; 32],
+    pub private_key: [u8; 32],
+    pub identifier: String,
+    pub alt_irk: Option<Vec<u8>>,
+    pub tunnel_port: Option<u16>,
+    pub udid: Option<String>,
+    pub raw_data: Vec<u8>,
+}
+
+impl RemotePairingFile {
+    pub fn from_dict(dict: &HashMap<String, PlistValue>, raw_data: &[u8]) -> Result<Self, String> {
+        let pub_raw = extract_bytes_ci(dict, &["public_key", "PublicKey", "publicKey"])
+            .ok_or_else(|| "Missing 'public_key' in Remote Pairing plist".to_string())?;
+        let priv_raw = extract_bytes_ci(dict, &["private_key", "PrivateKey", "privateKey"])
+            .ok_or_else(|| "Missing 'private_key' in Remote Pairing plist".to_string())?;
+
+        let public_key: [u8; 32] = pub_raw
+            .try_into()
+            .map_err(|_| "Remote Pairing 'public_key' must be 32-byte Ed25519 key".to_string())?;
+        let private_key: [u8; 32] = priv_raw
+            .try_into()
+            .map_err(|_| "Remote Pairing 'private_key' must be 32-byte Ed25519 key".to_string())?;
+
+        VerifyingKey::from_bytes(&public_key)
+            .map_err(|_| "Remote Pairing 'public_key' is not a valid Ed25519 key".to_string())?;
+        let _ = SigningKey::from_bytes(&private_key);
+
+        let identifier = get_str_ci(dict, &["identifier", "Identifier"])
+            .ok_or_else(|| "Missing 'identifier' in Remote Pairing plist".to_string())?;
+        let alt_irk = extract_bytes_ci(dict, &["alt_irk", "altIRK", "AltIRK"]);
+        let tunnel_port = extract_port_ci(
+            dict,
+            &["tunnel_port", "tunnelPort", "RemotePairPort", "remote_pair_port", "rsd_port", "rsdPort", "port"],
+        );
+        let udid = get_str_ci(dict, &["UDID", "UniqueDeviceID", "DeviceID", "udid"]);
+
+        Ok(Self {
+            public_key,
+            private_key,
+            identifier,
+            alt_irk,
+            tunnel_port,
+            udid,
+            raw_data: raw_data.to_vec(),
+        })
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct UnifiedPairing {
+    pub lockdown: Option<PairingFile>,
+    pub remote: Option<RemotePairingFile>,
+    pub tunnel_port: Option<u16>,
+    pub udid: String,
+}
+
+impl UnifiedPairing {
+    /// Parses classic Lockdown X.509, `idevice_pair` Remote Pairing (`public_key`/`private_key`/`identifier`/`alt_irk`),
+    /// or composite plists containing both sets of keys.
+    pub fn parse(raw_data: &[u8]) -> Result<Self, String> {
+        let root = parse_plist(raw_data)?;
+        let root_dict = root
+            .as_dict()
+            .ok_or_else(|| "Pairing file root must be a Dictionary".to_string())?;
+
+        let mut candidate_dicts: Vec<&HashMap<String, PlistValue>> = vec![root_dict];
+        let unwrapped = unwrap_pairing_dict(root_dict);
+        if !std::ptr::eq(unwrapped, root_dict) {
+            candidate_dicts.push(unwrapped);
+        }
+        for key in ["PairRecord", "PairingRecord", "RemotePairing", "pairing_record"] {
+            if let Some(PlistValue::Dictionary(inner)) = get_value_ci(root_dict, &[key]) {
+                if !inner.is_empty() {
+                    candidate_dicts.push(inner);
+                }
+            }
+        }
+
+        let mut remote: Option<RemotePairingFile> = None;
+        let mut remote_err: Option<String> = None;
+        for d in &candidate_dicts {
+            if get_value_ci(d, &["public_key", "PublicKey", "publicKey"]).is_some()
+                || get_value_ci(d, &["private_key", "PrivateKey", "privateKey"]).is_some()
+            {
+                match RemotePairingFile::from_dict(d, raw_data) {
+                    Ok(rp) => {
+                        remote = Some(rp);
+                        break;
+                    }
+                    Err(e) => remote_err = Some(e),
+                }
+            }
+        }
+
+        let lockdown = PairingFile::parse(raw_data).ok();
+
+        if remote.is_none() && lockdown.is_none() {
+            if let Some(e) = remote_err {
+                return Err(e);
+            }
+            return PairingFile::parse(raw_data).map(|lf| Self {
+                udid: lf.udid.clone(),
+                tunnel_port: None,
+                lockdown: Some(lf),
+                remote: None,
+            });
+        }
+
+        let tunnel_port = remote
+            .as_ref()
+            .and_then(|r| r.tunnel_port)
+            .or_else(|| {
+                extract_port_ci(
+                    unwrapped,
+                    &["tunnel_port", "tunnelPort", "RemotePairPort", "remote_pair_port", "rsd_port", "rsdPort", "port"],
+                )
+            });
+
+        let udid = lockdown
+            .as_ref()
+            .map(|l| l.udid.clone())
+            .filter(|u| !u.is_empty())
+            .or_else(|| remote.as_ref().and_then(|r| r.udid.clone()))
+            .or_else(|| remote.as_ref().map(|r| r.identifier.clone()))
+            .unwrap_or_default();
+
+        Ok(Self {
+            lockdown,
+            remote,
+            tunnel_port,
+            udid,
+        })
+    }
+
+    pub fn save_to_dir(&self, dir: &Path) -> Result<(), String> {
+        if !dir.exists() {
+            fs::create_dir_all(dir).map_err(|e| format!("Failed to create storage dir: {}", e))?;
+        }
+        if let Some(ref lf) = self.lockdown {
+            let _ = lf.save_to_dir(dir)?;
+            if self.remote.is_none() {
+                let _ = fs::remove_file(dir.join("remote_pairing.plist"));
+            }
+        }
+        if let Some(ref rp) = self.remote {
+            fs::write(dir.join("remote_pairing.plist"), &rp.raw_data)
+                .map_err(|e| format!("Failed to write remote_pairing.plist: {}", e))?;
+            if self.lockdown.is_none() {
+                let _ = fs::remove_file(dir.join("pairing.mobiledevicepairing"));
+                let _ = fs::remove_file(dir.join("pairing.plist"));
+            }
+        }
+        Ok(())
+    }
+
+    pub fn load_any_from_dir(dir: &Path) -> Option<Result<Self, String>> {
+        let remote_path = dir.join("remote_pairing.plist");
+        let ld_1 = dir.join("pairing.mobiledevicepairing");
+        let ld_2 = dir.join("pairing.plist");
+
+        let ld_target = if ld_1.exists() {
+            Some(ld_1)
+        } else if ld_2.exists() {
+            Some(ld_2)
+        } else {
+            None
+        };
+
+        match (remote_path.exists(), ld_target) {
+            (true, Some(lp)) => {
+                let mut base = match fs::read(&lp).map_err(|e| e.to_string()).and_then(|b| Self::parse(&b)) {
+                    Ok(u) => u,
+                    Err(e) => return Some(Err(e)),
+                };
+                if base.remote.is_none() {
+                    if let Ok(rp_bytes) = fs::read(&remote_path) {
+                        if let Ok(rp_parsed) = Self::parse(&rp_bytes) {
+                            base.remote = rp_parsed.remote;
+                            if base.tunnel_port.is_none() {
+                                base.tunnel_port = rp_parsed.tunnel_port;
+                            }
+                        }
+                    }
+                }
+                Some(Ok(base))
+            }
+            (true, None) => Some(
+                fs::read(&remote_path)
+                    .map_err(|e| format!("Failed to read stored remote pairing: {}", e))
+                    .and_then(|b| Self::parse(&b)),
+            ),
+            (false, Some(lp)) => Some(
+                fs::read(&lp)
+                    .map_err(|e| format!("Failed to read stored pairing: {}", e))
+                    .and_then(|b| Self::parse(&b)),
+            ),
+            (false, None) => None,
+        }
+    }
+}
+
+fn extract_port_ci(dict: &HashMap<String, PlistValue>, candidates: &[&str]) -> Option<u16> {
+    let val = get_value_ci(dict, candidates)?;
+    match val {
+        PlistValue::Integer(n) => u16::try_from(*n).ok().filter(|&p| p > 0),
+        PlistValue::String(s) => s.trim().parse::<u16>().ok().filter(|&p| p > 0),
+        _ => None,
+    }
 }

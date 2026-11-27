@@ -1,8 +1,7 @@
 //! C-ABI FFI Bridge for Swift & UIKit Integration
 //! All functions are thread-safe, return structured JSON and guarantee safe memory management
 
-use super::afc_client::AfcClient;
-use super::house_arrest::HouseArrestClient;
+use super::house_arrest::HouseArrestDirItem;
 use super::with_manager;
 use serde_json::json;
 use std::ffi::{c_char, CStr, CString};
@@ -150,43 +149,8 @@ pub unsafe extern "C" fn localdev_list_dir(
         ""
     };
 
-    let res = with_manager(|mgr| -> Result<(Vec<String>, Vec<super::house_arrest::HouseArrestDirItem>, String), String> {
-        let pairing = mgr.active_pairing.as_ref().ok_or_else(|| "Chưa có pairing file".to_string())?;
-
-        if service_type == SERVICE_TYPE_HOUSE_ARREST {
-            if b_id.is_empty() {
-                return Err("bundle_id is required for HouseArrest".to_string());
-            }
-            HouseArrestClient::list_dir_detailed(&mgr.host, mgr.port, pairing, b_id, path_str)
-        } else {
-            let (mut afc, source) = AfcClient::connect_device_afc(&mgr.host, mgr.port, pairing)?;
-            let entries = afc.list_dir(path_str)?;
-            let prefix = path_str.trim_end_matches('/');
-            let mut items = Vec::with_capacity(entries.len());
-            for name in &entries {
-                let full = if prefix.is_empty() {
-                    format!("/{}", name)
-                } else {
-                    format!("{}/{}", prefix, name)
-                };
-                let info = afc.get_file_info(&full).unwrap_or_default();
-                let is_dir = info.get("st_ifmt").map(|v| v == "S_IFDIR").unwrap_or(false);
-                let size = if is_dir {
-                    -1
-                } else {
-                    info.get("st_size")
-                        .and_then(|s| s.parse::<i64>().ok())
-                        .unwrap_or(0)
-                };
-                items.push(super::house_arrest::HouseArrestDirItem {
-                    name: name.clone(),
-                    is_dir,
-                    size,
-                });
-            }
-            Ok((entries, items, source))
-        }
-    });
+    let res: Result<(Vec<String>, Vec<HouseArrestDirItem>, String), String> =
+        with_manager(|mgr| mgr.list_dir_detailed(service_type, b_id, path_str));
 
     match res {
         Ok((entries, items, mode)) => to_json_cstr(json!({
@@ -226,16 +190,8 @@ pub unsafe extern "C" fn localdev_read_file(
         ""
     };
 
-    let res: Result<Vec<u8>, String> = with_manager(|mgr| {
-        let pairing = mgr.active_pairing.as_ref().ok_or_else(|| "Chưa có pairing file".to_string())?;
-
-        if service_type == SERVICE_TYPE_HOUSE_ARREST {
-            HouseArrestClient::read_file(&mgr.host, mgr.port, pairing, b_id, path_str)
-        } else {
-            let (mut afc, _src) = AfcClient::connect_device_afc(&mgr.host, mgr.port, pairing)?;
-            afc.read_file_full(path_str)
-        }
-    });
+    let res: Result<Vec<u8>, String> =
+        with_manager(|mgr| mgr.read_file(service_type, b_id, path_str));
 
     match res {
         Ok(mut bytes) => {
@@ -275,21 +231,8 @@ pub unsafe extern "C" fn localdev_write_file(
     };
     let slice = std::slice::from_raw_parts(data, len);
 
-    let res: Result<(), String> = with_manager(|mgr| {
-        let pairing = mgr.active_pairing.as_ref().ok_or_else(|| "Chưa có pairing file".to_string())?;
-
-        if service_type == SERVICE_TYPE_HOUSE_ARREST {
-            HouseArrestClient::write_file_safe(&mgr.host, mgr.port, pairing, b_id, path_str, slice)
-        } else {
-            let (mut afc, _src) = AfcClient::connect_device_afc(&mgr.host, mgr.port, pairing)?;
-            // Safety backup
-            if let Ok(existing) = afc.read_file_full(path_str) {
-                let backup_path = format!("{}.bak", path_str);
-                let _ = afc.write_file_full(&backup_path, &existing);
-            }
-            afc.write_file_full(path_str, slice)
-        }
-    });
+    let res: Result<(), String> =
+        with_manager(|mgr| mgr.write_file(service_type, b_id, path_str, slice));
 
     match res {
         Ok(_) => to_json_cstr(json!({

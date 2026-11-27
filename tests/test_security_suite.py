@@ -1349,6 +1349,60 @@ class SecuritySuiteTests(unittest.TestCase):
         self.assertTrue(usb_script.is_file())
         compile(usb_script.read_text("utf-8"), str(usb_script), "exec")
 
+    # -----------------------------------------------------------------------
+    # SCENARIO 11: RemotePairing / RSD (10.7.0.1:49152) Primary Flow & Fallback
+    # -----------------------------------------------------------------------
+    def test_11_remote_pairing_rsd_49152_primary_flow(self):
+        cargo_toml = (REPO_ROOT / "sec_core" / "Cargo.toml").read_text(encoding="utf-8")
+        for dep in ("tokio", "jktcp", "aes", "cbc", "hmac", "sha1"):
+            self.assertIn(dep, cargo_toml)
+        self.assertNotIn("openssl", cargo_toml)
+        self.assertNotRegex(cargo_toml, r'(?m)^\s*plist\s*=')
+
+        pairing_rs = (REPO_ROOT / "sec_core" / "src" / "localdev" / "pairing.rs").read_text(encoding="utf-8")
+        for sym in ("pub struct RemotePairingFile", "pub struct UnifiedPairing", "impl UnifiedPairing", "pub fn parse(raw_data: &[u8])", "tunnel_port"):
+            self.assertIn(sym, pairing_rs)
+        self.assertNotIn("REMOTE_PAIRING_UNSUPPORTED", pairing_rs)
+
+        tls_psk_rs = (REPO_ROOT / "sec_core" / "src" / "localdev" / "tls_psk.rs").read_text(encoding="utf-8")
+        self.assertIn("pub struct TlsPskStream", tls_psk_rs)
+        self.assertIn("pub async fn connect_cd_tunnel", tls_psk_rs)
+
+        rsd_rs = (REPO_ROOT / "sec_core" / "src" / "localdev" / "rsd.rs").read_text(encoding="utf-8")
+        for sym in (
+            "RpPairingControlClient",
+            "RemoteXpcConn",
+            "perform_rsd_handshake",
+            "pub struct RsdTunnelSession",
+            "connect_remote_pairing",
+            "perform_rsd_checkin",
+            "fetch_apps_via_coredevice_xpc",
+        ):
+            self.assertIn(sym, rsd_rs)
+        for forbidden_raw in ("bplist00",):
+            self.assertNotIn(forbidden_raw, rsd_rs)
+            self.assertNotIn(forbidden_raw, tls_psk_rs)
+
+        mod_rs = (REPO_ROOT / "sec_core" / "src" / "localdev" / "mod.rs").read_text(encoding="utf-8")
+        self.assertIn("DEFAULT_REMOTE_PAIRING_PORT", mod_rs)
+        self.assertIn("UnifiedPairing::parse", mod_rs)
+        self.assertIn("open_rp_endpoints", mod_rs)
+        self.assertIn("activate_rsd_session", mod_rs)
+        self.assertIn("with_afc_client", mod_rs)
+
+        ffi_rs = (REPO_ROOT / "sec_core" / "src" / "localdev" / "ffi.rs").read_text(encoding="utf-8")
+        self.assertIn("mgr.list_dir_detailed", ffi_rs)
+        self.assertIn("mgr.read_file", ffi_rs)
+        self.assertIn("mgr.write_file", ffi_rs)
+
+        ld_swift = (REPO_ROOT / "ThreeOneOSFive" / "helpers" / "LocalDevBridge.swift").read_text(encoding="utf-8")
+        self.assertIn("defaultRemotePairingPort: UInt16 = 49152", ld_swift)
+        self.assertIn("detectPreferredTunnelPort()", ld_swift)
+        self.assertNotIn("func remotePairingUnsupportedStatus", ld_swift)
+
+        card_swift = (REPO_ROOT / "ThreeOneOSFive" / "views" / "LocalDevStatusCard.swift").read_text(encoding="utf-8")
+        self.assertIn("bridge.currentStatus.port ?? 49152", card_swift)
+
 
 def main():
     parser = argparse.ArgumentParser(description="Run 3105 5-Scenario Security Test Suite")

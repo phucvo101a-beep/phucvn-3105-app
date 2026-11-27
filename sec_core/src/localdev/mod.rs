@@ -1,5 +1,6 @@
 //! LocalDev Core Module for iOS 15.0 - iOS 27.2.1
-//! Dual-Stack Lockdown + CoreDevice/RSD, AFC & House Arrest File Management
+//! Dual-Stack RemotePairing/RSD (`10.7.0.1:49152` priority) + Lockdown (`62078` fallback),
+//! AFC & House Arrest File Management
 
 pub mod afc_client;
 pub mod apps;
@@ -8,19 +9,26 @@ pub mod heartbeat;
 pub mod house_arrest;
 pub mod pairing;
 pub mod plist_util;
+pub mod rsd;
+pub mod tls_psk;
 pub mod tunnel;
 
+use afc_client::AfcClient;
 use heartbeat::HeartbeatService;
-use pairing::PairingFile;
+use house_arrest::{HouseArrestClient, HouseArrestDirItem, ERR_SANDBOX_LOCKED_APPSTORE};
+use obfstr::obfstr;
+use pairing::UnifiedPairing;
+use rsd::RsdTunnelSession;
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 use std::sync::Mutex;
+use std::time::Duration;
 use tunnel::{
-    LockdownClient, LockdownError, LockdownErrorKind, LockdownStage, DEFAULT_LOCALDEV_IP,
-    DEFAULT_LOCKDOWN_PORT, MAX_HANDSHAKE_ATTEMPTS,
+    LockdownClient, LockdownError, LockdownErrorKind, LockdownStage, LockdownStream,
+    DEFAULT_LOCALDEV_IP, DEFAULT_LOCKDOWN_PORT, DEFAULT_REMOTE_PAIRING_PORT, MAX_HANDSHAKE_ATTEMPTS,
 };
 
-/// Status Codes: distinguishes Pairing file validity, VPN/socket resets, and Remote Pairing format
+/// Status Codes: distinguishes Pairing file validity, VPN/socket resets, and Remote Pairing state
 #[repr(i32)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum LocalDevStatusCode {
@@ -45,7 +53,7 @@ pub struct TunnelCandidate {
 }
 
 fn default_tunnel_port() -> u16 {
-    DEFAULT_LOCKDOWN_PORT
+    DEFAULT_REMOTE_PAIRING_PORT
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -68,7 +76,8 @@ pub struct LocalDevManager {
     pub candidates: Vec<TunnelCandidate>,
     pub local_network_state: i32,
     pub storage_dir: Option<PathBuf>,
-    pub active_pairing: Option<PairingFile>,
+    pub active_pairing: Option<UnifiedPairing>,
+    pub active_rsd: Option<RsdTunnelSession>,
     pub heartbeat: HeartbeatService,
 }
 
@@ -82,13 +91,21 @@ impl LocalDevManager {
     pub fn new() -> Self {
         Self {
             host: DEFAULT_LOCALDEV_IP.to_string(),
-            port: DEFAULT_LOCKDOWN_PORT,
+            port: DEFAULT_REMOTE_PAIRING_PORT,
             active_iface: None,
             candidates: Vec::new(),
             local_network_state: 0,
             storage_dir: None,
             active_pairing: None,
+            active_rsd: None,
             heartbeat: HeartbeatService::new(),
+        }
+    }
+
+    fn reset_active_connections(&mut self) {
+        self.heartbeat.stop();
+        if let Some(sess) = self.active_rsd.take() {
+            sess.close();
         }
     }
 
@@ -119,66 +136,72 @@ impl LocalDevManager {
         self.local_network_state = local_network_state;
     }
 
-    pub fn effective_candidates(&self) -> Vec<TunnelCandidate> {
+    /// Ordered non-loopback `utun` hosts (`10.7.0.1` / `dstaddr` / peer -> IPv6 -> `127.0.0.1` last) paired with `target_port`.
+    pub fn effective_candidates_for_port(&self, target_port: u16) -> Vec<TunnelCandidate> {
         let mut ordered: Vec<TunnelCandidate> = Vec::new();
-        let mut push_unique = |cand: TunnelCandidate| {
-            let trimmed = cand.host.trim();
+        let mut push_host = |host: &str, port: u16, iface: Option<String>, source: Option<String>| {
+            let trimmed = host.trim();
             if trimmed.is_empty() {
                 return;
             }
-            let port = if cand.port > 0 { cand.port } else { DEFAULT_LOCKDOWN_PORT };
             if !ordered.iter().any(|e| e.host == trimmed && e.port == port) {
                 ordered.push(TunnelCandidate {
                     host: trimmed.to_string(),
                     port,
-                    iface: cand.iface,
-                    source: cand.source,
+                    iface,
+                    source,
                 });
             }
         };
 
-        // Keep previously verified working non-loopback endpoint first only if still listed or live
         if self.active_iface.is_some() && self.host != "127.0.0.1" {
-            let present = self
-                .candidates
-                .iter()
-                .find(|c| c.host == self.host && c.port == self.port)
-                .cloned();
-            if let Some(c) = present {
-                push_unique(c);
+            if let Some(c) = self.candidates.iter().find(|c| c.host == self.host) {
+                push_host(&c.host, target_port, c.iface.clone(), c.source.clone());
             }
         }
 
+        // First pass: non-loopback `utun` addresses
         for c in &self.candidates {
-            push_unique(c.clone());
+            if c.host != "127.0.0.1" {
+                push_host(&c.host, target_port, c.iface.clone(), c.source.clone());
+            }
         }
 
         if self.host != "127.0.0.1" && !self.host.trim().is_empty() {
-            push_unique(TunnelCandidate {
-                host: self.host.clone(),
-                port: self.port,
-                iface: self.active_iface.clone(),
-                source: Some("configured-host".to_string()),
-            });
+            push_host(&self.host, target_port, self.active_iface.clone(), Some("configured-host".to_string()));
         }
 
-        for (ip, src) in [
-            ("10.7.0.1", "standard-localdev"),
-            ("10.7.0.0", "standard-localdev"),
-            ("127.0.0.1", "loopback-fallback"),
-        ] {
-            push_unique(TunnelCandidate {
-                host: ip.to_string(),
-                port: DEFAULT_LOCKDOWN_PORT,
-                iface: if ip == "127.0.0.1" { Some("lo0".to_string()) } else { None },
-                source: Some(src.to_string()),
-            });
+        for (ip, src) in [("10.7.0.1", "standard-localdev"), ("10.7.0.0", "standard-localdev")] {
+            push_host(ip, target_port, None, Some(src.to_string()));
         }
+
+        // Loopback strictly last fallback
+        for c in &self.candidates {
+            if c.host == "127.0.0.1" {
+                push_host(&c.host, target_port, c.iface.clone(), c.source.clone());
+            }
+        }
+        push_host("127.0.0.1", target_port, Some("lo0".to_string()), Some("loopback-fallback".to_string()));
 
         ordered
     }
 
-    /// Initializes storage directory and loads saved pairing file
+    pub fn effective_candidates(&self) -> Vec<TunnelCandidate> {
+        let preferred_port = self
+            .active_pairing
+            .as_ref()
+            .and_then(|p| p.tunnel_port)
+            .unwrap_or(DEFAULT_REMOTE_PAIRING_PORT);
+        let mut combined = self.effective_candidates_for_port(preferred_port);
+        for c in &self.candidates {
+            if c.port > 0 && !combined.iter().any(|e| e.host == c.host && e.port == c.port) {
+                combined.push(c.clone());
+            }
+        }
+        combined
+    }
+
+    /// Initializes storage directory and loads saved pairing file (RemotePairing and/or Lockdown)
     pub fn init(&mut self, storage_path: Option<&str>, host: Option<&str>, port: Option<u16>) {
         if let Some(h) = host {
             if !h.trim().is_empty() {
@@ -193,125 +216,72 @@ impl LocalDevManager {
         if let Some(sp) = storage_path {
             let path = PathBuf::from(sp);
             self.storage_dir = Some(path.clone());
-            if let Ok(loaded) = PairingFile::load_from_dir(&path) {
+            if let Some(Ok(loaded)) = UnifiedPairing::load_any_from_dir(&path) {
                 self.active_pairing = Some(loaded);
             }
         }
     }
 
-    /// Imports a new pairing file from raw data and persists it
+    /// Imports a new pairing file (Remote Pairing `idevice_pair v1.2.0`, Lockdown X.509, or composite)
     pub fn import_pairing(&mut self, data: &[u8]) -> Result<LocalDevStatusReport, String> {
-        match PairingFile::parse(data) {
-            Ok(parsed) => {
-                if let Some(ref dir) = self.storage_dir {
-                    let _ = std::fs::remove_file(dir.join("remote_pairing.plist"));
-                    let _ = parsed.save_to_dir(dir);
-                }
-                self.active_pairing = Some(parsed);
-                self.check_status_report()
-            }
-            Err(err) if err.starts_with("REMOTE_PAIRING_UNSUPPORTED:") => {
-                self.active_pairing = None;
-                self.heartbeat.stop();
-                if let Some(ref dir) = self.storage_dir {
-                    if !dir.exists() {
-                        let _ = std::fs::create_dir_all(dir);
-                    }
-                    let _ = std::fs::remove_file(dir.join("pairing.mobiledevicepairing"));
-                    let _ = std::fs::remove_file(dir.join("pairing.plist"));
-                    let _ = std::fs::write(dir.join("remote_pairing.plist"), data);
-                }
-                let probe_hosts: Vec<String> = self
-                    .effective_candidates()
-                    .into_iter()
-                    .filter(|c| c.host != "127.0.0.1")
-                    .map(|c| c.host)
-                    .collect();
-                let rsd_notes = tunnel::probe_rsd_and_remotepairing(&probe_hosts);
-                Ok(remote_pairing_unsupported_report(
-                    self.host.clone(),
-                    self.port,
-                    self.active_iface.clone(),
-                    &rsd_notes,
-                ))
-            }
-            Err(err) => Err(err),
+        let parsed = UnifiedPairing::parse(data)?;
+        self.reset_active_connections();
+        if let Some(ref dir) = self.storage_dir {
+            parsed.save_to_dir(dir)?;
         }
+        if let Some(custom_port) = parsed.tunnel_port {
+            self.port = custom_port;
+        } else if parsed.remote.is_some() {
+            self.port = DEFAULT_REMOTE_PAIRING_PORT;
+        }
+        self.active_pairing = Some(parsed);
+        self.check_status_report()
     }
 
-    /// Evaluates current LocalDev status and returns structured report (`code` 1..7)
+    /// Evaluates current LocalDev status prioritizing `10.7.0.1:49152` RemotePairing/RSD over `62078` Lockdown.
     pub fn check_status_report(&mut self) -> Result<LocalDevStatusReport, String> {
-        // Sync with disk in case user cleared `.localdev/pairing.*` or saved a Remote Pairing plist
         if let Some(ref dir) = self.storage_dir {
-            let remote_path = dir.join("remote_pairing.plist");
-            let has_saved = dir.join("pairing.mobiledevicepairing").exists()
-                || dir.join("pairing.plist").exists();
-            if remote_path.exists() && !has_saved {
-                self.active_pairing = None;
-                self.heartbeat.stop();
-                let probe_hosts: Vec<String> = self
-                    .effective_candidates()
-                    .into_iter()
-                    .filter(|c| c.host != "127.0.0.1")
-                    .map(|c| c.host)
-                    .collect();
-                let rsd_notes = tunnel::probe_rsd_and_remotepairing(&probe_hosts);
-                return Ok(remote_pairing_unsupported_report(
-                    self.host.clone(),
-                    self.port,
-                    self.active_iface.clone(),
-                    &rsd_notes,
-                ));
-            }
-            if !has_saved {
-                self.active_pairing = None;
-                self.heartbeat.stop();
-            } else if self.active_pairing.is_none() {
-                if let Some(load_res) = PairingFile::load_any_from_dir(dir) {
-                    match load_res {
-                        Ok(loaded) => self.active_pairing = Some(loaded),
-                        Err(err) if err.starts_with("REMOTE_PAIRING_UNSUPPORTED:") => {
-                            self.heartbeat.stop();
-                            let probe_hosts: Vec<String> = self
-                                .effective_candidates()
-                                .into_iter()
-                                .filter(|c| c.host != "127.0.0.1")
-                                .map(|c| c.host)
-                                .collect();
-                            let rsd_notes = tunnel::probe_rsd_and_remotepairing(&probe_hosts);
-                            return Ok(remote_pairing_unsupported_report(
-                                self.host.clone(),
-                                self.port,
-                                self.active_iface.clone(),
-                                &rsd_notes,
-                            ));
-                        }
-                        Err(err) => {
-                            self.heartbeat.stop();
-                            return Ok(LocalDevStatusReport {
-                                code: LocalDevStatusCode::PairingExpiredOrCorrupt as i32,
-                                status: "PAIRING FILE HẾT HẠN / LỖI".to_string(),
-                                message: format!("Không thể phân tích tệp pairing đã lưu: {}", err),
-                                host: self.host.clone(),
-                                port: self.port,
-                                interface_name: self.active_iface.clone(),
-                                udid: None,
-                                is_heartbeat_alive: false,
-                            });
-                        }
+            match UnifiedPairing::load_any_from_dir(dir) {
+                None => {
+                    self.active_pairing = None;
+                    self.reset_active_connections();
+                }
+                Some(Ok(loaded)) => {
+                    let changed = self.active_pairing.as_ref().is_none_or(|cur| {
+                        cur.udid != loaded.udid
+                            || cur.remote.is_some() != loaded.remote.is_some()
+                            || cur.lockdown.is_some() != loaded.lockdown.is_some()
+                            || cur.tunnel_port != loaded.tunnel_port
+                    });
+                    if changed {
+                        self.reset_active_connections();
+                        self.active_pairing = Some(loaded);
                     }
+                }
+                Some(Err(err)) => {
+                    self.active_pairing = None;
+                    self.reset_active_connections();
+                    return Ok(LocalDevStatusReport {
+                        code: LocalDevStatusCode::PairingExpiredOrCorrupt as i32,
+                        status: "PAIRING FILE HẾT HẠN / LỖI".to_string(),
+                        message: format!("Không thể phân tích tệp pairing đã lưu: {}", err),
+                        host: self.host.clone(),
+                        port: self.port,
+                        interface_name: self.active_iface.clone(),
+                        udid: None,
+                        is_heartbeat_alive: false,
+                    });
                 }
             }
         }
 
-        // 1. Check if pairing file exists
         let pairing = match &self.active_pairing {
             Some(p) => p.clone(),
             None => {
                 return Ok(LocalDevStatusReport {
                     code: LocalDevStatusCode::MissingPairing as i32,
                     status: "CHƯA CÓ PAIRING FILE".to_string(),
-                    message: "Vui lòng nhập tệp .mobiledevicepairing để kết nối LocalDev (Sandbox & Nhật ký USB vẫn dùng bình thường).".to_string(),
+                    message: "Vui lòng nhập tệp pairing (Remote Pairing hoặc .mobiledevicepairing) để kết nối LocalDev (Sandbox & Nhật ký USB vẫn dùng bình thường).".to_string(),
                     host: self.host.clone(),
                     port: self.port,
                     interface_name: self.active_iface.clone(),
@@ -321,65 +291,203 @@ impl LocalDevManager {
             }
         };
 
-        // 2. Probe all dynamic candidates sequentially (`utun dstaddr` -> `10.7.0.1` -> `10.7.0.0` -> `127.0.0.1`)
-        let candidates = self.effective_candidates();
-        let mut attempts: Vec<EndpointAttempt> = Vec::with_capacity(candidates.len());
+        // Reuse active verified RSD tunnel if healthy
+        if let Some(ref sess) = self.active_rsd {
+            if sess.verify_alive().is_ok() {
+                let iface_label = sess.endpoint_iface_label();
+                self.host = sess.endpoint_host.clone();
+                self.port = sess.endpoint_port;
+                self.active_iface = sess.iface.clone();
+                let verified_udid = if sess.udid.is_empty() {
+                    pairing.udid.clone()
+                } else {
+                    sess.udid.clone()
+                };
+                return Ok(LocalDevStatusReport {
+                    code: LocalDevStatusCode::Live as i32,
+                    status: "LOCALDEV LIVE".to_string(),
+                    message: format_live_rsd_message(
+                        &self.host,
+                        self.port,
+                        &iface_label,
+                        &verified_udid,
+                        sess.product_type.as_deref(),
+                        sess.os_version.as_deref(),
+                        sess.services.len(),
+                    ),
+                    host: self.host.clone(),
+                    port: self.port,
+                    interface_name: Some(iface_label),
+                    udid: Some(verified_udid),
+                    is_heartbeat_alive: true,
+                });
+            }
+            if let Some(stale) = self.active_rsd.take() {
+                stale.close();
+            }
+        }
 
-        for cand in candidates {
-            match LockdownClient::connect_with_retry(
-                &cand.host,
-                cand.port,
-                &pairing,
-                MAX_HANDSHAKE_ATTEMPTS,
-            ) {
-                Ok(client) => {
-                    self.host = cand.host.clone();
-                    self.port = cand.port;
-                    self.active_iface = cand.iface.clone();
+        // Priority #1: Probe RemotePairing / RSD port (`tunnel_port` or `49152`) across active `utun` hosts
+        let rp_port = pairing.tunnel_port.unwrap_or(DEFAULT_REMOTE_PAIRING_PORT);
+        let rp_candidates = self.effective_candidates_for_port(rp_port);
+        let mut rp_attempts: Vec<EndpointAttempt> = Vec::new();
+        let mut open_rp_endpoints: Vec<TunnelCandidate> = Vec::new();
 
-                    let verified_udid = client
-                        .device_udid
-                        .filter(|u| !u.is_empty())
-                        .unwrap_or_else(|| pairing.udid.clone());
+        for cand in &rp_candidates {
+            if cand.host == "127.0.0.1" && !open_rp_endpoints.is_empty() {
+                continue;
+            }
+            match tunnel::probe_tcp_open(&cand.host, cand.port, Duration::from_millis(800)) {
+                Ok(()) => open_rp_endpoints.push(cand.clone()),
+                Err(err) => rp_attempts.push(EndpointAttempt {
+                    cand: cand.clone(),
+                    err,
+                }),
+            }
+        }
 
-                    if !self.heartbeat.is_active() {
-                        self.heartbeat
-                            .start(pairing.clone(), self.host.clone(), self.port);
+        // If `49152` (or custom RemotePairing port) is OPEN on `utun`, commit exclusively to RemotePairing/RSD
+        // and NEVER fall back to legacy `62078` LockdownClient (`ECONNRESET / os error 54` on iOS 27.2.1).
+        if !open_rp_endpoints.is_empty() {
+            let mut rsd_connect_attempts: Vec<EndpointAttempt> = Vec::new();
+            let mut saw_not_rp_and_no_lockdown = false;
+
+            for cand in open_rp_endpoints {
+                if let Some(ref rp_file) = pairing.remote {
+                    match RsdTunnelSession::connect_remote_pairing(
+                        &cand.host,
+                        cand.port,
+                        cand.iface.clone(),
+                        rp_file,
+                    ) {
+                        Ok(session) => {
+                            return Ok(self.activate_rsd_session(session, &pairing.udid));
+                        }
+                        Err(err) => {
+                            rsd_connect_attempts.push(EndpointAttempt { cand, err });
+                        }
                     }
-
-                    let via_str = cand
-                        .iface
-                        .as_deref()
-                        .map(|i| format!(" qua {}", i))
-                        .unwrap_or_default();
-
-                    return Ok(LocalDevStatusReport {
-                        code: LocalDevStatusCode::Live as i32,
-                        status: "LOCALDEV LIVE".to_string(),
-                        message: format!(
-                            "Kết nối LocalDev thành công tại {}:{}{} (UDID: {})",
-                            self.host, self.port, via_str, verified_udid
-                        ),
-                        host: self.host.clone(),
-                        port: self.port,
-                        interface_name: self.active_iface.clone(),
-                        udid: Some(verified_udid),
-                        is_heartbeat_alive: true,
-                    });
+                } else {
+                    // Only classic Lockdown file present while `49152` is OPEN: try Direct HTTP/2 RSD just in case
+                    match RsdTunnelSession::connect_direct_rsd(
+                        &cand.host,
+                        cand.port,
+                        cand.iface.clone(),
+                    ) {
+                        Ok(session) => {
+                            return Ok(self.activate_rsd_session(session, &pairing.udid));
+                        }
+                        Err(err) => {
+                            saw_not_rp_and_no_lockdown = true;
+                            self.host = cand.host.clone();
+                            self.port = cand.port;
+                            self.active_iface = cand.iface.clone();
+                            rsd_connect_attempts.push(EndpointAttempt { cand, err });
+                        }
+                    }
                 }
-                Err(err) => {
-                    attempts.push(EndpointAttempt { cand, err });
+            }
+
+            if saw_not_rp_and_no_lockdown && pairing.remote.is_none() {
+                let first = rsd_connect_attempts.first();
+                let ep_host = first.map(|a| a.cand.host.clone()).unwrap_or_else(|| self.host.clone());
+                let ep_port = first.map(|a| a.cand.port).unwrap_or(rp_port);
+                let ep_iface = first
+                    .and_then(|a| a.cand.iface.clone())
+                    .map(|i| format!("{} · RSD", i))
+                    .or_else(|| Some("RSD".to_string()));
+                return Ok(LocalDevStatusReport {
+                    code: LocalDevStatusCode::RemotePairingUnsupported as i32,
+                    status: "CẦN FILE REMOTE PAIRING CHO CỔNG 49152".to_string(),
+                    message: format!(
+                        "Phát hiện cổng RemotePairing/RSD {}:{} đang OPEN (iOS 27.2.1 đã đóng cổng Lockdown 62078). Tệp hiện tại chỉ có Lockdown X.509 cũ — hãy tạo & nhập tệp Remote Pairing từ `idevice_pair` (chứa `public_key`, `private_key`, `identifier`, `alt_irk`).",
+                        ep_host, ep_port
+                    ),
+                    host: ep_host,
+                    port: ep_port,
+                    interface_name: ep_iface,
+                    udid: Some(pairing.udid),
+                    is_heartbeat_alive: false,
+                });
+            }
+
+            return Ok(build_multi_failure_report(
+                &rsd_connect_attempts,
+                self.local_network_state,
+                &pairing.udid,
+                &[],
+            ));
+        }
+
+        // Priority #2 (Fallback): Check Direct HTTP/2 RSD on `58783` if open, or classic `62078` Lockdown (older iOS)
+        let rsd_58783_candidates = self.effective_candidates_for_port(58783);
+        for cand in rsd_58783_candidates.iter().take(2) {
+            if cand.host != "127.0.0.1"
+                && tunnel::probe_tcp_open(&cand.host, 58783, Duration::from_millis(500)).is_ok()
+            {
+                if let Ok(session) = RsdTunnelSession::connect_direct_rsd(&cand.host, 58783, cand.iface.clone()) {
+                    return Ok(self.activate_rsd_session(session, &pairing.udid));
                 }
             }
         }
 
-        let probe_hosts: Vec<String> = self
-            .effective_candidates()
-            .into_iter()
+        let mut all_attempts = Vec::new();
+        if let Some(ref lockdown_pairing) = pairing.lockdown {
+            let lockdown_candidates = self.effective_candidates_for_port(DEFAULT_LOCKDOWN_PORT);
+            for cand in lockdown_candidates {
+                match LockdownClient::connect_with_retry(
+                    &cand.host,
+                    cand.port,
+                    lockdown_pairing,
+                    MAX_HANDSHAKE_ATTEMPTS,
+                ) {
+                    Ok(client) => {
+                        self.host = cand.host.clone();
+                        self.port = cand.port;
+                        self.active_iface = cand.iface.clone();
+                        let verified_udid = client
+                            .device_udid
+                            .filter(|u| !u.is_empty())
+                            .unwrap_or_else(|| lockdown_pairing.udid.clone());
+
+                        if !self.heartbeat.is_active() {
+                            self.heartbeat
+                                .start(lockdown_pairing.clone(), self.host.clone(), self.port);
+                        }
+
+                        let via_str = cand
+                            .iface
+                            .as_deref()
+                            .map(|i| format!(" qua {}", i))
+                            .unwrap_or_default();
+
+                        return Ok(LocalDevStatusReport {
+                            code: LocalDevStatusCode::Live as i32,
+                            status: "LOCALDEV LIVE".to_string(),
+                            message: format!(
+                                "Kết nối Lockdown thành công tại {}:{}{} (UDID: {})",
+                                self.host, self.port, via_str, verified_udid
+                            ),
+                            host: self.host.clone(),
+                            port: self.port,
+                            interface_name: self.active_iface.clone(),
+                            udid: Some(verified_udid),
+                            is_heartbeat_alive: true,
+                        });
+                    }
+                    Err(err) => all_attempts.push(EndpointAttempt { cand, err }),
+                }
+            }
+        } else {
+            all_attempts.extend(rp_attempts);
+        }
+
+        let probe_hosts: Vec<String> = rp_candidates
+            .iter()
             .filter(|c| c.host != "127.0.0.1")
-            .map(|c| c.host)
+            .map(|c| c.host.clone())
             .collect();
-        let rsd_notes = if attempts
+        let rsd_notes = if all_attempts
             .iter()
             .any(|a| matches!(a.err.kind, LockdownErrorKind::SocketReset | LockdownErrorKind::ProtocolError))
         {
@@ -389,30 +497,293 @@ impl LocalDevManager {
         };
 
         Ok(build_multi_failure_report(
-            &attempts,
+            &all_attempts,
             self.local_network_state,
             &pairing.udid,
             &rsd_notes,
         ))
     }
 
-    /// Scans installed applications over `installation_proxy`
+    fn activate_rsd_session(
+        &mut self,
+        session: RsdTunnelSession,
+        fallback_udid: &str,
+    ) -> LocalDevStatusReport {
+        self.heartbeat.stop();
+        if let Some(old) = self.active_rsd.take() {
+            old.close();
+        }
+        let host = session.endpoint_host.clone();
+        let port = session.endpoint_port;
+        let iface_label = session.endpoint_iface_label();
+        let udid = if session.udid.is_empty() {
+            fallback_udid.to_string()
+        } else {
+            session.udid.clone()
+        };
+        let msg = format_live_rsd_message(
+            &host,
+            port,
+            &iface_label,
+            &udid,
+            session.product_type.as_deref(),
+            session.os_version.as_deref(),
+            session.services.len(),
+        );
+        self.host = host.clone();
+        self.port = port;
+        self.active_iface = session.iface.clone();
+        self.active_rsd = Some(session);
+
+        LocalDevStatusReport {
+            code: LocalDevStatusCode::Live as i32,
+            status: "LOCALDEV LIVE".to_string(),
+            message: msg,
+            host,
+            port,
+            interface_name: Some(iface_label),
+            udid: Some(udid),
+            is_heartbeat_alive: true,
+        }
+    }
+
+    fn ensure_backend(&mut self) -> Result<bool, String> {
+        if self.active_rsd.is_some() {
+            return Ok(true);
+        }
+        let report = self.check_status_report()?;
+        if self.active_rsd.is_some() {
+            return Ok(true);
+        }
+        if report.code == LocalDevStatusCode::Live as i32 {
+            return Ok(false);
+        }
+        Err(report.message)
+    }
+
+    fn reconnect_rsd_once(&mut self) -> Result<(), String> {
+        if let Some(stale) = self.active_rsd.take() {
+            stale.close();
+        }
+        let report = self.check_status_report()?;
+        if self.active_rsd.is_some() {
+            Ok(())
+        } else {
+            Err(report.message)
+        }
+    }
+
+    /// Scans installed user apps via active RSD (`installation_proxy.shim.remote` / `coredevice.appservice`)
+    /// or classic `62078` Lockdown fallback.
     pub fn scan_apps(&mut self) -> Result<Vec<apps::LocalDevAppInfo>, String> {
-        let pairing = self
+        if self.ensure_backend()? {
+            let first = self
+                .active_rsd
+                .as_ref()
+                .ok_or_else(|| "RSD session unavailable".to_string())?
+                .scan_apps();
+            if let Ok(apps) = first {
+                return Ok(apps);
+            }
+            if self.reconnect_rsd_once().is_ok() {
+                if let Some(ref sess) = self.active_rsd {
+                    return sess.scan_apps();
+                }
+            }
+            return first;
+        }
+
+        let lockdown_pairing = self
             .active_pairing
             .as_ref()
-            .ok_or_else(|| "Chưa có pairing file".to_string())?;
+            .and_then(|p| p.lockdown.as_ref())
+            .ok_or_else(|| "Chưa có pairing file Lockdown hợp lệ".to_string())?;
         let candidate_pairs: Vec<(String, u16)> = self
-            .effective_candidates()
+            .effective_candidates_for_port(DEFAULT_LOCKDOWN_PORT)
             .into_iter()
             .map(|c| (c.host, c.port))
             .collect();
         let (apps, connected_host, connected_port) =
-            apps::AppScanner::scan_user_apps_with_candidates(&candidate_pairs, pairing)?;
+            apps::AppScanner::scan_user_apps_with_candidates(&candidate_pairs, lockdown_pairing)?;
         self.host = connected_host;
         self.port = connected_port;
         Ok(apps)
     }
+
+    fn with_afc_client<T>(
+        &mut self,
+        service_type: i32,
+        bundle_id: &str,
+        op: impl Fn(AfcClient, String) -> Result<T, String>,
+    ) -> Result<T, String> {
+        let is_rsd = self.ensure_backend()?;
+        let ha_rsd = obfstr!("com.apple.mobile.house_arrest.shim.remote").to_string();
+        let ha_classic = obfstr!("com.apple.mobile.house_arrest").to_string();
+        let afc2_svc = obfstr!("com.apple.afc2").to_string();
+        let afc_rsd = obfstr!("com.apple.afc.shim.remote").to_string();
+        let afc_classic = obfstr!("com.apple.afc").to_string();
+
+        if is_rsd {
+            let open_pair = |sess: &RsdTunnelSession| -> Result<(AfcClient, String), String> {
+                if service_type == ffi::SERVICE_TYPE_HOUSE_ARREST {
+                    HouseArrestClient::connect_app_container_with_opener(
+                        || {
+                            let s = sess.open_checked_in_service(&[ha_rsd.as_str(), ha_classic.as_str()])?;
+                            Ok(LockdownStream::RsdTunnel(s))
+                        },
+                        bundle_id,
+                    )
+                } else {
+                    for (svc, mode) in [
+                        (afc2_svc.as_str(), "afc2"),
+                        (afc_rsd.as_str(), "afc"),
+                        (afc_classic.as_str(), "afc"),
+                    ] {
+                        if let Ok(s) = sess.open_checked_in_service(&[svc]) {
+                            return Ok((AfcClient::new(LockdownStream::RsdTunnel(s)), mode.to_string()));
+                        }
+                    }
+                    Err("RSD không hỗ trợ dịch vụ AFC".to_string())
+                }
+            };
+
+            let sess = self
+                .active_rsd
+                .as_ref()
+                .ok_or_else(|| "RSD session unavailable".to_string())?;
+            let first = open_pair(sess).and_then(|(afc, mode)| op(afc, mode));
+            match first {
+                Ok(v) => return Ok(v),
+                Err(err) if err.contains(ERR_SANDBOX_LOCKED_APPSTORE) => return Err(err),
+                Err(err) => {
+                    if self.reconnect_rsd_once().is_ok() {
+                        if let Some(ref new_sess) = self.active_rsd {
+                            if let Ok((afc, mode)) = open_pair(new_sess) {
+                                return op(afc, mode);
+                            }
+                        }
+                    }
+                    return Err(err);
+                }
+            }
+        }
+
+        let lockdown_pairing = self
+            .active_pairing
+            .as_ref()
+            .and_then(|p| p.lockdown.as_ref())
+            .ok_or_else(|| "Chưa có pairing file".to_string())?;
+        if service_type == ffi::SERVICE_TYPE_HOUSE_ARREST {
+            let (afc, mode) = HouseArrestClient::connect_app_container(
+                &self.host,
+                self.port,
+                lockdown_pairing,
+                bundle_id,
+            )?;
+            op(afc, mode)
+        } else {
+            let (afc, mode) = AfcClient::connect_device_afc(&self.host, self.port, lockdown_pairing)?;
+            op(afc, mode)
+        }
+    }
+
+    pub fn list_dir_detailed(
+        &mut self,
+        service_type: i32,
+        bundle_id: &str,
+        path: &str,
+    ) -> Result<(Vec<String>, Vec<HouseArrestDirItem>, String), String> {
+        let path_owned = path.to_string();
+        self.with_afc_client(service_type, bundle_id, move |mut afc, mode| {
+            if service_type == ffi::SERVICE_TYPE_HOUSE_ARREST {
+                HouseArrestClient::list_dir_detailed_with_afc(afc, mode, &path_owned)
+            } else {
+                let entries = afc.list_dir(&path_owned)?;
+                let prefix = path_owned.trim_end_matches('/');
+                let mut items = Vec::with_capacity(entries.len());
+                for name in &entries {
+                    let full = if prefix.is_empty() {
+                        format!("/{}", name)
+                    } else {
+                        format!("{}/{}", prefix, name)
+                    };
+                    let info = afc.get_file_info(&full).unwrap_or_default();
+                    let is_dir = info.get("st_ifmt").map(|v| v == "S_IFDIR").unwrap_or(false);
+                    let size = if is_dir {
+                        -1
+                    } else {
+                        info.get("st_size")
+                            .and_then(|s| s.parse::<i64>().ok())
+                            .unwrap_or(0)
+                    };
+                    items.push(HouseArrestDirItem {
+                        name: name.clone(),
+                        is_dir,
+                        size,
+                    });
+                }
+                Ok((entries, items, mode))
+            }
+        })
+    }
+
+    pub fn read_file(
+        &mut self,
+        service_type: i32,
+        bundle_id: &str,
+        path: &str,
+    ) -> Result<Vec<u8>, String> {
+        let path_owned = path.to_string();
+        self.with_afc_client(service_type, bundle_id, move |mut afc, mode| {
+            if service_type == ffi::SERVICE_TYPE_HOUSE_ARREST {
+                HouseArrestClient::read_file_with_afc(afc, &mode, &path_owned)
+            } else {
+                afc.read_file_full(&path_owned)
+            }
+        })
+    }
+
+    pub fn write_file(
+        &mut self,
+        service_type: i32,
+        bundle_id: &str,
+        path: &str,
+        data: &[u8],
+    ) -> Result<(), String> {
+        let path_owned = path.to_string();
+        let data_owned = data.to_vec();
+        self.with_afc_client(service_type, bundle_id, move |mut afc, mode| {
+            if service_type == ffi::SERVICE_TYPE_HOUSE_ARREST {
+                HouseArrestClient::write_file_safe_with_afc(afc, &mode, &path_owned, &data_owned)
+            } else {
+                if let Ok(existing) = afc.read_file_full(&path_owned) {
+                    let backup_path = format!("{}.bak", path_owned);
+                    let _ = afc.write_file_full(&backup_path, &existing);
+                }
+                afc.write_file_full(&path_owned, &data_owned)
+            }
+        })
+    }
+}
+
+fn format_live_rsd_message(
+    host: &str,
+    port: u16,
+    iface_label: &str,
+    udid: &str,
+    product_type: Option<&str>,
+    os_version: Option<&str>,
+    svc_count: usize,
+) -> String {
+    let hw = match (product_type, os_version) {
+        (Some(p), Some(v)) => format!(" · {} iOS {}", p, v),
+        (Some(p), None) => format!(" · {}", p),
+        _ => String::new(),
+    };
+    format!(
+        "Kết nối RemotePairing/RSD thành công tại {}:{} ({}){} — {} services, UDID: {}",
+        host, port, iface_label, hw, svc_count, udid
+    )
 }
 
 struct EndpointAttempt {
@@ -446,7 +817,7 @@ fn build_multi_failure_report(
     let fallback = EndpointAttempt {
         cand: TunnelCandidate {
             host: DEFAULT_LOCALDEV_IP.to_string(),
-            port: DEFAULT_LOCKDOWN_PORT,
+            port: DEFAULT_REMOTE_PAIRING_PORT,
             iface: None,
             source: None,
         },
@@ -457,7 +828,6 @@ fn build_multi_failure_report(
         ),
     };
 
-    // 1. Pairing rejected on any endpoint takes highest diagnostic precedence
     if let Some(a) = attempts
         .iter()
         .find(|a| a.err.kind == LockdownErrorKind::PairingRejected)
@@ -477,11 +847,10 @@ fn build_multi_failure_report(
         };
     }
 
-    // 2. TCP connected then reset/protocol mismatch
     if let Some(a) = attempts.iter().find(|a| {
         matches!(
             a.err.kind,
-            LockdownErrorKind::SocketReset | LockdownErrorKind::ProtocolError
+            LockdownErrorKind::SocketReset | LockdownErrorKind::ProtocolError | LockdownErrorKind::TlsHandshake
         )
     }) {
         let via = a
@@ -499,7 +868,7 @@ fn build_multi_failure_report(
             code: LocalDevStatusCode::TunnelReset as i32,
             status: "SOCKET/DAEMON RESET KHI BẮT TAY".to_string(),
             message: format!(
-                "Socket {}:{}{} bị ngắt ở bước [{}] ({}). Thử: [{}]{}. Trên iOS 27.2.1 hãy kiểm tra tệp pairing Lockdown (HostCertificate/HostID còn hiệu lực) hoặc cấu hình LocalDevVPN; Sandbox & Nhật ký USB vẫn hoạt động bình thường.",
+                "Socket {}:{}{} bị ngắt ở bước [{}] ({}). Thử: [{}]{}. Hãy kiểm tra tệp Remote Pairing (`idevice_pair`) hoặc khởi động lại LocalDevVPN; Sandbox & Nhật ký USB vẫn hoạt động bình thường.",
                 a.cand.host, a.cand.port, via, a.err.stage, a.err.detail, summary, rsd_suffix
             ),
             host: a.cand.host.clone(),
@@ -510,7 +879,6 @@ fn build_multi_failure_report(
         };
     }
 
-    // Prefer reporting real `utun` / non-loopback endpoint before loopback fallback
     let primary = attempts
         .iter()
         .find(|a| a.cand.host != "127.0.0.1")
@@ -544,8 +912,6 @@ fn build_multi_failure_report(
         };
     }
 
-    // 3. Do NOT lump every EPERM into "CHƯA CẤP QUYỀN MẠNG CỤC BỘ" when Local Network is already confirmed OK
-    // or when `utun` timed out / refused while only loopback `127.0.0.1` hit `EPERM`.
     let has_utun_network_failure = attempts
         .iter()
         .any(|a| a.cand.host != "127.0.0.1" && a.err.kind != LockdownErrorKind::PermissionDenied);
@@ -601,41 +967,16 @@ fn build_multi_failure_report(
     }
 }
 
-fn remote_pairing_unsupported_report(
-    host: String,
-    port: u16,
-    iface: Option<String>,
-    rsd_notes: &[String],
-) -> LocalDevStatusReport {
-    let rsd_info = if rsd_notes.is_empty() {
-        "Chưa phát hiện cổng RSD:58783/RP:49152 mở sẵn trên utun".to_string()
-    } else {
-        format!("Dò tunnel: [{}]", rsd_notes.join(", "))
-    };
-    LocalDevStatusReport {
-        code: LocalDevStatusCode::RemotePairingUnsupported as i32,
-        status: "REMOTE PAIRING / CHƯA CÓ X.509 LOCKDOWN".to_string(),
-        message: format!(
-            "Đã nhận diện file Remote Pairing (public_key/private_key/identifier/alt_irk). {} — Core libsec_core.dylib hiện kết nối AFC/HouseArrest qua Direct Lockdown X.509 (`HostCertificate` + `HostPrivateKey` trên cổng 62078), chưa bao gồm đầy đủ ngăn xếp TLS-PSK/CDTunnel/RemoteXPC HTTP2 cho RPPairing. Hãy xuất pairing chuẩn Lockdown X.509 hoặc tắt LocalDev để dùng thẳng Sandbox & Nhật ký USB.",
-            rsd_info
-        ),
-        host,
-        port,
-        interface_name: iface,
-        udid: None,
-        is_heartbeat_alive: false,
-    }
-}
-
 static LOCALDEV_INSTANCE: Mutex<Option<LocalDevManager>> = Mutex::new(None);
 
 pub fn with_manager<F, R>(f: F) -> R
 where
     F: FnOnce(&mut LocalDevManager) -> R,
 {
-    let mut guard = LOCALDEV_INSTANCE.lock().unwrap();
-    if guard.is_none() {
-        *guard = Some(LocalDevManager::new());
-    }
-    f(guard.as_mut().unwrap())
+    let mut guard = match LOCALDEV_INSTANCE.lock() {
+        Ok(g) => g,
+        Err(poisoned) => poisoned.into_inner(),
+    };
+    let manager = guard.get_or_insert_with(LocalDevManager::new);
+    f(manager)
 }

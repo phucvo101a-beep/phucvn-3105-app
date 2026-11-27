@@ -6,7 +6,7 @@
 use super::afc_client::AfcClient;
 use super::pairing::PairingFile;
 use super::plist_util::PlistValue;
-use super::tunnel::{read_plist, send_plist, LockdownClient};
+use super::tunnel::{read_plist, send_plist, LockdownClient, LockdownStream};
 use serde::Serialize;
 use std::collections::HashMap;
 
@@ -22,15 +22,12 @@ pub struct HouseArrestDirItem {
 pub struct HouseArrestClient;
 
 impl HouseArrestClient {
-    /// Connects to `com.apple.mobile.house_arrest` and vends container access for target app
-    pub fn connect_app_container(
-        ip: &str,
-        port: u16,
-        pairing: &PairingFile,
+    /// Vends container access using an arbitrary service stream opener (`RSDCheckin` or Lockdown).
+    pub fn connect_app_container_with_opener(
+        mut open_service: impl FnMut() -> Result<LockdownStream, String>,
         bundle_id: &str,
     ) -> Result<(AfcClient, String), String> {
-        let mut lockdown = LockdownClient::connect(ip, port, pairing)?;
-        let (mut sock, _service_port, _ssl) = lockdown.start_service("com.apple.mobile.house_arrest")?;
+        let mut sock = open_service()?;
 
         // 1. First Tier: Try VendContainer (gives full Documents, Library, tmp for sideloaded/dev apps)
         let mut req = HashMap::new();
@@ -48,8 +45,7 @@ impl HouseArrestClient {
         let err1 = resp.get_string("Error").unwrap_or_default();
 
         // 2. Second Tier Fallback: Try VendDocuments (accessible if UIFileSharingEnabled == true)
-        // Need fresh service connection for the fallback command
-        let (mut fallback_sock, _sp, _ssl) = lockdown.start_service("com.apple.mobile.house_arrest")?;
+        let mut fallback_sock = open_service()?;
         let mut req2 = HashMap::new();
         req2.insert("Command".to_string(), PlistValue::String("VendDocuments".to_string()));
         req2.insert("Identifier".to_string(), PlistValue::String(bundle_id.to_string()));
@@ -70,6 +66,23 @@ impl HouseArrestClient {
         ))
     }
 
+    /// Connects to `com.apple.mobile.house_arrest` and vends container access for target app
+    pub fn connect_app_container(
+        ip: &str,
+        port: u16,
+        pairing: &PairingFile,
+        bundle_id: &str,
+    ) -> Result<(AfcClient, String), String> {
+        let mut lockdown = LockdownClient::connect(ip, port, pairing)?;
+        Self::connect_app_container_with_opener(
+            || {
+                let (sock, _p, _ssl) = lockdown.start_service("com.apple.mobile.house_arrest")?;
+                Ok(sock)
+            },
+            bundle_id,
+        )
+    }
+
     /// Lists directory inside target application sandbox
     #[allow(dead_code)]
     pub fn list_dir(
@@ -84,15 +97,12 @@ impl HouseArrestClient {
         afc.list_dir(&effective_path)
     }
 
-    /// Lists directory entries with metadata (directory flag & size) and granted mode
-    pub fn list_dir_detailed(
-        ip: &str,
-        port: u16,
-        pairing: &PairingFile,
-        bundle_id: &str,
+    /// Lists directory entries with metadata using an already-started `(AfcClient, mode)` session.
+    pub fn list_dir_detailed_with_afc(
+        mut afc: AfcClient,
+        mode: String,
         path: &str,
     ) -> Result<(Vec<String>, Vec<HouseArrestDirItem>, String), String> {
-        let (mut afc, mode) = Self::connect_app_container(ip, port, pairing, bundle_id)?;
         let effective_path = normalize_house_arrest_path(&mode, path);
         let entries = afc.list_dir(&effective_path)?;
         let mut items = Vec::with_capacity(entries.len());
@@ -122,6 +132,24 @@ impl HouseArrestClient {
         Ok((entries, items, mode))
     }
 
+    /// Lists directory entries with metadata (directory flag & size) and granted mode
+    pub fn list_dir_detailed(
+        ip: &str,
+        port: u16,
+        pairing: &PairingFile,
+        bundle_id: &str,
+        path: &str,
+    ) -> Result<(Vec<String>, Vec<HouseArrestDirItem>, String), String> {
+        let (afc, mode) = Self::connect_app_container(ip, port, pairing, bundle_id)?;
+        Self::list_dir_detailed_with_afc(afc, mode, path)
+    }
+
+    /// Reads file bytes from an already-started HouseArrest `(AfcClient, mode)` session.
+    pub fn read_file_with_afc(mut afc: AfcClient, mode: &str, path: &str) -> Result<Vec<u8>, String> {
+        let effective_path = normalize_house_arrest_path(mode, path);
+        afc.read_file_full(&effective_path)
+    }
+
     /// Reads file bytes from target application sandbox
     pub fn read_file(
         ip: &str,
@@ -130,9 +158,27 @@ impl HouseArrestClient {
         bundle_id: &str,
         path: &str,
     ) -> Result<Vec<u8>, String> {
-        let (mut afc, mode) = Self::connect_app_container(ip, port, pairing, bundle_id)?;
-        let effective_path = normalize_house_arrest_path(&mode, path);
-        afc.read_file_full(&effective_path)
+        let (afc, mode) = Self::connect_app_container(ip, port, pairing, bundle_id)?;
+        Self::read_file_with_afc(afc, &mode, path)
+    }
+
+    /// Writes file bytes into an already-started HouseArrest `(AfcClient, mode)` session with `.bak` backup.
+    pub fn write_file_safe_with_afc(
+        mut afc: AfcClient,
+        mode: &str,
+        path: &str,
+        data: &[u8],
+    ) -> Result<(), String> {
+        let effective_path = normalize_house_arrest_path(mode, path);
+
+        // Safety backup: if file already exists, create `<path>.bak` before overwriting
+        if let Ok(existing_bytes) = afc.read_file_full(&effective_path) {
+            let backup_path = format!("{}.bak", effective_path);
+            let _ = afc.write_file_full(&backup_path, &existing_bytes);
+        }
+
+        // Write new file bytes in 128KB chunks
+        afc.write_file_full(&effective_path, data)
     }
 
     /// Writes file bytes into target application sandbox with automatic `.bak` backup
@@ -144,17 +190,8 @@ impl HouseArrestClient {
         path: &str,
         data: &[u8],
     ) -> Result<(), String> {
-        let (mut afc, mode) = Self::connect_app_container(ip, port, pairing, bundle_id)?;
-        let effective_path = normalize_house_arrest_path(&mode, path);
-
-        // Safety backup: if file already exists, create `<path>.bak` before overwriting
-        if let Ok(existing_bytes) = afc.read_file_full(&effective_path) {
-            let backup_path = format!("{}.bak", effective_path);
-            let _ = afc.write_file_full(&backup_path, &existing_bytes);
-        }
-
-        // Write new file bytes in 128KB chunks
-        afc.write_file_full(&effective_path, data)
+        let (afc, mode) = Self::connect_app_container(ip, port, pairing, bundle_id)?;
+        Self::write_file_safe_with_afc(afc, &mode, path, data)
     }
 }
 

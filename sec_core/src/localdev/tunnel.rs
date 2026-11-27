@@ -24,6 +24,7 @@ use rustls::{
 
 pub const DEFAULT_LOCALDEV_IP: &str = "10.7.0.1";
 pub const DEFAULT_LOCKDOWN_PORT: u16 = 62078;
+pub const DEFAULT_REMOTE_PAIRING_PORT: u16 = 49152;
 pub const REACHABILITY_TIMEOUT_MS: u64 = 1500;
 pub const HANDSHAKE_CONNECT_TIMEOUT_MS: u64 = 1500;
 pub const HANDSHAKE_IO_TIMEOUT_SECS: u64 = 5;
@@ -432,19 +433,20 @@ impl Write for TransportStream {
 /// Active TLS stream over unified transport stream
 pub type TlsStream = StreamOwned<ClientConnection, TransportStream>;
 
-/// Unified transport stream for lockdownd and child services (`EnableServiceSSL` aware)
+/// Unified transport stream for lockdownd and child services (`EnableServiceSSL` and RSD tunnel aware)
 pub enum LockdownStream {
     Plain(TransportStream),
     Tls(Box<TlsStream>),
+    RsdTunnel(super::rsd::SyncTunnelStream),
 }
 
 impl LockdownStream {
     pub fn set_timeouts(&self, read_secs: u64, write_secs: u64) {
-        let transport = match self {
-            LockdownStream::Plain(t) => t,
-            LockdownStream::Tls(tls) => tls.get_ref(),
-        };
-        transport.set_timeouts(read_secs, write_secs);
+        match self {
+            LockdownStream::Plain(t) => t.set_timeouts(read_secs, write_secs),
+            LockdownStream::Tls(tls) => tls.get_ref().set_timeouts(read_secs, write_secs),
+            LockdownStream::RsdTunnel(rsd) => rsd.set_timeouts(read_secs, write_secs),
+        }
     }
 }
 
@@ -453,6 +455,7 @@ impl Read for LockdownStream {
         match self {
             LockdownStream::Plain(t) => t.read(buf),
             LockdownStream::Tls(tls) => tls.read(buf),
+            LockdownStream::RsdTunnel(rsd) => rsd.read(buf),
         }
     }
 }
@@ -462,6 +465,7 @@ impl Write for LockdownStream {
         match self {
             LockdownStream::Plain(t) => t.write(buf),
             LockdownStream::Tls(tls) => tls.write(buf),
+            LockdownStream::RsdTunnel(rsd) => rsd.write(buf),
         }
     }
 
@@ -469,6 +473,7 @@ impl Write for LockdownStream {
         match self {
             LockdownStream::Plain(t) => t.flush(),
             LockdownStream::Tls(tls) => tls.flush(),
+            LockdownStream::RsdTunnel(rsd) => rsd.flush(),
         }
     }
 }
@@ -569,7 +574,7 @@ fn resolve_socket_addr(ip: &str, port: u16, stage: LockdownStage) -> Result<Sock
     })
 }
 
-fn connect_transport(
+pub(crate) fn connect_transport(
     ip: &str,
     port: u16,
     timeout: Duration,
@@ -961,6 +966,11 @@ pub fn probe_rsd_and_remotepairing(hosts: &[String]) -> Vec<String> {
         }
     }
     findings
+}
+
+/// Probes whether `(ip, port)` accepts TCP (via POSIX or NWConnection relay) without mutating daemon state.
+pub(crate) fn probe_tcp_open(ip: &str, port: u16, timeout: Duration) -> Result<(), LockdownError> {
+    connect_transport(ip, port, timeout, LockdownStage::TcpConnect, false).map(|_| ())
 }
 
 // ==============================================================================

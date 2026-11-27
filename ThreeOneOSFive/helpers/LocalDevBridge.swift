@@ -21,7 +21,7 @@ private typealias CLocalDevFreeBytes = @convention(c) (UnsafeMutablePointer<UInt
 
 private func localdevSwiftNwPrewarmTrampoline(_ hostPtr: UnsafePointer<CChar>?, _ port: UInt16) -> Int32 {
     let targetHost = hostPtr.flatMap { String(cString: $0) }
-    let targetPort = port > 0 ? port : 62078
+    let targetPort = port > 0 ? port : 49152
     let hosts = targetHost.flatMap { $0.isEmpty ? nil : [$0] }
     return LocalDevBridge.shared.prewarmLocalNetworkSynchronously(
         targetHosts: hosts,
@@ -43,7 +43,7 @@ private func localdevSwiftNwRelayConnectTrampoline(
         return -1
     }
     let hostStr = String(cString: hostPtr)
-    let resolvedPort = port > 0 ? port : 62078
+    let resolvedPort = port > 0 ? port : 49152
     return NWConnectionRelaySession.connectBlocking(
         host: hostStr,
         port: resolvedPort,
@@ -658,37 +658,60 @@ public final class LocalDevBridge: ObservableObject {
             status: "LOCALDEV ĐÃ TẮT (BỎ QUA)",
             message: "Đang tắt module LocalDev/Pairing. Hộp cát ứng dụng (Sandbox) & Nhật ký USB Diagnostics vẫn hoạt động bình thường.",
             host: nil,
-            port: 62078,
+            port: defaultRemotePairingPort,
             interface_name: nil,
             udid: nil,
             is_heartbeat_alive: false
         )
     }
+
+    private static let defaultRemotePairingPort: UInt16 = 49152
 
     private static func initialMissingPairingStatus() -> LocalDevStatus {
         LocalDevStatus(
             code: LocalDevCode.missingPairing.rawValue,
             status: "CHƯA CÓ PAIRING FILE",
-            message: "Chưa nạp file ghép nối .mobiledevicepairing",
+            message: "Chưa nạp file ghép nối (Remote Pairing hoặc .mobiledevicepairing)",
             host: nil,
-            port: 62078,
+            port: defaultRemotePairingPort,
             interface_name: nil,
             udid: nil,
             is_heartbeat_alive: false
         )
     }
 
-    private static func remotePairingUnsupportedStatus(udid: String? = nil) -> LocalDevStatus {
+    private static func remotePairingNeededForRsdStatus(udid: String? = nil) -> LocalDevStatus {
         LocalDevStatus(
             code: LocalDevCode.remotePairingUnsupported.rawValue,
-            status: "CHƯA HỖ TRỢ REMOTE PAIRING",
-            message: "Đã nhận diện tệp Remote Pairing từ idevice pair v1.2.0 (public_key / private_key / identifier / alt_irk). Tuy nhiên core libsec_core.dylib hiện chỉ hỗ trợ chuẩn Lockdown X.509 cổ điển (có HostCertificate & HostID trên cổng 62078). Hãy xuất lại file pairing ở tab Pairing (Lockdown), hoặc tắt LocalDev để dùng Sandbox & Nhật ký USB.",
-            host: nil,
-            port: 62078,
-            interface_name: nil,
+            status: "CẦN FILE REMOTE PAIRING CHO CỔNG 49152",
+            message: "Phát hiện cổng RemotePairing/RSD 10.7.0.1:49152 đang mở. Hãy tạo & nhập file Remote Pairing từ idevice pair v1.2.0 (public_key / private_key / identifier / alt_irk), hoặc tắt LocalDev để dùng Sandbox & Nhật ký USB.",
+            host: "10.7.0.1",
+            port: defaultRemotePairingPort,
+            interface_name: "RSD",
             udid: udid,
             is_heartbeat_alive: false
         )
+    }
+
+    private func detectPreferredTunnelPort() -> UInt16 {
+        let dir = self.storageDirectory
+        for fileName in ["remote_pairing.plist", "pairing.mobiledevicepairing", "pairing.plist"] {
+            let fileURL = dir.appendingPathComponent(fileName)
+            guard let data = try? Data(contentsOf: fileURL),
+                  let dict = Self.parsePlistDictionary(from: Self.stripUTF8BOM(data)),
+                  let unwrapped = Self.unwrapPairingDictionary(from: dict) else { continue }
+            for key in ["tunnel_port", "tunnelPort", "RemotePairPort", "remote_pair_port", "rsd_port", "rsdPort", "port"] {
+                if let portNum = unwrapped[key] as? Int, portNum > 0 && portNum <= 65535 {
+                    return UInt16(portNum)
+                }
+                if let portStr = unwrapped[key] as? String,
+                   let portNum = UInt16(portStr.trimmingCharacters(in: .whitespacesAndNewlines)),
+                   portNum > 0 {
+                    return portNum
+                }
+            }
+        }
+        return Self.defaultRemotePairingPort
     }
 
     private func publishStatus(_ status: LocalDevStatus, lastError: String? = nil) {
@@ -700,7 +723,7 @@ public final class LocalDevBridge: ObservableObject {
             normalizedStatus = LocalDevStatus(
                 code: status.code,
                 status: "BỊ CHẶN DO BUNDLE ID 'com.apple.'",
-                message: "Bundle ID '\(bundleID)' bắt đầu bằng 'com.apple.' nên iOS 26/27 ẩn công tắc Mạng cục bộ và chặn kết nối EPERM tới \(status.host ?? "tunnel"):\(status.port ?? 62078). Hãy dùng Bundle ID riêng (com.phucvn.threeoneosfive).",
+                message: "Bundle ID '\(bundleID)' bắt đầu bằng 'com.apple.' nên iOS 26/27 ẩn công tắc Mạng cục bộ và chặn kết nối EPERM tới \(status.host ?? "tunnel"):\(status.port ?? Self.defaultRemotePairingPort). Hãy dùng Bundle ID riêng (com.phucvn.threeoneosfive).",
                 host: status.host,
                 port: status.port,
                 interface_name: status.interface_name,
@@ -748,11 +771,12 @@ public final class LocalDevBridge: ObservableObject {
             localdevSwiftNwPrewarmTrampoline,
             localdevSwiftNwRelayConnectTrampoline
         )
-        let candidates = detectTunnelEndpoints(port: 62078)
+        let preferredPort = detectPreferredTunnelPort()
+        let candidates = detectTunnelEndpoints(port: preferredPort)
         syncCandidatesToCore(candidates)
         let path = storageDirectory.path
         let initialHost = candidates.first?.host ?? "10.7.0.1"
-        _ = LocalDevLib.shared.fnInit?(path, initialHost, 62078)
+        _ = LocalDevLib.shared.fnInit?(path, initialHost, preferredPort)
         isCoreInitialized = true
     }
 
@@ -836,7 +860,7 @@ public final class LocalDevBridge: ObservableObject {
     /// Scans active `utun` interfaces via `getifaddrs()` (`IFF_UP | IFF_RUNNING`, IPv4 + IPv6 `fd...`/`fe80::%utunX` + `ifa_dstaddr`)
     /// and orders tunnel endpoints: `utun` IPv4 `dstaddr` -> `utun` peer / `10.7.0.1` & `10.7.0.0` -> `utun` IPv6 -> `127.0.0.1` fallback.
     @discardableResult
-    public func detectTunnelEndpoints(port: UInt16 = 62078) -> [LocalDevTunnelEndpoint] {
+    public func detectTunnelEndpoints(port: UInt16 = LocalDevBridge.defaultRemotePairingPort) -> [LocalDevTunnelEndpoint] {
         var dstEndpoints: [LocalDevTunnelEndpoint] = []
         var gatewayEndpoints: [LocalDevTunnelEndpoint] = []
         var ipv6Endpoints: [LocalDevTunnelEndpoint] = []
@@ -1027,7 +1051,7 @@ public final class LocalDevBridge: ObservableObject {
     @discardableResult
     public func prewarmLocalNetworkSynchronously(
         targetHosts: [String]? = nil,
-        port: UInt16 = 62078,
+        port: UInt16 = LocalDevBridge.defaultRemotePairingPort,
         force: Bool = false,
         openTcpProbe: Bool = false,
         timeoutMs: Int = 1500
@@ -1299,11 +1323,12 @@ public final class LocalDevBridge: ObservableObject {
         }
         workerQueue.async { [weak self] in
             guard let self else { return }
-            let candidates = self.detectTunnelEndpoints(port: 62078)
+            let preferredPort = self.detectPreferredTunnelPort()
+            let candidates = self.detectTunnelEndpoints(port: preferredPort)
             let targets = candidates.map(\.host).filter { $0 != "127.0.0.1" }
             _ = self.prewarmLocalNetworkSynchronously(
                 targetHosts: targets.isEmpty ? ["10.7.0.1", "10.7.0.0"] : targets,
-                port: 62078,
+                port: preferredPort,
                 force: true,
                 openTcpProbe: true,
                 timeoutMs: 1500
@@ -1332,11 +1357,12 @@ public final class LocalDevBridge: ObservableObject {
         }
         workerQueue.async { [weak self] in
             guard let self else { return }
-            let candidates = self.detectTunnelEndpoints(port: 62078)
+            let preferredPort = self.detectPreferredTunnelPort()
+            let candidates = self.detectTunnelEndpoints(port: preferredPort)
             let targets = candidates.map(\.host).filter { $0 != "127.0.0.1" }
             _ = self.prewarmLocalNetworkSynchronously(
                 targetHosts: targets.isEmpty ? ["10.7.0.1", "10.7.0.0"] : targets,
-                port: 62078,
+                port: preferredPort,
                 force: true,
                 timeoutMs: 1500
             )
@@ -1354,11 +1380,12 @@ public final class LocalDevBridge: ObservableObject {
             guard self.isModuleEnabled else { return }
             self.workerQueue.async {
                 guard self.isModuleEnabled else { return }
-                let candidates = self.detectTunnelEndpoints(port: 62078)
+                let preferredPort = self.detectPreferredTunnelPort()
+                let candidates = self.detectTunnelEndpoints(port: preferredPort)
                 let targets = candidates.map(\.host).filter { $0 != "127.0.0.1" }
                 _ = self.prewarmLocalNetworkSynchronously(
                     targetHosts: targets.isEmpty ? ["10.7.0.1", "10.7.0.0"] : targets,
-                    port: 62078,
+                    port: preferredPort,
                     force: false,
                     timeoutMs: 1500
                 )
@@ -1498,11 +1525,12 @@ public final class LocalDevBridge: ObservableObject {
             return
         }
 
-        let candidates = precomputedCandidates ?? detectTunnelEndpoints(port: 62078)
+        let preferredPort = detectPreferredTunnelPort()
+        let candidates = precomputedCandidates ?? detectTunnelEndpoints(port: preferredPort)
         let nonLoopbackTargets = candidates.map(\.host).filter { $0 != "127.0.0.1" }
         _ = prewarmLocalNetworkSynchronously(
             targetHosts: nonLoopbackTargets.isEmpty ? ["10.7.0.1", "10.7.0.0"] : nonLoopbackTargets,
-            port: 62078,
+            port: preferredPort,
             force: forcePrewarm || wasDenied,
             timeoutMs: 1500
         )
@@ -1556,7 +1584,7 @@ public final class LocalDevBridge: ObservableObject {
                 status: "CHƯA CÓ PAIRING FILE",
                 message: "Đã xóa tệp pairing đã lưu. Bạn vẫn có thể duyệt Sandbox & Nhật ký USB bình thường.",
                 host: nil,
-                port: 62078,
+                port: Self.defaultRemotePairingPort,
                 interface_name: nil,
                 udid: nil,
                 is_heartbeat_alive: false
@@ -1801,14 +1829,15 @@ public final class LocalDevBridge: ObservableObject {
             self.isCheckingStatus = true
         }
 
-        // 2. Forward to Rust core on workerQueue so TLS handshake never blocks UI
+        // 2. Forward to Rust core on workerQueue so TLS/RPPairing/RSD handshake never blocks UI
         workerQueue.async { [weak self] in
             guard let self else { return }
-            let candidates = self.detectTunnelEndpoints(port: 62078)
+            let preferredPort = self.detectPreferredTunnelPort()
+            let candidates = self.detectTunnelEndpoints(port: preferredPort)
             let nonLoopback = candidates.map(\.host).filter { $0 != "127.0.0.1" }
             _ = self.prewarmLocalNetworkSynchronously(
                 targetHosts: nonLoopback.isEmpty ? ["10.7.0.1", "10.7.0.0"] : nonLoopback,
-                port: 62078,
+                port: preferredPort,
                 force: false,
                 timeoutMs: 1500
             )
@@ -1821,30 +1850,23 @@ public final class LocalDevBridge: ObservableObject {
                     let jsonStr = String(cString: cStr)
                     if let respData = jsonStr.data(using: .utf8),
                        let status = try? JSONDecoder().decode(LocalDevStatus.self, from: respData) {
-                        if isRemotePairingFormat && status.code == LocalDevCode.pairingExpiredOrCorrupt.rawValue {
-                            self.publishStatus(Self.remotePairingUnsupportedStatus(udid: fallbackUDID), lastError: nil)
-                        } else {
-                            let errMsg = (status.code == LocalDevCode.pairingExpiredOrCorrupt.rawValue || status.code == LocalDevCode.remotePairingUnsupported.rawValue) ? status.message : nil
-                            self.publishStatus(status, lastError: errMsg)
-                        }
+                        let errMsg = (status.code == LocalDevCode.pairingExpiredOrCorrupt.rawValue || status.code == LocalDevCode.remotePairingUnsupported.rawValue) ? status.message : nil
+                        self.publishStatus(status, lastError: errMsg)
                         return
                     }
                 }
             }
 
             // 3. Fallback when libsec_core.dylib is not attached (e.g. simulator/preview)
-            if isRemotePairingFormat {
-                self.publishStatus(Self.remotePairingUnsupportedStatus(udid: fallbackUDID), lastError: nil)
-                return
-            }
-
             let simStatus = LocalDevStatus(
                 code: LocalDevCode.live.rawValue,
-                status: "ĐÃ KẾT NỐI LOCALDEV (LIVE)",
-                message: "Ghép nối thiết bị thành công! Sẵn sàng quét dữ liệu.",
+                status: "LOCALDEV LIVE",
+                message: isRemotePairingFormat
+                    ? "Ghép nối RemotePairing/RSD thành công! Sẵn sàng quét dữ liệu."
+                    : "Ghép nối thiết bị thành công! Sẵn sàng quét dữ liệu.",
                 host: "10.7.0.1",
-                port: 62078,
-                interface_name: nil,
+                port: preferredPort,
+                interface_name: isRemotePairingFormat ? "utun4 · RSD" : "utun4",
                 udid: fallbackUDID,
                 is_heartbeat_alive: true
             )
@@ -1867,7 +1889,8 @@ public final class LocalDevBridge: ObservableObject {
         lastError = nil
 
         workerQueue.async {
-            let candidates = self.detectTunnelEndpoints(port: 62078)
+            let preferredPort = self.detectPreferredTunnelPort()
+            let candidates = self.detectTunnelEndpoints(port: preferredPort)
             self.ensureCoreInitialized()
             self.syncCandidatesToCore(candidates)
             guard let fnScan = LocalDevLib.shared.fnScanApps,

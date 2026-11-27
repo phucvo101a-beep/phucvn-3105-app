@@ -34,6 +34,15 @@ rustls = { version = "0.23", default-features = false, features = ["ring", "logg
 # Native FFI libc helpers
 libc = "0.2"
 
+# Pure-Rust RemotePairing / RemoteXPC HTTP2 / CDTunnel / Userspace TCP
+tokio = { version = "1", features = ["rt", "rt-multi-thread", "io-util", "net", "time", "sync", "macros"] }
+jktcp = { version = "0.1.8", default-features = false }
+futures = "0.3"
+aes = "0.8"
+cbc = { version = "0.1", features = ["alloc"] }
+hmac = "0.12"
+sha1 = "0.10"
+
 [profile.release]
 opt-level = "z"
 lto = "fat"

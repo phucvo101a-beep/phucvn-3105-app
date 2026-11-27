@@ -155,7 +155,7 @@ public struct LocalDevStatusCard: View {
                 }
 
                 if let host = bridge.currentStatus.host, !host.isEmpty {
-                    let port = bridge.currentStatus.port ?? 62078
+                    let port = bridge.currentStatus.port ?? 49152
                     let ifaceSuffix = bridge.currentStatus.interface_name.map { " (\($0))" } ?? ""
                     HStack(spacing: 4) {
                         Text("ENDPOINT:")

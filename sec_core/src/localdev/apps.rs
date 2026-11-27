@@ -4,7 +4,7 @@
 
 use super::pairing::PairingFile;
 use super::plist_util::PlistValue;
-use super::tunnel::{read_plist, send_plist, LockdownClient};
+use super::tunnel::{read_plist, send_plist, LockdownClient, LockdownStream};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
@@ -65,7 +65,13 @@ impl AppScanner {
             }
         })?;
 
-        let (mut sock, _service_port, _ssl) = lockdown.start_service("com.apple.mobile.installation_proxy")?;
+        let (sock, _service_port, _ssl) = lockdown.start_service("com.apple.mobile.installation_proxy")?;
+        let discovered_apps = Self::scan_user_apps_over_stream(sock)?;
+        Ok((discovered_apps, connected_host, connected_port))
+    }
+
+    /// Streams installed user apps over any started `installation_proxy` stream (Lockdown or RSD).
+    pub fn scan_user_apps_over_stream(mut sock: LockdownStream) -> Result<Vec<LocalDevAppInfo>, String> {
         sock.set_timeouts(12, 10);
 
         // Send Browse request
@@ -118,7 +124,7 @@ impl AppScanner {
 
         // Sort apps alphabetically by display name
         discovered_apps.sort_by(|a, b| a.display_name.to_lowercase().cmp(&b.display_name.to_lowercase()));
-        Ok((discovered_apps, connected_host, connected_port))
+        Ok(discovered_apps)
     }
 }
 
