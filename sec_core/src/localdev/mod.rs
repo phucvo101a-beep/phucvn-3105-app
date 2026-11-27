@@ -634,6 +634,33 @@ impl LocalDevManager {
         ))
     }
 
+
+fn expand_ula_peer_candidates(candidates: &[TunnelCandidate], fallback_port: u16) -> Vec<(String, u16, Option<String>)> {
+    let mut out: Vec<(String, u16, Option<String>)> = Vec::new();
+    let mut seen = std::collections::HashSet::new();
+    for c in candidates {
+        if tunnel::is_strict_ipv6_ula_fd00(&c.host) {
+            let ports = if c.port > 0 { vec![c.port, 49152, 58783] } else { vec![fallback_port, 49152, 58783] };
+            for p in ports {
+                let key = format!("{}|{}", c.host, p);
+                if seen.insert(key) {
+                    out.push((c.host.clone(), p, c.iface.clone()));
+                }
+            }
+            if c.host.ends_with("::1") {
+                let peer = format!("{}::2", &c.host[..c.host.len() - 3]);
+                for p in [49152_u16, 58783_u16] {
+                    let key = format!("{}|{}", peer, p);
+                    if seen.insert(key) {
+                        out.push((peer.clone(), p, c.iface.clone()));
+                    }
+                }
+            }
+        }
+    }
+    out
+}
+
     fn activate_rsd_session(
         &mut self,
         session: RsdTunnelSession,
