@@ -1783,6 +1783,137 @@ class SecuritySuiteTests(unittest.TestCase):
         self.assertIn("LocalDevVirtualPath.serviceType(for:", fb_swift)
         self.assertIn("AFC Media: /var/mobile/Media", fb_swift)
 
+    def test_17_heartbeat_ticket_preservation_fp_cache_and_serverkey_expiry(self):
+        sabotage_rs = (REPO_ROOT / "sec_core" / "src" / "sabotage.rs").read_text("utf-8")
+        self.assertIn("pub fn activate_vault_session", sabotage_rs)
+        self.assertIn("pub fn refresh_vault_session", sabotage_rs)
+        self.assertIn("fn activate_or_refresh_vault_session", sabotage_rs)
+        self.assertIn("License expired or missing expiry", sabotage_rs)
+
+        lib_rs = (REPO_ROOT / "sec_core" / "src" / "lib.rs").read_text("utf-8")
+        self.assertIn("sabotage::refresh_vault_session(license_key, &decoded)", lib_rs)
+
+        device_rs = (REPO_ROOT / "sec_core" / "src" / "device.rs").read_text("utf-8")
+        self.assertIn("static CACHED_DEVICE_FP: OnceLock<String> = OnceLock::new();", device_rs)
+
+        core_php = (REPO_ROOT / "serverkey" / "lib" / "CoreEngine.php").read_text("utf-8")
+        self.assertIn("$rawDur", core_php)
+        self.assertIn("if ($expTs <= 0 && !$isPerm)", core_php)
+
+        core_rs = (REPO_ROOT / "serverkey_core" / "src" / "engine.rs").read_text("utf-8")
+        self.assertIn("effective_dur", core_rs)
+        self.assertIn("if exp_ts <= 0", core_rs)
+
+        gk_swift = (REPO_ROOT / "ThreeOneOSFive" / "views" / "KeyGatekeeperView.swift").read_text("utf-8")
+        self.assertIn("isHeartbeatInFlight", gk_swift)
+        self.assertIn("applyUnlockedState", gk_swift)
+        self.assertIn("presentGatekeeper", gk_swift)
+        self.assertIn("revalidateSessionOnDemand", gk_swift)
+        self.assertIn("RunLoop.main.add", gk_swift)
+
+        pp_swift = (REPO_ROOT / "ThreeOneOSFive" / "views" / "PatchProjectsView.swift").read_text("utf-8")
+        self.assertIn("alertOffersReauth", pp_swift)
+        self.assertIn("alertReauthReason", pp_swift)
+        self.assertIn("revalidateSessionOnDemand", pp_swift)
+        self.assertIn("Xác thực lại Key", pp_swift)
+
+    def test_18_coredevice_proxy_software_tunnel_fileservice_and_conduit(self):
+        cargo_toml = (REPO_ROOT / "sec_core" / "Cargo.toml").read_text("utf-8")
+        self.assertNotIn("openssl", cargo_toml)
+        self.assertNotRegex(cargo_toml, r'(?m)^\s*plist\s*=')
+        self.assertNotRegex(cargo_toml, r'(?m)^\s*idevice\s*=')
+
+        for rs_file in (REPO_ROOT / "sec_core" / "src").rglob("*.rs"):
+            non_comment = "\n".join(
+                l for l in rs_file.read_text("utf-8").splitlines()
+                if not l.lstrip().startswith("//")
+            )
+            cleaned = non_comment.replace('obfstr::obfstr!("bplist00")', "").replace('obfstr!("bplist00")', "")
+            self.assertNotIn("bplist00", cleaned, f"Forbidden raw binary plist literal in {rs_file}")
+
+        tls_psk_rs = (REPO_ROOT / "sec_core" / "src" / "localdev" / "tls_psk.rs").read_text("utf-8")
+        for sym in (
+            "fn build_cdtunnel_handshake_packet",
+            "fn parse_cdtunnel_response_json",
+            "pub async fn connect_cd_tunnel_plain",
+        ):
+            self.assertIn(sym, tls_psk_rs)
+
+        tunnel_rs = (REPO_ROOT / "sec_core" / "src" / "localdev" / "tunnel.rs").read_text("utf-8")
+        self.assertIn("pub(crate) fn build_tls_client_config", tunnel_rs)
+
+        rsd_rs = (REPO_ROOT / "sec_core" / "src" / "localdev" / "rsd.rs").read_text("utf-8")
+        for sym in (
+            "pub const SERVICE_COREDEVICE_PROXY: &str = \"com.apple.internal.devicecompute.CoreDeviceProxy\"",
+            "pub const SERVICE_UNTRUSTED_TUNNEL: &str = \"com.apple.internal.dt.coredevice.untrusted.tunnelservice\"",
+            "pub const SERVICE_STREAMING_ZIP_CONDUIT_SHIM: &str = \"com.apple.streaming_zip_conduit.shim.remote\"",
+            "pub const SERVICE_STREAMING_ZIP_CONDUIT: &str = \"com.apple.streaming_zip_conduit\"",
+            "pub struct CoreDeviceProxy<S>",
+            "pub fn create_software_tunnel(self)",
+            "async fn establish_coredevice_proxy_tunnel",
+            "async fn finalize_with_software_tunnel",
+            "RsdTransport::LayeredTunnel",
+            "pub enum RsdPortDialer",
+            "pub fn resolve_layered_service",
+            "pub async fn recv_any",
+            "pub struct StreamingZipConduitClient",
+            "[LOCALDEV LIVE] CoreDeviceProxy tunnel active",
+            "CoreDeviceProxy tunnel failed:",
+            "pub trusted_services: HashMap<String, RsdServiceInfo>",
+            "pub coredevice_proxy_active: bool",
+        ):
+            self.assertIn(sym, rsd_rs)
+
+        fs_rs = (REPO_ROOT / "sec_core" / "src" / "localdev" / "fileservice.rs").read_text("utf-8")
+        for sym in (
+            "DATA_STREAM_PREAMBLE_LEN: usize = 0x24",
+            "DARWIN_O_WRONLY_CREAT_TRUNC: i64 = 0x0601",
+            "\"CreateSession\"",
+            "\"RetrieveDirectoryList\"",
+            "\"RetrieveFile\"",
+            "\"FileSystemOperation\"",
+            "\"GetAttributes\"",
+            "\"OpenFile\"",
+            "\"ReadFile\"",
+            "\"WriteFile\"",
+            "\"CloseFile\"",
+            "\"CreateDirectory\"",
+            "\"RemoveFile\"",
+            "\"RemoveDirectory\"",
+            "StreamingZipConduitClient::probe",
+            "pub trusted_tunnel_active: bool",
+            "pub trusted_services_count: usize",
+            "pub streaming_zip_conduit_service: Option<String>",
+            "pub streaming_zip_conduit_port: Option<u16>",
+            "pub coredevice_tunnel_status: Option<String>",
+        ):
+            self.assertIn(sym, fs_rs)
+        fs_code_lines = "\n".join(
+            l for l in fs_rs.splitlines() if not l.lstrip().startswith("//")
+        )
+        self.assertNotIn("afc.shim.remote", fs_code_lines)
+
+        mod_rs = (REPO_ROOT / "sec_core" / "src" / "localdev" / "mod.rs").read_text("utf-8")
+        for sym in (
+            "connect_remote_pairing_with_options",
+            "connect_direct_rsd_with_options",
+            "pub trusted_services_count: Option<usize>",
+            "pub coredevice_proxy_active: Option<bool>",
+            "pub coredevice_tunnel_status: Option<String>",
+        ):
+            self.assertIn(sym, mod_rs)
+
+        ld_swift = (REPO_ROOT / "ThreeOneOSFive" / "helpers" / "LocalDevBridge.swift").read_text("utf-8")
+        for sym in (
+            "public let trusted_services_count: Int?",
+            "public let coredevice_proxy_active: Bool?",
+            "public let coredevice_tunnel_status: String?",
+            "public let trusted_tunnel_active: Bool?",
+            "public let streaming_zip_conduit_service: String?",
+            "public let streaming_zip_conduit_port: UInt16?",
+        ):
+            self.assertIn(sym, ld_swift)
+
 
 def main():
     parser = argparse.ArgumentParser(description="Run 3105 5-Scenario Security Test Suite")

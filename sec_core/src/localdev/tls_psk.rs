@@ -666,17 +666,10 @@ impl<S: AsyncRead + AsyncWrite + Unpin + Send + Sync> AsyncWrite for TlsPskStrea
     }
 }
 
-/// Performs TLS 1.2 PSK handshake followed by `CDTunnel` handshake, returning
-/// the encrypted IPv6-packet tunnel stream plus negotiated tunnel configuration.
-pub async fn connect_cd_tunnel<S: AsyncRead + AsyncWrite + Unpin + Send + Sync>(
-    stream: S,
-    psk: &[u8],
-) -> Result<(TlsPskStream<S>, CdTunnelInfo), String> {
-    let mut tls_stream = TlsPskStream::handshake(stream, psk).await?;
-
+fn build_cdtunnel_handshake_packet(mtu: u16) -> Result<Vec<u8>, String> {
     let req_body = serde_json::to_vec(&serde_json::json!({
         "type": "clientHandshakeRequest",
-        "mtu": DEFAULT_CDTUNNEL_MTU
+        "mtu": mtu
     }))
     .map_err(|e| e.to_string())?;
 
@@ -684,20 +677,11 @@ pub async fn connect_cd_tunnel<S: AsyncRead + AsyncWrite + Unpin + Send + Sync>(
     pkt.extend_from_slice(CDTUNNEL_MAGIC);
     pkt.extend_from_slice(&(req_body.len() as u16).to_be_bytes());
     pkt.extend_from_slice(&req_body);
-    tls_stream.write_app_data(&pkt).await?;
+    Ok(pkt)
+}
 
-    let resp_data = tls_stream.read_app_data().await?;
-    let header_len = CDTUNNEL_MAGIC.len() + 2;
-    if resp_data.len() < header_len || &resp_data[..CDTUNNEL_MAGIC.len()] != CDTUNNEL_MAGIC {
-        return Err("Invalid CDTunnel handshake response header".to_string());
-    }
-    let body_len =
-        u16::from_be_bytes([resp_data[CDTUNNEL_MAGIC.len()], resp_data[CDTUNNEL_MAGIC.len() + 1]])
-            as usize;
-    if resp_data.len() < header_len + body_len {
-        return Err("Truncated CDTunnel handshake response".to_string());
-    }
-    let resp: JsonValue = serde_json::from_slice(&resp_data[header_len..header_len + body_len])
+fn parse_cdtunnel_response_json(json_bytes: &[u8]) -> Result<CdTunnelInfo, String> {
+    let resp: JsonValue = serde_json::from_slice(json_bytes)
         .map_err(|e| format!("CDTunnel JSON parse failed: {}", e))?;
 
     let client_params = resp
@@ -731,14 +715,77 @@ pub async fn connect_cd_tunnel<S: AsyncRead + AsyncWrite + Unpin + Send + Sync>(
         return Err("CDTunnel response reported serverRSDPort=0".to_string());
     }
 
-    Ok((
-        tls_stream,
-        CdTunnelInfo {
-            client_address,
-            netmask,
-            server_address,
-            mtu,
-            server_rsd_port,
-        },
-    ))
+    Ok(CdTunnelInfo {
+        client_address,
+        netmask,
+        server_address,
+        mtu,
+        server_rsd_port,
+    })
+}
+
+/// Performs TLS 1.2 PSK handshake followed by `CDTunnel` handshake, returning
+/// the encrypted IPv6-packet tunnel stream plus negotiated tunnel configuration.
+pub async fn connect_cd_tunnel<S: AsyncRead + AsyncWrite + Unpin + Send + Sync>(
+    stream: S,
+    psk: &[u8],
+) -> Result<(TlsPskStream<S>, CdTunnelInfo), String> {
+    let mut tls_stream = TlsPskStream::handshake(stream, psk).await?;
+
+    let pkt = build_cdtunnel_handshake_packet(DEFAULT_CDTUNNEL_MTU)?;
+    tls_stream.write_app_data(&pkt).await?;
+
+    let resp_data = tls_stream.read_app_data().await?;
+    let header_len = CDTUNNEL_MAGIC.len() + 2;
+    if resp_data.len() < header_len || &resp_data[..CDTUNNEL_MAGIC.len()] != CDTUNNEL_MAGIC {
+        return Err("Invalid CDTunnel handshake response header".to_string());
+    }
+    let body_len =
+        u16::from_be_bytes([resp_data[CDTUNNEL_MAGIC.len()], resp_data[CDTUNNEL_MAGIC.len() + 1]])
+            as usize;
+    if resp_data.len() < header_len + body_len {
+        return Err("Truncated CDTunnel handshake response".to_string());
+    }
+    let info = parse_cdtunnel_response_json(&resp_data[header_len..header_len + body_len])?;
+    Ok((tls_stream, info))
+}
+
+/// Performs the `CDTunnel` handshake directly on an already-established CoreDeviceProxy
+/// stream (`com.apple.internal.devicecompute.CoreDeviceProxy`), returning the stream ready
+/// for `jktcp::adapter::Adapter` IPv6 packet framing plus `CdTunnelInfo`.
+pub async fn connect_cd_tunnel_plain<S: AsyncRead + AsyncWrite + Unpin + Send + Sync>(
+    mut stream: S,
+) -> Result<(S, CdTunnelInfo), String> {
+    let pkt = build_cdtunnel_handshake_packet(DEFAULT_CDTUNNEL_MTU)?;
+    stream
+        .write_all(&pkt)
+        .await
+        .map_err(|e| format!("CDTunnel request write failed: {}", e))?;
+    stream
+        .flush()
+        .await
+        .map_err(|e| format!("CDTunnel request flush failed: {}", e))?;
+
+    let mut hdr = [0u8; 10]; // CDTUNNEL_MAGIC.len() (8) + 2
+    stream
+        .read_exact(&mut hdr)
+        .await
+        .map_err(|e| format!("CDTunnel header read failed: {}", e))?;
+    if &hdr[..CDTUNNEL_MAGIC.len()] != CDTUNNEL_MAGIC {
+        return Err(format!(
+            "Invalid CoreDeviceProxy CDTunnel response header: {:02x?}",
+            &hdr[..CDTUNNEL_MAGIC.len()]
+        ));
+    }
+    let body_len = u16::from_be_bytes([hdr[CDTUNNEL_MAGIC.len()], hdr[CDTUNNEL_MAGIC.len() + 1]]) as usize;
+    if body_len == 0 {
+        return Err("Empty CoreDeviceProxy CDTunnel response body".to_string());
+    }
+    let mut body = vec![0u8; body_len];
+    stream
+        .read_exact(&mut body)
+        .await
+        .map_err(|e| format!("CDTunnel body read failed: {}", e))?;
+    let info = parse_cdtunnel_response_json(&body)?;
+    Ok((stream, info))
 }

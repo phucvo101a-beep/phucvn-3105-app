@@ -2165,6 +2165,8 @@ struct ProxyModPresetDetailView: View {
     @State private var alertTitle = ""
     @State private var alertMessage = ""
     @State private var showAlert = false
+    @State private var alertOffersReauth = false
+    @State private var alertReauthReason: String? = nil
     @State private var showApplyConfirm = false
     @State private var showRestoreConfirm = false
     @State private var statusToggle = false
@@ -2377,7 +2379,14 @@ struct ProxyModPresetDetailView: View {
             Text("Bạn có chắc muốn khôi phục lại dữ liệu gốc của Free Fire cho tính năng \(mod.name)?")
         }
         .alert(alertTitle, isPresented: $showAlert) {
-            Button("OK") {}
+            if alertOffersReauth {
+                Button("Xác thực lại Key") {
+                    keyAuth.presentGatekeeper(reason: alertReauthReason)
+                }
+                Button("Đóng", role: .cancel) {}
+            } else {
+                Button("OK") {}
+            }
         } message: {
             Text(alertMessage)
         }
@@ -2386,19 +2395,46 @@ struct ProxyModPresetDetailView: View {
     private func applyMod() {
         guard !isWorking else { return }
         if isMaintenance {
+            alertOffersReauth = false
             alertTitle = "File mod đang bảo trì"
             alertMessage = maintenanceMessage
             showAlert = true
             return
         }
-        guard let ticket = KeyAuthManager.shared.activeVerifiedTicket else {
-            alertTitle = "Yêu cầu xác thực"
-            alertMessage = "Phiên bản quyền không hợp lệ hoặc đã hết hạn. Vui lòng xác thực lại Key."
-            showAlert = true
-            return
-        }
         isWorking = true
-        Task.detached(priority: .userInitiated) {
+        alertOffersReauth = false
+        Task {
+            var resolvedTicket = await MainActor.run { KeyAuthManager.shared.activeVerifiedTicket }
+            if resolvedTicket == nil {
+                let reauth = await KeyAuthManager.shared.revalidateSessionOnDemand()
+                if let fresh = reauth.ticket {
+                    resolvedTicket = fresh
+                } else {
+                    let detail = reauth.failureReason ?? "Phiên bản quyền không hợp lệ hoặc đã hết hạn."
+                    await MainActor.run {
+                        isWorking = false
+                        alertOffersReauth = true
+                        alertReauthReason = detail
+                        alertTitle = "Yêu cầu xác thực"
+                        alertMessage = "\(detail) Vui lòng xác thực lại Key."
+                        showAlert = true
+                    }
+                    return
+                }
+            }
+            guard let ticket = resolvedTicket else {
+                await MainActor.run {
+                    isWorking = false
+                    alertOffersReauth = true
+                    alertReauthReason = "Phiên bản quyền không hợp lệ hoặc đã hết hạn."
+                    alertTitle = "Yêu cầu xác thực"
+                    alertMessage = "Phiên bản quyền không hợp lệ hoặc đã hết hạn. Vui lòng xác thực lại Key."
+                    showAlert = true
+                }
+                return
+            }
+
+            await Task.detached(priority: .userInitiated) {
             do {
                 guard let data = mod.loadData() else {
                     await MainActor.run {
@@ -2462,6 +2498,7 @@ struct ProxyModPresetDetailView: View {
                     showAlert = true
                 }
             }
+            }.value
         }
     }
 

@@ -66,7 +66,7 @@ fn default_tunnel_port() -> u16 {
     DEFAULT_REMOTE_PAIRING_PORT
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct LocalDevStatusReport {
     pub code: i32,
     pub status: String,
@@ -77,6 +77,12 @@ pub struct LocalDevStatusReport {
     pub interface_name: Option<String>,
     pub udid: Option<String>,
     pub is_heartbeat_alive: bool,
+    #[serde(default)]
+    pub trusted_services_count: Option<usize>,
+    #[serde(default)]
+    pub coredevice_proxy_active: Option<bool>,
+    #[serde(default)]
+    pub coredevice_tunnel_status: Option<String>,
 }
 
 #[allow(dead_code)]
@@ -310,6 +316,7 @@ impl LocalDevManager {
                         interface_name: self.active_iface.clone(),
                         udid: None,
                         is_heartbeat_alive: false,
+                        ..Default::default()
                     });
                 }
             }
@@ -327,6 +334,7 @@ impl LocalDevManager {
                     interface_name: self.active_iface.clone(),
                     udid: None,
                     is_heartbeat_alive: false,
+                    ..Default::default()
                 });
             }
         };
@@ -354,12 +362,16 @@ impl LocalDevManager {
                         sess.product_type.as_deref(),
                         sess.os_version.as_deref(),
                         sess.services.len(),
+                        sess.coredevice_tunnel_status.as_deref(),
                     ),
                     host: self.host.clone(),
                     port: self.port,
                     interface_name: Some(iface_label),
                     udid: Some(verified_udid),
                     is_heartbeat_alive: true,
+                    trusted_services_count: Some(sess.trusted_services.len()),
+                    coredevice_proxy_active: Some(sess.coredevice_proxy_active),
+                    coredevice_tunnel_status: sess.coredevice_tunnel_status.clone(),
                 });
             }
             if let Some(stale) = self.active_rsd.take() {
@@ -394,11 +406,12 @@ impl LocalDevManager {
 
             for cand in open_rp_endpoints {
                 if let Some(ref rp_file) = pairing.remote {
-                    match RsdTunnelSession::connect_remote_pairing(
+                    match RsdTunnelSession::connect_remote_pairing_with_options(
                         &cand.host,
                         cand.port,
                         cand.iface.clone(),
                         rp_file,
+                        pairing.lockdown.as_ref(),
                     ) {
                         Ok(session) => {
                             return Ok(self.activate_rsd_session(session, &pairing.udid));
@@ -409,10 +422,12 @@ impl LocalDevManager {
                     }
                 } else {
                     // Only classic Lockdown file present while `49152` is OPEN: try Direct HTTP/2 RSD just in case
-                    match RsdTunnelSession::connect_direct_rsd(
+                    match RsdTunnelSession::connect_direct_rsd_with_options(
                         &cand.host,
                         cand.port,
                         cand.iface.clone(),
+                        pairing.remote.as_ref(),
+                        pairing.lockdown.as_ref(),
                     ) {
                         Ok(session) => {
                             return Ok(self.activate_rsd_session(session, &pairing.udid));
@@ -448,6 +463,7 @@ impl LocalDevManager {
                     interface_name: ep_iface,
                     udid: Some(pairing.udid),
                     is_heartbeat_alive: false,
+                    ..Default::default()
                 });
             }
 
@@ -465,7 +481,13 @@ impl LocalDevManager {
             if cand.host != "127.0.0.1"
                 && tunnel::probe_tcp_open(&cand.host, 58783, Duration::from_millis(500)).is_ok()
             {
-                if let Ok(session) = RsdTunnelSession::connect_direct_rsd(&cand.host, 58783, cand.iface.clone()) {
+                if let Ok(session) = RsdTunnelSession::connect_direct_rsd_with_options(
+                    &cand.host,
+                    58783,
+                    cand.iface.clone(),
+                    pairing.remote.as_ref(),
+                    pairing.lockdown.as_ref(),
+                ) {
                     return Ok(self.activate_rsd_session(session, &pairing.udid));
                 }
             }
@@ -513,6 +535,7 @@ impl LocalDevManager {
                             interface_name: self.active_iface.clone(),
                             udid: Some(verified_udid),
                             is_heartbeat_alive: true,
+                            ..Default::default()
                         });
                     }
                     Err(err) => all_attempts.push(EndpointAttempt { cand, err }),
@@ -561,6 +584,9 @@ impl LocalDevManager {
         } else {
             session.udid.clone()
         };
+        let trusted_count = session.trusted_services.len();
+        let proxy_active = session.coredevice_proxy_active;
+        let tunnel_status = session.coredevice_tunnel_status.clone();
         let msg = format_live_rsd_message(
             &host,
             port,
@@ -569,6 +595,7 @@ impl LocalDevManager {
             session.product_type.as_deref(),
             session.os_version.as_deref(),
             session.services.len(),
+            tunnel_status.as_deref(),
         );
         self.host = host.clone();
         self.port = port;
@@ -584,6 +611,9 @@ impl LocalDevManager {
             interface_name: Some(iface_label),
             udid: Some(udid),
             is_heartbeat_alive: true,
+            trusted_services_count: Some(trusted_count),
+            coredevice_proxy_active: Some(proxy_active),
+            coredevice_tunnel_status: tunnel_status,
         }
     }
 
@@ -1439,16 +1469,22 @@ fn format_live_rsd_message(
     product_type: Option<&str>,
     os_version: Option<&str>,
     svc_count: usize,
+    coredevice_tunnel_status: Option<&str>,
 ) -> String {
     let hw = match (product_type, os_version) {
         (Some(p), Some(v)) => format!(" · {} iOS {}", p, v),
         (Some(p), None) => format!(" · {}", p),
         _ => String::new(),
     };
-    format!(
+    let mut base = format!(
         "Kết nối RemotePairing/RSD thành công tại {}:{} ({}){} — {} services, UDID: {}",
         host, port, iface_label, hw, svc_count, udid
-    )
+    );
+    if let Some(status_line) = coredevice_tunnel_status.map(str::trim).filter(|s| !s.is_empty()) {
+        base.push('\n');
+        base.push_str(status_line);
+    }
+    base
 }
 
 struct EndpointAttempt {
@@ -1509,6 +1545,7 @@ fn build_multi_failure_report(
             interface_name: a.cand.iface.clone(),
             udid: Some(udid.to_string()),
             is_heartbeat_alive: false,
+            ..Default::default()
         };
     }
 
@@ -1541,6 +1578,7 @@ fn build_multi_failure_report(
             interface_name: a.cand.iface.clone(),
             udid: Some(udid.to_string()),
             is_heartbeat_alive: false,
+            ..Default::default()
         };
     }
 
@@ -1574,6 +1612,7 @@ fn build_multi_failure_report(
             interface_name: primary.cand.iface.clone(),
             udid: Some(udid.to_string()),
             is_heartbeat_alive: false,
+            ..Default::default()
         };
     }
 
@@ -1604,6 +1643,7 @@ fn build_multi_failure_report(
             interface_name: primary.cand.iface.clone(),
             udid: Some(udid.to_string()),
             is_heartbeat_alive: false,
+            ..Default::default()
         };
     }
 
@@ -1629,6 +1669,7 @@ fn build_multi_failure_report(
         interface_name: primary.cand.iface.clone(),
         udid: Some(udid.to_string()),
         is_heartbeat_alive: false,
+        ..Default::default()
     }
 }
 

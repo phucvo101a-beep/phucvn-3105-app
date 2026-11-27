@@ -478,11 +478,10 @@ impl Write for LockdownStream {
     }
 }
 
-fn build_tls_stream(
-    transport: TransportStream,
+pub(crate) fn build_tls_client_config(
     pairing: &PairingFile,
     stage: LockdownStage,
-) -> Result<TlsStream, LockdownError> {
+) -> Result<Arc<ClientConfig>, LockdownError> {
     let client_cert = CertificateDer::from(pairing.host_certificate_der.clone());
     let private_key = PrivateKeyDer::try_from(pairing.host_private_key_der.clone()).map_err(|e| {
         LockdownError::new(
@@ -517,10 +516,19 @@ fn build_tls_stream(
                 )
             })?;
 
+    Ok(Arc::new(config))
+}
+
+fn build_tls_stream(
+    transport: TransportStream,
+    pairing: &PairingFile,
+    stage: LockdownStage,
+) -> Result<TlsStream, LockdownError> {
+    let config = build_tls_client_config(pairing, stage)?;
     let server_name = ServerName::try_from("apple-device.local")
         .unwrap_or_else(|_| ServerName::try_from("localhost").unwrap());
 
-    let conn = ClientConnection::new(Arc::new(config), server_name).map_err(|e| {
+    let conn = ClientConnection::new(config, server_name).map_err(|e| {
         LockdownError::new(
             LockdownErrorKind::ProtocolError,
             stage,

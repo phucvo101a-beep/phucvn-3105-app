@@ -572,6 +572,35 @@ public struct LocalDevStatus: Codable {
     public let interface_name: String?
     public let udid: String?
     public let is_heartbeat_alive: Bool?
+    public let trusted_services_count: Int?
+    public let coredevice_proxy_active: Bool?
+    public let coredevice_tunnel_status: String?
+
+    public init(
+        code: Int,
+        status: String,
+        message: String,
+        host: String?,
+        port: UInt16?,
+        interface_name: String?,
+        udid: String?,
+        is_heartbeat_alive: Bool?,
+        trusted_services_count: Int? = nil,
+        coredevice_proxy_active: Bool? = nil,
+        coredevice_tunnel_status: String? = nil
+    ) {
+        self.code = code
+        self.status = status
+        self.message = message
+        self.host = host
+        self.port = port
+        self.interface_name = interface_name
+        self.udid = udid
+        self.is_heartbeat_alive = is_heartbeat_alive
+        self.trusted_services_count = trusted_services_count
+        self.coredevice_proxy_active = coredevice_proxy_active
+        self.coredevice_tunnel_status = coredevice_tunnel_status
+    }
 
     public var isLive: Bool { code == LocalDevCode.live.rawValue }
 }
@@ -665,6 +694,11 @@ public struct LocalDevFileServiceCapabilityReport: Codable, Equatable {
     public let data_uses_remote_xpc: Bool
     public let app_group_count: Int
     public let note: String
+    public let trusted_tunnel_active: Bool?
+    public let trusted_services_count: Int?
+    public let streaming_zip_conduit_service: String?
+    public let streaming_zip_conduit_port: UInt16?
+    public let coredevice_tunnel_status: String?
 }
 
 public struct AirLiftReadOutcome {
@@ -1260,10 +1294,14 @@ public final class LocalDevBridge: ObservableObject {
     }
 
     private func logStatusIfChanged(_ status: LocalDevStatus) {
-        let key = "\(status.code)|\(status.status)|\(status.message)"
+        let tunnelLine = status.coredevice_tunnel_status ?? ""
+        let key = "\(status.code)|\(status.status)|\(status.message)|\(tunnelLine)"
         guard key != lastLoggedStatusKey else { return }
         lastLoggedStatusKey = key
         log("localdev: code=\(status.code) [\(status.status)] — \(status.message)")
+        if !tunnelLine.isEmpty && !status.message.contains(tunnelLine) {
+            log("localdev: \(tunnelLine)")
+        }
     }
 
     /// Pre-warms iOS Local Network NECP policy using `Network.framework` (`NWPathMonitor` + `NWListener` + `NWBrowser` on declared `NSBonjourServices`).

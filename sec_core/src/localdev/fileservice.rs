@@ -1,14 +1,14 @@
 //! CoreDevice FileService Client (`com.apple.coredevice.fileservice.controlcapacity` / `.control` + `.data`)
-//! Drives concurrent RemoteXPC / binary data channels over RSD (`10.7.0.1:49152`), enforces a positive
-//! `controlcapacity` handshake parameter, resolves `DataContainerURL` and `systemAppGroupIdentifiers`
-//! (`/var/mobile/Containers/Shared/AppGroup/<group_id>`), and classifies unavailability / mapping failures
-//! cleanly for `patch.airlift` fallback routing.
+//! Drives RemoteXPC `dtfileserviced` commands (`CreateSession`, `RetrieveDirectoryList`, `RetrieveFile`,
+//! `FileSystemOperation`) + `rwb!FILE` binary data transfers over the Trusted RSD Software Tunnel
+//! (`DataContainerURL` Domain 1 and `systemAppGroupIdentifiers` Domain 2), enforces positive
+//! `controlcapacity`, and reports `streaming_zip_conduit` availability without falling back to `afc.shim.remote`.
 
 use super::apps::{app_group_container_path, container_path_from_url, normalize_data_container_url};
 use super::house_arrest::HouseArrestDirItem;
 use super::rsd::{
-    device_identifier_string, invocation_identifier_string, RemoteXpcConn, RsdAsyncStream,
-    RsdTunnelSession, XpcValue,
+    invocation_identifier_string, RemoteXpcConn, RsdAsyncStream, RsdPortDialer, RsdTunnelSession,
+    StreamingZipConduitClient, XpcValue,
 };
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -19,6 +19,7 @@ pub const SERVICE_FILESERVICE_CONTROLCAPACITY: &str =
     "com.apple.coredevice.fileservice.controlcapacity";
 pub const SERVICE_FILESERVICE_CONTROL: &str = "com.apple.coredevice.fileservice.control";
 pub const SERVICE_FILESERVICE_DATA: &str = "com.apple.coredevice.fileservice.data";
+#[allow(dead_code)]
 pub const COREDEVICE_FEATURE_TRANSFER_FILES: &str = "com.apple.coredevice.feature.transferFiles";
 
 /// Strictly positive default buffer/control capacity (4 MiB) sent during CoreDevice FileService setup.
@@ -26,6 +27,12 @@ pub const DEFAULT_CONTROL_CAPACITY: u64 = 4 * 1024 * 1024;
 pub const MIN_POSITIVE_CONTROL_CAPACITY: u64 = 1;
 
 const DATA_STREAM_MAGIC: &[u8; 8] = b"rwb!FILE";
+const DATA_STREAM_PREAMBLE_LEN: usize = 0x24;
+const MAX_READ_FILE_BYTES: usize = 256 * 1024 * 1024;
+const DOMAIN_APP_DATA_CONTAINER: u64 = 1;
+const DOMAIN_APP_GROUP_CONTAINER: u64 = 2;
+const DARWIN_O_RDONLY: i64 = 0x0000;
+const DARWIN_O_WRONLY_CREAT_TRUNC: i64 = 0x0601;
 const APP_GROUPS_VIRTUAL_DIR: &str = "@AppGroups";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -286,6 +293,16 @@ pub struct FileServiceCapabilityReport {
     pub data_uses_remote_xpc: bool,
     pub app_group_count: usize,
     pub note: String,
+    #[serde(default)]
+    pub trusted_tunnel_active: bool,
+    #[serde(default)]
+    pub trusted_services_count: usize,
+    #[serde(default)]
+    pub streaming_zip_conduit_service: Option<String>,
+    #[serde(default)]
+    pub streaming_zip_conduit_port: Option<u16>,
+    #[serde(default)]
+    pub coredevice_tunnel_status: Option<String>,
 }
 
 pub fn probe_capabilities(
@@ -310,6 +327,11 @@ pub fn probe_capabilities(
             data_uses_remote_xpc: false,
             app_group_count,
             note: "Phiên RemotePairing/RSD chưa hoạt động".to_string(),
+            trusted_tunnel_active: false,
+            trusted_services_count: 0,
+            streaming_zip_conduit_service: None,
+            streaming_zip_conduit_port: None,
+            coredevice_tunnel_status: None,
         };
     };
 
@@ -318,9 +340,19 @@ pub fn probe_capabilities(
         SERVICE_FILESERVICE_CONTROL,
     ]);
     let data = sess.resolve_service_pair(&[SERVICE_FILESERVICE_DATA]);
+    let conduit = StreamingZipConduitClient::probe(sess);
+    let conduit_svc = conduit.as_ref().map(|(n, _, _)| n.clone());
+    let conduit_port = conduit.as_ref().map(|(_, i, _)| i.port);
+    let trusted_active = sess.coredevice_proxy_active;
+    let trusted_count = sess.trusted_services.len();
+    let tunnel_status = sess.coredevice_tunnel_status.clone();
 
     match (ctrl, data) {
         (Some((ctrl_name, ctrl_info)), Some((data_name, data_info))) => {
+            let conduit_note = conduit_svc
+                .as_deref()
+                .map(|c| format!(", conduit={}", c))
+                .unwrap_or_default();
             FileServiceCapabilityReport {
                 state: "ready".to_string(),
                 control_service: Some(ctrl_name),
@@ -332,36 +364,56 @@ pub fn probe_capabilities(
                 data_uses_remote_xpc: data_info.uses_remote_xpc,
                 app_group_count,
                 note: format!(
-                    "CoreDevice FileService sẵn sàng (controlcapacity={})",
-                    cap
+                    "CoreDevice FileService sẵn sàng qua Trusted RSD Tunnel ({} services, controlcapacity={}{})",
+                    trusted_count.max(sess.services.len()),
+                    cap,
+                    conduit_note
                 ),
+                trusted_tunnel_active: trusted_active,
+                trusted_services_count: trusted_count,
+                streaming_zip_conduit_service: conduit_svc,
+                streaming_zip_conduit_port: conduit_port,
+                coredevice_tunnel_status: tunnel_status,
             }
         }
-        (ctrl_opt, data_opt) => FileServiceCapabilityReport {
-            state: "unavailable".to_string(),
-            control_service: ctrl_opt.as_ref().map(|(n, _)| n.clone()),
-            control_port: ctrl_opt.as_ref().map(|(_, i)| i.port),
-            data_service: data_opt.as_ref().map(|(n, _)| n.clone()),
-            data_port: data_opt.as_ref().map(|(_, i)| i.port),
-            controlcapacity_value: cap,
-            control_uses_remote_xpc: ctrl_opt.as_ref().map(|(_, i)| i.uses_remote_xpc).unwrap_or(false),
-            data_uses_remote_xpc: data_opt.as_ref().map(|(_, i)| i.uses_remote_xpc).unwrap_or(false),
-            app_group_count,
-            note: "RSD không quảng bá đủ cặp com.apple.coredevice.fileservice.controlcapacity & .data"
-                .to_string(),
-        },
+        (ctrl_opt, data_opt) => {
+            let base_note = tunnel_status.clone().unwrap_or_else(|| {
+                "RSD không quảng bá đủ cặp com.apple.coredevice.fileservice.controlcapacity & .data"
+                    .to_string()
+            });
+            FileServiceCapabilityReport {
+                state: "unavailable".to_string(),
+                control_service: ctrl_opt.as_ref().map(|(n, _)| n.clone()),
+                control_port: ctrl_opt.as_ref().map(|(_, i)| i.port),
+                data_service: data_opt.as_ref().map(|(n, _)| n.clone()),
+                data_port: data_opt.as_ref().map(|(_, i)| i.port),
+                controlcapacity_value: cap,
+                control_uses_remote_xpc: ctrl_opt
+                    .as_ref()
+                    .map(|(_, i)| i.uses_remote_xpc)
+                    .unwrap_or(false),
+                data_uses_remote_xpc: data_opt
+                    .as_ref()
+                    .map(|(_, i)| i.uses_remote_xpc)
+                    .unwrap_or(false),
+                app_group_count,
+                note: base_note,
+                trusted_tunnel_active: trusted_active,
+                trusted_services_count: trusted_count,
+                streaming_zip_conduit_service: conduit_svc,
+                streaming_zip_conduit_port: conduit_port,
+                coredevice_tunnel_status: tunnel_status,
+            }
+        }
     }
-}
-
-enum FileServiceDataChannel {
-    Xpc(RemoteXpcConn<RsdAsyncStream>),
-    RawStream(RsdAsyncStream),
 }
 
 #[allow(dead_code)]
 pub struct CoreDeviceFileServiceClient {
     control: RemoteXpcConn<RsdAsyncStream>,
-    data: FileServiceDataChannel,
+    data_dialer: RsdPortDialer,
+    data_port: u16,
+    sessions: HashMap<(u64, String), String>,
     pub control_capacity: u64,
     pub control_service_name: String,
     pub session_token: String,
@@ -376,11 +428,11 @@ fn classify_xpc_error(detail: &str) -> FileServiceFailureReason {
         || lower.contains("permission")
         || lower.contains("denied")
         || lower.contains("controlcapacity")
+        || lower.contains("11014")
     {
         FileServiceFailureReason::Unsupported
     } else if lower.contains("mapping")
         || lower.contains("incomplete")
-        || lower.contains("missing coredevice")
         || lower.contains("missing")
         || lower.contains("invalid xpc")
         || lower.contains("schema")
@@ -393,6 +445,24 @@ fn classify_xpc_error(detail: &str) -> FileServiceFailureReason {
 }
 
 fn extract_reply_error(reply: &XpcValue) -> Option<String> {
+    if let Some(enc) = reply.dict_get_ci(&["EncodedError", "encodedError"]) {
+        if let Some(desc) = enc
+            .dict_get_ci(&[
+                "LocalizedDescription",
+                "NSLocalizedDescription",
+                "localizedDescription",
+                "description",
+                "message",
+                "reason",
+            ])
+            .and_then(|v| v.as_str())
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+        {
+            return Some(desc.to_string());
+        }
+        return Some("dtfileserviced trả về EncodedError".to_string());
+    }
     if let Some(err) = reply.dict_get_ci(&["CoreDevice.error", "error", "Error", "NSError"]) {
         if let Some(s) = err.as_str().map(str::trim).filter(|s| !s.is_empty()) {
             return Some(s.to_string());
@@ -400,6 +470,7 @@ fn extract_reply_error(reply: &XpcValue) -> Option<String> {
         if let Some(desc) = err
             .dict_get_ci(&[
                 "NSLocalizedDescription",
+                "LocalizedDescription",
                 "localizedDescription",
                 "description",
                 "message",
@@ -417,151 +488,124 @@ fn extract_reply_error(reply: &XpcValue) -> Option<String> {
     None
 }
 
-fn build_control_envelope(
-    feature_id: &str,
-    control_capacity: u64,
-    input: XpcValue,
-    action: XpcValue,
-) -> XpcValue {
-    let cap = normalize_control_capacity(control_capacity);
-    let dev_id = device_identifier_string();
-    let inv_id = invocation_identifier_string();
-    XpcValue::Dictionary(vec![
-        ("CoreDevice.CoreDeviceDDIProtocolVersion".to_string(), XpcValue::Int64(0)),
-        ("CoreDevice.action".to_string(), action),
-        (
-            "CoreDevice.coreDeviceVersion".to_string(),
-            XpcValue::Dictionary(vec![
-                (
-                    "components".to_string(),
-                    XpcValue::Array(vec![XpcValue::UInt64(629), XpcValue::UInt64(3)]),
-                ),
-                ("originalComponentsCount".to_string(), XpcValue::Int64(2)),
-                ("stringValue".to_string(), XpcValue::String("629.3".to_string())),
-            ]),
+fn scope_to_domain_identifier_rel(scope: &ResolvedTargetScope) -> Result<(u64, String, String), CoreDeviceFileServiceError> {
+    match scope {
+        ResolvedTargetScope::AppDataContainer {
+            bundle_id,
+            subpath,
+            ..
+        } => {
+            let trimmed = subpath.trim().trim_start_matches('/').trim_end_matches('/');
+            let rel = if trimmed.is_empty() {
+                ".".to_string()
+            } else {
+                trimmed.to_string()
+            };
+            Ok((DOMAIN_APP_DATA_CONTAINER, bundle_id.clone(), rel))
+        }
+        ResolvedTargetScope::AppGroup {
+            group_id,
+            subpath,
+            ..
+        } => {
+            let trimmed = subpath.trim().trim_start_matches('/').trim_end_matches('/');
+            let rel = if trimmed.is_empty() {
+                ".".to_string()
+            } else {
+                trimmed.to_string()
+            };
+            Ok((DOMAIN_APP_GROUP_CONTAINER, group_id.clone(), rel))
+        }
+        ResolvedTargetScope::VirtualAppGroupIndex => Err(
+            CoreDeviceFileServiceError::request_mapping_incomplete(
+                "Virtual AppGroup index handled directly",
+            ),
         ),
-        ("CoreDevice.deviceIdentifier".to_string(), XpcValue::String(dev_id)),
-        (
-            "CoreDevice.featureIdentifier".to_string(),
-            XpcValue::String(feature_id.to_string()),
-        ),
-        ("controlcapacity".to_string(), XpcValue::UInt64(cap)),
-        ("ControlCapacity".to_string(), XpcValue::UInt64(cap)),
-        ("capacity".to_string(), XpcValue::UInt64(cap)),
-        ("CoreDevice.input".to_string(), input),
-        ("CoreDevice.invocationIdentifier".to_string(), XpcValue::String(inv_id)),
-    ])
+    }
+}
+
+fn xpc_u64(val: &XpcValue) -> Option<u64> {
+    match val {
+        XpcValue::UInt64(u) => Some(*u),
+        XpcValue::Int64(i) if *i >= 0 => Some(*i as u64),
+        XpcValue::String(s) => s.trim().parse::<u64>().ok(),
+        _ => None,
+    }
+}
+
+fn xpc_i64(val: &XpcValue) -> Option<i64> {
+    match val {
+        XpcValue::Int64(i) => Some(*i),
+        XpcValue::UInt64(u) => i64::try_from(*u).ok(),
+        XpcValue::String(s) => s.trim().parse::<i64>().ok(),
+        _ => None,
+    }
+}
+
+fn join_rel_child(parent: &str, name: &str) -> String {
+    let clean_name = name.trim_start_matches('/');
+    if parent == "." || parent.is_empty() {
+        clean_name.to_string()
+    } else {
+        format!("{}/{}", parent.trim_end_matches('/'), clean_name)
+    }
 }
 
 impl CoreDeviceFileServiceClient {
-    /// Connects concurrently to `com.apple.coredevice.fileservice.controlcapacity` (or `.control`)
-    /// and `com.apple.coredevice.fileservice.data`, initializing a strictly positive `controlcapacity`.
+    /// Connects to `com.apple.coredevice.fileservice.controlcapacity` (or `.control`) and binds
+    /// `com.apple.coredevice.fileservice.data` over the Trusted RSD Software Tunnel.
     pub async fn connect_async(
         session: &RsdTunnelSession,
         requested_capacity: u64,
     ) -> Result<Self, CoreDeviceFileServiceError> {
         let control_capacity = normalize_control_capacity(requested_capacity);
 
-        let (ctrl_name, ctrl_info) = session
-            .resolve_service_pair(&[
+        let (ctrl_name, ctrl_info, ctrl_trusted) = session
+            .resolve_layered_service(&[
                 SERVICE_FILESERVICE_CONTROLCAPACITY,
                 SERVICE_FILESERVICE_CONTROL,
             ])
             .ok_or_else(|| {
-                CoreDeviceFileServiceError::unavailable(
-                    "RSD không có com.apple.coredevice.fileservice.controlcapacity / .control",
-                )
+                let extra = session
+                    .coredevice_tunnel_status
+                    .as_deref()
+                    .map(|s| format!(" ({})", s))
+                    .unwrap_or_default();
+                CoreDeviceFileServiceError::unavailable(format!(
+                    "RSD không có com.apple.coredevice.fileservice.controlcapacity / .control{}",
+                    extra
+                ))
             })?;
 
-        let (_, data_info) = session
-            .resolve_service_pair(&[SERVICE_FILESERVICE_DATA])
+        let (_, data_info, data_trusted) = session
+            .resolve_layered_service(&[SERVICE_FILESERVICE_DATA])
             .ok_or_else(|| {
                 CoreDeviceFileServiceError::unavailable(
                     "RSD không có com.apple.coredevice.fileservice.data",
                 )
             })?;
 
-        let (ctrl_res, data_res) = tokio::join!(
-            session.connect_port_async(ctrl_info.port),
-            session.connect_port_async(data_info.port)
-        );
+        let ctrl_stream = session
+            .transport
+            .connect_service_port(ctrl_info.port, ctrl_trusted)
+            .await
+            .map_err(CoreDeviceFileServiceError::unavailable)?;
+        let data_dialer = session.port_dialer(data_trusted).map_err(|e| {
+            CoreDeviceFileServiceError::unavailable(format!("Không tạo được dialer .data: {}", e))
+        })?;
 
-        let ctrl_stream = ctrl_res.map_err(CoreDeviceFileServiceError::unavailable)?;
-        let data_stream = data_res.map_err(CoreDeviceFileServiceError::unavailable)?;
-
-        let mut control = RemoteXpcConn::connect_and_handshake(ctrl_stream)
+        let control = RemoteXpcConn::connect_and_handshake(ctrl_stream)
             .await
             .map_err(|e| CoreDeviceFileServiceError::new(classify_xpc_error(&e), e))?;
-
-        let data = if data_info.uses_remote_xpc {
-            let xpc_data = RemoteXpcConn::connect_and_handshake(data_stream)
-                .await
-                .map_err(|e| CoreDeviceFileServiceError::new(classify_xpc_error(&e), e))?;
-            FileServiceDataChannel::Xpc(xpc_data)
-        } else {
-            FileServiceDataChannel::RawStream(data_stream)
-        };
-
-        // Initialize session with positive `controlcapacity` (> 0) to satisfy CoreDevice control guard
-        let session_token = invocation_identifier_string();
-        let init_input = XpcValue::Dictionary(vec![
-            ("controlcapacity".to_string(), XpcValue::UInt64(control_capacity)),
-            ("ControlCapacity".to_string(), XpcValue::UInt64(control_capacity)),
-            ("capacity".to_string(), XpcValue::UInt64(control_capacity)),
-            ("bufferCapacity".to_string(), XpcValue::UInt64(control_capacity)),
-            ("sessionIdentifier".to_string(), XpcValue::String(session_token.clone())),
-            ("dataChannelStreamMagic".to_string(), XpcValue::String("rwb!FILE".to_string())),
-        ]);
-        let init_action = XpcValue::Dictionary(vec![
-            ("command".to_string(), XpcValue::String("configure".to_string())),
-            ("controlcapacity".to_string(), XpcValue::UInt64(control_capacity)),
-        ]);
-        let init_req = build_control_envelope(
-            COREDEVICE_FEATURE_TRANSFER_FILES,
-            control_capacity,
-            init_input,
-            init_action,
-        );
-
-        control
-            .send_object(init_req, true)
-            .await
-            .map_err(|e| CoreDeviceFileServiceError::new(classify_xpc_error(&e), e))?;
-
-        let init_reply = tokio::time::timeout(
-            Duration::from_secs(4),
-            control.recv_reply(),
-        )
-        .await
-        .map_err(|_| {
-            CoreDeviceFileServiceError::unavailable(
-                "Hết thời gian phản hồi phiên CoreDevice FileService",
-            )
-        })?
-        .map_err(|e| CoreDeviceFileServiceError::new(classify_xpc_error(&e), e))?;
-
-        if let Some(err_msg) = extract_reply_error(&init_reply) {
-            return Err(CoreDeviceFileServiceError::new(
-                classify_xpc_error(&err_msg),
-                err_msg,
-            ));
-        }
-
-        let negotiated_token = init_reply
-            .dict_get_ci(&["CoreDevice.output", "output", "result"])
-            .and_then(|o| {
-                o.dict_get_ci(&["sessionIdentifier", "sessionToken", "requestIdentifier"])
-            })
-            .and_then(|v| v.as_str())
-            .map(|s| s.to_string())
-            .unwrap_or(session_token);
 
         Ok(Self {
             control,
-            data,
+            data_dialer,
+            data_port: data_info.port,
+            sessions: HashMap::new(),
             control_capacity,
             control_service_name: ctrl_name,
-            session_token: negotiated_token,
+            session_token: invocation_identifier_string(),
         })
     }
 
@@ -573,118 +617,21 @@ impl CoreDeviceFileServiceClient {
         rt.block_on(Self::connect_async(session, requested_capacity))
     }
 
-    fn build_target_input(
-        &self,
-        op: &str,
-        ctx: &FileServiceTargetContext,
-        scope: &ResolvedTargetScope,
-    ) -> Result<(XpcValue, XpcValue), CoreDeviceFileServiceError> {
-        let mut input_entries = vec![
-            ("operation".to_string(), XpcValue::String(op.to_string())),
-            (
-                "controlcapacity".to_string(),
-                XpcValue::UInt64(self.control_capacity),
-            ),
-            (
-                "sessionIdentifier".to_string(),
-                XpcValue::String(self.session_token.clone()),
-            ),
-            (
-                "bundleIdentifier".to_string(),
-                XpcValue::String(ctx.bundle_id.clone()),
-            ),
-        ];
-
-        if let Some(ref durl) = ctx.data_container_url {
-            input_entries.push(("DataContainerURL".to_string(), XpcValue::String(durl.clone())));
-            input_entries.push(("dataContainerURL".to_string(), XpcValue::String(durl.clone())));
-        }
-        if !ctx.system_app_group_identifiers.is_empty() {
-            input_entries.push((
-                "systemAppGroupIdentifiers".to_string(),
-                XpcValue::Array(
-                    ctx.system_app_group_identifiers
-                        .iter()
-                        .map(|g| XpcValue::String(g.clone()))
-                        .collect(),
-                ),
-            ));
-            input_entries.push((
-                "appGroupContainers".to_string(),
-                XpcValue::Array(ctx.app_group_xpc_paths()),
-            ));
-        }
-
-        let action = match scope {
-            ResolvedTargetScope::AppDataContainer {
-                bundle_id,
-                data_container_url,
-                root_path,
-                subpath,
-            } => {
-                input_entries.push((
-                    "domain".to_string(),
-                    XpcValue::String("appDataContainer".to_string()),
-                ));
-                input_entries.push(("identifier".to_string(), XpcValue::String(bundle_id.clone())));
-                input_entries.push(("rootPath".to_string(), XpcValue::String(root_path.clone())));
-                input_entries.push(("subdirectory".to_string(), XpcValue::String(subpath.clone())));
-                input_entries.push(("path".to_string(), XpcValue::String(subpath.clone())));
-                XpcValue::Dictionary(vec![
-                    ("command".to_string(), XpcValue::String(op.to_string())),
-                    ("domain".to_string(), XpcValue::String("appDataContainer".to_string())),
-                    ("DataContainerURL".to_string(), XpcValue::String(data_container_url.clone())),
-                    ("subdirectory".to_string(), XpcValue::String(subpath.clone())),
-                ])
-            }
-            ResolvedTargetScope::AppGroup {
-                group_id,
-                root_path,
-                subpath,
-            } => {
-                input_entries.push((
-                    "domain".to_string(),
-                    XpcValue::String("appGroupDataContainer".to_string()),
-                ));
-                input_entries.push(("identifier".to_string(), XpcValue::String(group_id.clone())));
-                input_entries.push(("rootPath".to_string(), XpcValue::String(root_path.clone())));
-                input_entries.push(("subdirectory".to_string(), XpcValue::String(subpath.clone())));
-                input_entries.push(("path".to_string(), XpcValue::String(subpath.clone())));
-                XpcValue::Dictionary(vec![
-                    ("command".to_string(), XpcValue::String(op.to_string())),
-                    ("domain".to_string(), XpcValue::String("appGroupDataContainer".to_string())),
-                    ("identifier".to_string(), XpcValue::String(group_id.clone())),
-                    ("appGroupPath".to_string(), XpcValue::String(root_path.clone())),
-                    ("subdirectory".to_string(), XpcValue::String(subpath.clone())),
-                ])
-            }
-            ResolvedTargetScope::VirtualAppGroupIndex => {
-                return Err(CoreDeviceFileServiceError::request_mapping_incomplete(
-                    "Virtual AppGroup index handled directly",
-                ));
-            }
-        };
-
-        Ok((XpcValue::Dictionary(input_entries), action))
-    }
-
-    async fn invoke_control(
+    async fn send_cmd(
         &mut self,
-        feature_id: &str,
-        input: XpcValue,
-        action: XpcValue,
+        entries: Vec<(String, XpcValue)>,
     ) -> Result<XpcValue, CoreDeviceFileServiceError> {
-        let req = build_control_envelope(feature_id, self.control_capacity, input, action);
+        let req = XpcValue::Dictionary(entries);
         self.control
             .send_object(req, true)
             .await
             .map_err(|e| CoreDeviceFileServiceError::new(classify_xpc_error(&e), e))?;
 
-        let reply = tokio::time::timeout(Duration::from_secs(8), self.control.recv_reply())
+        let (_ch, reply) = tokio::time::timeout(Duration::from_secs(10), self.control.recv_any())
             .await
             .map_err(|_| {
                 CoreDeviceFileServiceError::unavailable(
-                    "CoreDevice FileService timeout khi chờ phản hồi",
+                    "CoreDevice FileService timeout khi chờ phản hồi XPC",
                 )
             })?
             .map_err(|e| CoreDeviceFileServiceError::new(classify_xpc_error(&e), e))?;
@@ -697,6 +644,211 @@ impl CoreDeviceFileServiceClient {
         }
 
         Ok(reply)
+    }
+
+    async fn ensure_session_for_scope(
+        &mut self,
+        domain: u64,
+        identifier: &str,
+    ) -> Result<String, CoreDeviceFileServiceError> {
+        let key = (domain, identifier.to_string());
+        if let Some(existing) = self.sessions.get(&key) {
+            return Ok(existing.clone());
+        }
+
+        let cmd_entries = vec![
+            ("Cmd".to_string(), XpcValue::String("CreateSession".to_string())),
+            ("Domain".to_string(), XpcValue::UInt64(domain)),
+            (
+                "Identifier".to_string(),
+                XpcValue::String(identifier.to_string()),
+            ),
+            ("Session".to_string(), XpcValue::String(String::new())),
+            ("User".to_string(), XpcValue::String("mobile".to_string())),
+        ];
+        let reply = self.send_cmd(cmd_entries).await?;
+        let sid = reply
+            .dict_get_ci(&["NewSessionID", "SessionID", "sessionID"])
+            .and_then(|v| v.as_id_string())
+            .ok_or_else(|| {
+                CoreDeviceFileServiceError::request_mapping_incomplete(format!(
+                    "dtfileserviced CreateSession thiếu NewSessionID (keys: [{}])",
+                    reply.summarize_dict_keys()
+                ))
+            })?;
+        self.session_token = sid.clone();
+        self.sessions.insert(key, sid.clone());
+        Ok(sid)
+    }
+
+    async fn fs_op(
+        &mut self,
+        session_id: &str,
+        sub_cmd: &str,
+        extra: Vec<(String, XpcValue)>,
+    ) -> Result<XpcValue, CoreDeviceFileServiceError> {
+        let mut entries = vec![
+            (
+                "Cmd".to_string(),
+                XpcValue::String("FileSystemOperation".to_string()),
+            ),
+            ("SubCmd".to_string(), XpcValue::String(sub_cmd.to_string())),
+            (
+                "SessionID".to_string(),
+                XpcValue::String(session_id.to_string()),
+            ),
+        ];
+        entries.extend(extra);
+        self.send_cmd(entries).await
+    }
+
+    async fn get_attributes(
+        &mut self,
+        session_id: &str,
+        rel_path: &str,
+    ) -> Result<(bool, i64), CoreDeviceFileServiceError> {
+        let reply = self
+            .fs_op(
+                session_id,
+                "GetAttributes",
+                vec![("Path".to_string(), XpcValue::String(rel_path.to_string()))],
+            )
+            .await?;
+        let attrs = reply.dict_get_ci(&["Attributes", "attributes"]).unwrap_or(&reply);
+        let is_dir = attrs
+            .dict_get_ci(&["NSFileType", "FileType", "Type", "type"])
+            .and_then(|v| v.as_str())
+            .map(|s| s.contains("Directory") || s.eq_ignore_ascii_case("dir"))
+            .or_else(|| {
+                attrs
+                    .dict_get_ci(&["StMode", "Mode", "mode"])
+                    .and_then(xpc_u64)
+                    .map(|m| (m & 0o170_000) == 0o040_000)
+            })
+            .or_else(|| {
+                attrs
+                    .dict_get_ci(&["isDirectory", "IsDirectory", "is_dir"])
+                    .and_then(|v| v.as_bool())
+            })
+            .unwrap_or(false);
+        let size = attrs
+            .dict_get_ci(&["NSFileSize", "FileSize", "Size", "StSize", "size"])
+            .and_then(xpc_i64)
+            .unwrap_or(if is_dir { -1 } else { 0 });
+        Ok((is_dir, if is_dir { -1 } else { size }))
+    }
+
+    async fn ensure_parent_dirs(
+        &mut self,
+        session_id: &str,
+        rel_path: &str,
+    ) -> Result<(), CoreDeviceFileServiceError> {
+        let clean = rel_path.trim_start_matches('/').trim_end_matches('/');
+        let parts: Vec<&str> = clean.split('/').filter(|s| !s.is_empty() && *s != ".").collect();
+        if parts.len() <= 1 {
+            return Ok(());
+        }
+        let mut acc = String::new();
+        for seg in &parts[..parts.len() - 1] {
+            if !acc.is_empty() {
+                acc.push('/');
+            }
+            acc.push_str(seg);
+            match self
+                .fs_op(
+                    session_id,
+                    "CreateDirectory",
+                    vec![
+                        ("Path".to_string(), XpcValue::String(acc.clone())),
+                        ("Mode".to_string(), XpcValue::Int64(0o755)),
+                    ],
+                )
+                .await
+            {
+                Ok(_) => {}
+                Err(e) => {
+                    let low = e.detail.to_ascii_lowercase();
+                    if !(low.contains("exist") || low.contains("eexist")) {
+                        // Best-effort parent creation; let OpenFile report real permission failure
+                        eprintln!("fileservice: CreateDirectory '{}' note: {}", acc, e);
+                    }
+                }
+            }
+        }
+        Ok(())
+    }
+
+    async fn read_via_open_file(
+        &mut self,
+        session_id: &str,
+        rel_path: &str,
+    ) -> Result<Vec<u8>, CoreDeviceFileServiceError> {
+        let open_reply = self
+            .fs_op(
+                session_id,
+                "OpenFile",
+                vec![
+                    ("Path".to_string(), XpcValue::String(rel_path.to_string())),
+                    ("Flags".to_string(), XpcValue::Int64(DARWIN_O_RDONLY)),
+                    ("Mode".to_string(), XpcValue::Int64(0o644)),
+                ],
+            )
+            .await?;
+        let fd = open_reply
+            .dict_get_ci(&["FileDescriptor", "FD", "Handle", "NewFileID"])
+            .and_then(xpc_i64)
+            .ok_or_else(|| {
+                CoreDeviceFileServiceError::request_mapping_incomplete(
+                    "OpenFile (read) thiếu FileDescriptor",
+                )
+            })?;
+
+        let chunk_sz = self.control_capacity.clamp(4096, 512 * 1024);
+        let mut out = Vec::new();
+        let mut offset: u64 = 0;
+        let read_res: Result<Vec<u8>, CoreDeviceFileServiceError> = async {
+            loop {
+                let rd = self
+                    .fs_op(
+                        session_id,
+                        "ReadFile",
+                        vec![
+                            ("FileDescriptor".to_string(), XpcValue::Int64(fd)),
+                            ("Size".to_string(), XpcValue::UInt64(chunk_sz)),
+                            ("Offset".to_string(), XpcValue::UInt64(offset)),
+                        ],
+                    )
+                    .await?;
+                let Some(XpcValue::Data(bytes)) = rd.dict_get_ci(&["Data", "data", "Payload"]) else {
+                    break;
+                };
+                if bytes.is_empty() {
+                    break;
+                }
+                if out.len() + bytes.len() > MAX_READ_FILE_BYTES {
+                    return Err(CoreDeviceFileServiceError::unsupported(
+                        "Tệp vượt quá giới hạn đọc 256 MiB",
+                    ));
+                }
+                out.extend_from_slice(bytes);
+                offset += bytes.len() as u64;
+                if (bytes.len() as u64) < chunk_sz {
+                    break;
+                }
+            }
+            Ok(out)
+        }
+        .await;
+
+        let _ = self
+            .fs_op(
+                session_id,
+                "CloseFile",
+                vec![("FileDescriptor".to_string(), XpcValue::Int64(fd))],
+            )
+            .await;
+
+        read_res
     }
 
     pub async fn list_async(
@@ -717,38 +869,68 @@ impl CoreDeviceFileServiceClient {
             return Ok(items);
         }
 
-        let (input, action) = self.build_target_input("list", ctx, &scope)?;
+        let (domain, identifier, rel_path) = scope_to_domain_identifier_rel(&scope)?;
+        let session_id = self.ensure_session_for_scope(domain, &identifier).await?;
+
         let reply = self
-            .invoke_control(COREDEVICE_FEATURE_TRANSFER_FILES, input, action)
+            .send_cmd(vec![
+                (
+                    "Cmd".to_string(),
+                    XpcValue::String("RetrieveDirectoryList".to_string()),
+                ),
+                (
+                    "MessageUUID".to_string(),
+                    XpcValue::String(invocation_identifier_string()),
+                ),
+                ("Path".to_string(), XpcValue::String(rel_path.clone())),
+                (
+                    "SessionID".to_string(),
+                    XpcValue::String(session_id.clone()),
+                ),
+            ])
             .await?;
 
-        let Some(output) = reply.dict_get_ci(&["CoreDevice.output", "output", "entries", "items"])
+        let Some(raw_items) = reply
+            .dict_get_ci(&["FileList", "fileList", "CoreDevice.output", "entries"])
+            .and_then(|v| v.as_array())
         else {
             return Err(CoreDeviceFileServiceError::request_mapping_incomplete(
-                "CoreDevice fileservice list thiếu CoreDevice.output/entries",
-            ));
-        };
-
-        let raw_items = if let Some(arr) = output.as_array() {
-            arr
-        } else if let Some(arr) = output
-            .dict_get_ci(&["entries", "items", "files", "contents"])
-            .and_then(|v| v.as_array())
-        {
-            arr
-        } else {
-            return Err(CoreDeviceFileServiceError::request_mapping_incomplete(
-                "CoreDevice fileservice list nhận định dạng output không đầy đủ",
+                format!(
+                    "dtfileserviced RetrieveDirectoryList thiếu FileList (keys: [{}])",
+                    reply.summarize_dict_keys()
+                ),
             ));
         };
 
         let mut parsed = Vec::with_capacity(raw_items.len());
+        let mut attrs_supported = raw_items.len() <= 64;
         for entry in raw_items {
             if let Some(name_str) = entry.as_str().map(str::trim).filter(|s| !s.is_empty()) {
+                if name_str == "." || name_str == ".." {
+                    continue;
+                }
+                let child_rel = join_rel_child(&rel_path, name_str);
+                let (is_dir, size) = if attrs_supported {
+                    match self.get_attributes(&session_id, &child_rel).await {
+                        Ok(pair) => pair,
+                        Err(_) => {
+                            if parsed.is_empty() {
+                                attrs_supported = false;
+                            }
+                            let known_dir = matches!(
+                                name_str,
+                                "Documents" | "Library" | "tmp" | "SystemData" | "StoreKit"
+                            );
+                            (known_dir, if known_dir { -1 } else { 0 })
+                        }
+                    }
+                } else {
+                    (false, 0)
+                };
                 parsed.push(HouseArrestDirItem {
                     name: name_str.to_string(),
-                    is_dir: false,
-                    size: 0,
+                    is_dir,
+                    size,
                 });
                 continue;
             }
@@ -756,7 +938,7 @@ impl CoreDeviceFileServiceClient {
                 .dict_get_ci(&["name", "filename", "relativePath", "path"])
                 .and_then(|v| v.as_str())
                 .map(str::trim)
-                .filter(|s| !s.is_empty())
+                .filter(|s| !s.is_empty() && *s != "." && *s != "..")
             else {
                 continue;
             };
@@ -764,17 +946,15 @@ impl CoreDeviceFileServiceClient {
                 .dict_get_ci(&["isDirectory", "is_dir", "directory", "type"])
                 .map(|v| match v {
                     XpcValue::Bool(b) => *b,
-                    XpcValue::String(s) => s.eq_ignore_ascii_case("directory") || s.eq_ignore_ascii_case("dir"),
+                    XpcValue::String(s) => {
+                        s.eq_ignore_ascii_case("directory") || s.eq_ignore_ascii_case("dir")
+                    }
                     _ => false,
                 })
                 .unwrap_or(false);
             let size = entry
                 .dict_get_ci(&["size", "fileSize", "allocatedSize"])
-                .and_then(|v| match v {
-                    XpcValue::Int64(i) => Some(*i),
-                    XpcValue::UInt64(u) => Some(*u as i64),
-                    _ => None,
-                })
+                .and_then(xpc_i64)
                 .unwrap_or(if is_dir { -1 } else { 0 });
             parsed.push(HouseArrestDirItem {
                 name: name.to_string(),
@@ -803,83 +983,104 @@ impl CoreDeviceFileServiceClient {
         path: &str,
     ) -> Result<Vec<u8>, CoreDeviceFileServiceError> {
         let scope = resolve_target_scope(ctx, path)?;
-        let (input, action) = self.build_target_input("fileservice_read", ctx, &scope)?;
-        let reply = self
-            .invoke_control(COREDEVICE_FEATURE_TRANSFER_FILES, input, action)
-            .await?;
+        let (domain, identifier, rel_path) = scope_to_domain_identifier_rel(&scope)?;
+        let session_id = self.ensure_session_for_scope(domain, &identifier).await?;
 
-        let output = reply
-            .dict_get_ci(&["CoreDevice.output", "output"])
-            .ok_or_else(|| {
-                CoreDeviceFileServiceError::request_mapping_incomplete(
-                    "CoreDevice fileservice_read thiếu CoreDevice.output",
-                )
-            })?;
-
-        // Inline data fast-path (small metadata files)
-        if let Some(XpcValue::Data(inline_bytes)) = output.dict_get_ci(&["data", "contents", "bytes"])
+        let reply = match self
+            .send_cmd(vec![
+                (
+                    "Cmd".to_string(),
+                    XpcValue::String("RetrieveFile".to_string()),
+                ),
+                ("Path".to_string(), XpcValue::String(rel_path.clone())),
+                (
+                    "SessionID".to_string(),
+                    XpcValue::String(session_id.clone()),
+                ),
+            ])
+            .await
         {
-            return Ok(inline_bytes.clone());
+            Ok(r) => r,
+            Err(retrieve_err) => {
+                if let Ok(bytes) = self.read_via_open_file(&session_id, &rel_path).await {
+                    return Ok(bytes);
+                }
+                return Err(retrieve_err);
+            }
+        };
+
+        if let Some(XpcValue::Data(inline)) = reply.dict_get_ci(&["Data", "data", "contents"]) {
+            return Ok(inline.clone());
         }
 
-        let stream_size = output
-            .dict_get_ci(&["size", "fileSize", "length"])
-            .and_then(|v| match v {
-                XpcValue::UInt64(u) => Some(*u as usize),
-                XpcValue::Int64(i) if *i >= 0 => Some(*i as usize),
-                _ => None,
-            })
-            .ok_or_else(|| {
-                CoreDeviceFileServiceError::request_mapping_incomplete(
-                    "CoreDevice fileservice_read thiếu byte stream mapping trên .data",
-                )
-            })?;
+        let response_id = reply
+            .dict_get_ci(&["Response", "response"])
+            .and_then(xpc_u64);
+        let new_file_id = reply
+            .dict_get_ci(&["NewFileID", "newFileID", "FileID"])
+            .and_then(xpc_u64);
 
-        match &mut self.data {
-            FileServiceDataChannel::Xpc(data_xpc) => {
-                let data_msg = tokio::time::timeout(Duration::from_secs(10), data_xpc.recv_reply())
-                    .await
-                    .map_err(|_| {
-                        CoreDeviceFileServiceError::unavailable("Timeout đọc kênh fileservice.data")
-                    })?
-                    .map_err(|e| CoreDeviceFileServiceError::new(classify_xpc_error(&e), e))?;
-                if let Some(XpcValue::Data(bytes)) = data_msg.dict_get_ci(&["data", "payload", "bytes"])
-                {
-                    return Ok(bytes.clone());
-                }
-                Err(CoreDeviceFileServiceError::request_mapping_incomplete(
-                    "Kênh XPC fileservice.data không trả về payload",
-                ))
-            }
-            FileServiceDataChannel::RawStream(stream) => {
-                let mut hdr = [0u8; 16];
-                tokio::time::timeout(Duration::from_secs(10), stream.read_exact(&mut hdr))
-                    .await
-                    .map_err(|_| {
-                        CoreDeviceFileServiceError::unavailable("Timeout đọc header rwb!FILE")
-                    })?
-                    .map_err(|e| CoreDeviceFileServiceError::unavailable(e.to_string()))?;
-                if &hdr[..8] != DATA_STREAM_MAGIC {
-                    return Err(CoreDeviceFileServiceError::request_mapping_incomplete(
-                        "Header kênh fileservice.data không khớp rwb!FILE",
-                    ));
-                }
-                let frame_len = u64::from_le_bytes([
-                    hdr[8], hdr[9], hdr[10], hdr[11], hdr[12], hdr[13], hdr[14], hdr[15],
-                ]) as usize;
-                let expected = if frame_len > 0 { frame_len } else { stream_size };
-                let mut payload = vec![0u8; expected];
-                if expected > 0 {
-                    tokio::time::timeout(Duration::from_secs(15), stream.read_exact(&mut payload))
-                        .await
-                        .map_err(|_| {
-                            CoreDeviceFileServiceError::unavailable("Timeout đọc payload từ fileservice.data")
-                        })?
-                        .map_err(|e| CoreDeviceFileServiceError::unavailable(e.to_string()))?;
-                }
-                Ok(payload)
-            }
+        let (Some(resp_id), Some(file_id)) = (response_id, new_file_id) else {
+            return self.read_via_open_file(&session_id, &rel_path).await;
+        };
+
+        let mut data_stream = self
+            .data_dialer
+            .connect(self.data_port)
+            .await
+            .map_err(CoreDeviceFileServiceError::unavailable)?;
+
+        let mut req_hdr = Vec::with_capacity(40);
+        req_hdr.extend_from_slice(DATA_STREAM_MAGIC);
+        req_hdr.extend_from_slice(&resp_id.to_be_bytes());
+        req_hdr.extend_from_slice(&0u64.to_be_bytes());
+        req_hdr.extend_from_slice(&file_id.to_be_bytes());
+        req_hdr.extend_from_slice(&0u64.to_be_bytes());
+
+        data_stream
+            .write_all(&req_hdr)
+            .await
+            .map_err(|e| CoreDeviceFileServiceError::unavailable(format!("Ghi rwb!FILE: {}", e)))?;
+        data_stream
+            .flush()
+            .await
+            .map_err(|e| CoreDeviceFileServiceError::unavailable(e.to_string()))?;
+
+        let mut preamble = [0u8; DATA_STREAM_PREAMBLE_LEN];
+        tokio::time::timeout(Duration::from_secs(12), data_stream.read_exact(&mut preamble))
+            .await
+            .map_err(|_| {
+                CoreDeviceFileServiceError::unavailable("Timeout đọc preamble fileservice.data")
+            })?
+            .map_err(|e| CoreDeviceFileServiceError::unavailable(e.to_string()))?;
+
+        let mut len_buf = [0u8; 4];
+        tokio::time::timeout(Duration::from_secs(12), data_stream.read_exact(&mut len_buf))
+            .await
+            .map_err(|_| {
+                CoreDeviceFileServiceError::unavailable("Timeout đọc độ dài tệp fileservice.data")
+            })?
+            .map_err(|e| CoreDeviceFileServiceError::unavailable(e.to_string()))?;
+
+        let payload_len = u32::from_be_bytes(len_buf) as usize;
+        if payload_len > MAX_READ_FILE_BYTES {
+            return Err(CoreDeviceFileServiceError::unsupported(format!(
+                "Kích thước tệp fileservice.data vượt ngưỡng ({} bytes)",
+                payload_len
+            )));
         }
+        let mut payload = vec![0u8; payload_len];
+        if payload_len > 0 {
+            tokio::time::timeout(Duration::from_secs(20), data_stream.read_exact(&mut payload))
+                .await
+                .map_err(|_| {
+                    CoreDeviceFileServiceError::unavailable(
+                        "Timeout đọc payload từ fileservice.data",
+                    )
+                })?
+                .map_err(|e| CoreDeviceFileServiceError::unavailable(e.to_string()))?;
+        }
+        Ok(payload)
     }
 
     pub async fn fileservice_write_async(
@@ -889,77 +1090,64 @@ impl CoreDeviceFileServiceClient {
         data: &[u8],
     ) -> Result<(), CoreDeviceFileServiceError> {
         let scope = resolve_target_scope(ctx, path)?;
-        let (mut input, action) = self.build_target_input("fileservice_write", ctx, &scope)?;
-        if let XpcValue::Dictionary(ref mut entries) = input {
-            entries.push(("fileSize".to_string(), XpcValue::UInt64(data.len() as u64)));
-        }
-        let reply = self
-            .invoke_control(COREDEVICE_FEATURE_TRANSFER_FILES, input, action)
-            .await?;
+        let (domain, identifier, rel_path) = scope_to_domain_identifier_rel(&scope)?;
+        let session_id = self.ensure_session_for_scope(domain, &identifier).await?;
 
-        let output = reply
-            .dict_get_ci(&["CoreDevice.output", "output"])
+        self.ensure_parent_dirs(&session_id, &rel_path).await?;
+
+        let open_reply = self
+            .fs_op(
+                &session_id,
+                "OpenFile",
+                vec![
+                    ("Path".to_string(), XpcValue::String(rel_path.clone())),
+                    (
+                        "Flags".to_string(),
+                        XpcValue::Int64(DARWIN_O_WRONLY_CREAT_TRUNC),
+                    ),
+                    ("Mode".to_string(), XpcValue::Int64(0o644)),
+                ],
+            )
+            .await?;
+        let fd = open_reply
+            .dict_get_ci(&["FileDescriptor", "FD", "Handle", "NewFileID"])
+            .and_then(xpc_i64)
             .ok_or_else(|| {
-                CoreDeviceFileServiceError::request_mapping_incomplete(
-                    "CoreDevice fileservice_write thiếu CoreDevice.output",
-                )
+                CoreDeviceFileServiceError::request_mapping_incomplete(format!(
+                    "OpenFile (write) thiếu FileDescriptor (keys: [{}])",
+                    open_reply.summarize_dict_keys()
+                ))
             })?;
 
-        let stream_token = output
-            .dict_get_ci(&["transferIdentifier", "requestIdentifier", "streamID"])
-            .and_then(|v| v.as_str())
-            .map(|s| s.to_string())
-            .unwrap_or_else(|| self.session_token.clone());
-
-        match &mut self.data {
-            FileServiceDataChannel::Xpc(data_xpc) => {
-                let payload_msg = XpcValue::Dictionary(vec![
-                    ("sessionIdentifier".to_string(), XpcValue::String(stream_token)),
-                    (
-                        "controlcapacity".to_string(),
-                        XpcValue::UInt64(self.control_capacity),
-                    ),
-                    ("data".to_string(), XpcValue::Data(data.to_vec())),
-                ]);
-                data_xpc
-                    .send_object(payload_msg, true)
-                    .await
-                    .map_err(|e| CoreDeviceFileServiceError::new(classify_xpc_error(&e), e))?;
-                let ack = tokio::time::timeout(Duration::from_secs(10), data_xpc.recv_reply())
-                    .await
-                    .map_err(|_| {
-                        CoreDeviceFileServiceError::unavailable("Timeout ACK fileservice.data")
-                    })?
-                    .map_err(|e| CoreDeviceFileServiceError::new(classify_xpc_error(&e), e))?;
-                if let Some(err_msg) = extract_reply_error(&ack) {
-                    return Err(CoreDeviceFileServiceError::new(
-                        classify_xpc_error(&err_msg),
-                        err_msg,
-                    ));
-                }
-                Ok(())
+        let chunk_sz = self.control_capacity.clamp(4096, 512 * 1024) as usize;
+        let mut offset: u64 = 0;
+        let write_res: Result<(), CoreDeviceFileServiceError> = async {
+            for chunk in data.chunks(chunk_sz) {
+                self.fs_op(
+                    &session_id,
+                    "WriteFile",
+                    vec![
+                        ("FileDescriptor".to_string(), XpcValue::Int64(fd)),
+                        ("Data".to_string(), XpcValue::Data(chunk.to_vec())),
+                        ("Offset".to_string(), XpcValue::UInt64(offset)),
+                    ],
+                )
+                .await?;
+                offset += chunk.len() as u64;
             }
-            FileServiceDataChannel::RawStream(stream) => {
-                let mut hdr = Vec::with_capacity(16);
-                hdr.extend_from_slice(DATA_STREAM_MAGIC);
-                hdr.extend_from_slice(&(data.len() as u64).to_le_bytes());
-                stream
-                    .write_all(&hdr)
-                    .await
-                    .map_err(|e| CoreDeviceFileServiceError::unavailable(e.to_string()))?;
-                for chunk in data.chunks(self.control_capacity.min(131_072) as usize) {
-                    stream
-                        .write_all(chunk)
-                        .await
-                        .map_err(|e| CoreDeviceFileServiceError::unavailable(e.to_string()))?;
-                }
-                stream
-                    .flush()
-                    .await
-                    .map_err(|e| CoreDeviceFileServiceError::unavailable(e.to_string()))?;
-                Ok(())
-            }
+            Ok(())
         }
+        .await;
+
+        let _ = self
+            .fs_op(
+                &session_id,
+                "CloseFile",
+                vec![("FileDescriptor".to_string(), XpcValue::Int64(fd))],
+            )
+            .await;
+
+        write_res
     }
 
     pub async fn fileservice_mkdir_async(
@@ -968,15 +1156,19 @@ impl CoreDeviceFileServiceClient {
         path: &str,
     ) -> Result<(), CoreDeviceFileServiceError> {
         let scope = resolve_target_scope(ctx, path)?;
-        let (input, action) = self.build_target_input("mkdir", ctx, &scope)?;
-        let reply = self
-            .invoke_control(COREDEVICE_FEATURE_TRANSFER_FILES, input, action)
-            .await?;
-        if reply.dict_get_ci(&["CoreDevice.output", "output"]).is_none() {
-            return Err(CoreDeviceFileServiceError::request_mapping_incomplete(
-                "CoreDevice mkdir thiếu CoreDevice.output",
-            ));
-        }
+        let (domain, identifier, rel_path) = scope_to_domain_identifier_rel(&scope)?;
+        let session_id = self.ensure_session_for_scope(domain, &identifier).await?;
+
+        self.ensure_parent_dirs(&session_id, &rel_path).await?;
+        self.fs_op(
+            &session_id,
+            "CreateDirectory",
+            vec![
+                ("Path".to_string(), XpcValue::String(rel_path)),
+                ("Mode".to_string(), XpcValue::Int64(0o755)),
+            ],
+        )
+        .await?;
         Ok(())
     }
 
@@ -986,16 +1178,34 @@ impl CoreDeviceFileServiceClient {
         path: &str,
     ) -> Result<(), CoreDeviceFileServiceError> {
         let scope = resolve_target_scope(ctx, path)?;
-        let (input, action) = self.build_target_input("remove", ctx, &scope)?;
-        let reply = self
-            .invoke_control(COREDEVICE_FEATURE_TRANSFER_FILES, input, action)
-            .await?;
-        if reply.dict_get_ci(&["CoreDevice.output", "output"]).is_none() {
-            return Err(CoreDeviceFileServiceError::request_mapping_incomplete(
-                "CoreDevice remove thiếu CoreDevice.output",
-            ));
+        let (domain, identifier, rel_path) = scope_to_domain_identifier_rel(&scope)?;
+        let session_id = self.ensure_session_for_scope(domain, &identifier).await?;
+
+        match self
+            .fs_op(
+                &session_id,
+                "RemoveFile",
+                vec![("Path".to_string(), XpcValue::String(rel_path.clone()))],
+            )
+            .await
+        {
+            Ok(_) => Ok(()),
+            Err(file_err) => {
+                if self
+                    .fs_op(
+                        &session_id,
+                        "RemoveDirectory",
+                        vec![("Path".to_string(), XpcValue::String(rel_path))],
+                    )
+                    .await
+                    .is_ok()
+                {
+                    Ok(())
+                } else {
+                    Err(file_err)
+                }
+            }
         }
-        Ok(())
     }
 
     pub fn list_blocking(

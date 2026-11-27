@@ -6,10 +6,13 @@
 use super::apps::{
     app_group_container_path, container_path_from_url, normalize_data_container_url, LocalDevAppInfo,
 };
-use super::pairing::RemotePairingFile;
-use super::plist_util::{serialize_xml_dict, PlistValue};
-use super::tls_psk::connect_cd_tunnel;
-use super::tunnel::{connect_transport, format_endpoint_label, LockdownError, LockdownErrorKind, LockdownStage, TransportStream};
+use super::pairing::{PairingFile, RemotePairingFile};
+use super::plist_util::{parse_plist, serialize_xml_dict, PlistValue};
+use super::tls_psk::{connect_cd_tunnel, connect_cd_tunnel_plain, CdTunnelInfo};
+use super::tunnel::{
+    build_tls_client_config, connect_transport, format_endpoint_label, probe_tcp_open,
+    LockdownError, LockdownErrorKind, LockdownStage, TransportStream,
+};
 use base64::{engine::general_purpose::STANDARD as B64, Engine as _};
 use chacha20poly1305::{
     aead::{Aead, KeyInit, Payload},
@@ -21,10 +24,12 @@ use jktcp::adapter::Adapter;
 use jktcp::handle::{AdapterHandle, StreamHandle};
 use obfstr::obfstr;
 use rand::rngs::OsRng;
+use rustls::pki_types::ServerName;
+use rustls::ClientConnection;
 use serde_json::{json, Value as JsonValue};
 use sha2::{Digest, Sha256, Sha512};
 use std::collections::{HashMap, HashSet, VecDeque};
-use std::io;
+use std::io::{self, Cursor, Read as _, Write as _};
 use std::net::IpAddr;
 use std::pin::Pin;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -388,9 +393,14 @@ impl RpProtocolError {
     }
 }
 
+enum RpControlTransport {
+    TcpRPPairing(AsyncTransport),
+    RemoteXpc(RemoteXpcConn<RsdAsyncStream>),
+}
+
 #[allow(dead_code)]
 pub struct RpPairingControlClient {
-    stream: AsyncTransport,
+    transport: RpControlTransport,
     sequence_number: u64,
     encrypted_sequence_number: u64,
     encryption_key: Vec<u8>,
@@ -398,6 +408,21 @@ pub struct RpPairingControlClient {
     server_cipher: ChaCha20Poly1305,
     peer_udid: Option<String>,
     peer_name: Option<String>,
+}
+
+fn extract_rppairing_xpc_payload(val: &XpcValue) -> Result<Vec<u8>, RpProtocolError> {
+    if let Some(raw) = val.dict_get_ci(&["value", "_0"]) {
+        if let Some(bytes) = raw.as_data() {
+            return Ok(bytes.to_vec());
+        }
+        if let Some(s) = raw.as_str() {
+            return Ok(s.as_bytes().to_vec());
+        }
+    }
+    Err(RpProtocolError::Protocol(format!(
+        "Missing RemotePairing XPC 'value' field (keys: [{}])",
+        val.summarize_dict_keys()
+    )))
 }
 
 impl RpPairingControlClient {
@@ -418,10 +443,18 @@ impl RpPairingControlClient {
     }
 
     async fn new(stream: AsyncTransport) -> Result<Self, String> {
+        Self::with_transport(RpControlTransport::TcpRPPairing(stream))
+    }
+
+    async fn from_remote_xpc(xpc: RemoteXpcConn<RsdAsyncStream>) -> Result<Self, String> {
+        Self::with_transport(RpControlTransport::RemoteXpc(xpc))
+    }
+
+    fn with_transport(transport: RpControlTransport) -> Result<Self, String> {
         let initial = vec![0u8; 32];
         let (cc, sc) = Self::derive_main_ciphers(&initial)?;
         Ok(Self {
-            stream,
+            transport,
             sequence_number: 0,
             encrypted_sequence_number: 0,
             encryption_key: initial,
@@ -436,35 +469,60 @@ impl RpPairingControlClient {
         let payload = serde_json::to_string(&envelope)
             .map_err(|e| RpProtocolError::Protocol(e.to_string()))?;
         let payload_bytes = payload.as_bytes();
-        let len_u16 = u16::try_from(payload_bytes.len())
-            .map_err(|_| RpProtocolError::Protocol("RPPairing frame exceeds 64KB".to_string()))?;
 
-        let mut frame = Vec::with_capacity(RPPAIRING_MAGIC.len() + 2 + payload_bytes.len());
-        frame.extend_from_slice(RPPAIRING_MAGIC);
-        frame.extend_from_slice(&len_u16.to_be_bytes());
-        frame.extend_from_slice(payload_bytes);
+        match &mut self.transport {
+            RpControlTransport::TcpRPPairing(stream) => {
+                let len_u16 = u16::try_from(payload_bytes.len())
+                    .map_err(|_| RpProtocolError::Protocol("RPPairing frame exceeds 64KB".to_string()))?;
 
-        tokio::time::timeout(Duration::from_secs(5), self.stream.write_all(&frame))
-            .await
-            .map_err(|_| {
-                RpProtocolError::Transport(LockdownError::with_errno(
-                    LockdownErrorKind::Timeout,
-                    LockdownStage::Protocol,
-                    Some(60),
-                    "Timeout writing RPPairing frame",
-                ))
-            })?
-            .map_err(|e| {
-                let code = e.raw_os_error().unwrap_or(54);
-                RpProtocolError::Transport(LockdownError::with_errno(
-                    if code == 54 { LockdownErrorKind::SocketReset } else { LockdownErrorKind::ProtocolError },
-                    LockdownStage::Protocol,
-                    Some(code),
-                    format!("RPPairing write failed: {}", e),
-                ))
-            })?;
-        let _ = self.stream.flush().await;
-        Ok(())
+                let mut frame = Vec::with_capacity(RPPAIRING_MAGIC.len() + 2 + payload_bytes.len());
+                frame.extend_from_slice(RPPAIRING_MAGIC);
+                frame.extend_from_slice(&len_u16.to_be_bytes());
+                frame.extend_from_slice(payload_bytes);
+
+                tokio::time::timeout(Duration::from_secs(5), stream.write_all(&frame))
+                    .await
+                    .map_err(|_| {
+                        RpProtocolError::Transport(LockdownError::with_errno(
+                            LockdownErrorKind::Timeout,
+                            LockdownStage::Protocol,
+                            Some(60),
+                            "Timeout writing RPPairing frame",
+                        ))
+                    })?
+                    .map_err(|e| {
+                        let code = e.raw_os_error().unwrap_or(54);
+                        RpProtocolError::Transport(LockdownError::with_errno(
+                            if code == 54 { LockdownErrorKind::SocketReset } else { LockdownErrorKind::ProtocolError },
+                            LockdownStage::Protocol,
+                            Some(code),
+                            format!("RPPairing write failed: {}", e),
+                        ))
+                    })?;
+                let _ = stream.flush().await;
+                Ok(())
+            }
+            RpControlTransport::RemoteXpc(xpc) => {
+                let req_dict = XpcValue::Dictionary(vec![
+                    (
+                        "mangledTypeName".to_string(),
+                        XpcValue::String("RemotePairing.ControlChannelMessageEnvelope".to_string()),
+                    ),
+                    ("value".to_string(), XpcValue::Data(payload_bytes.to_vec())),
+                ]);
+                tokio::time::timeout(Duration::from_secs(6), xpc.send_object(req_dict, false))
+                    .await
+                    .map_err(|_| {
+                        RpProtocolError::Transport(LockdownError::with_errno(
+                            LockdownErrorKind::Timeout,
+                            LockdownStage::Protocol,
+                            Some(60),
+                            "Timeout writing RemotePairing XPC envelope",
+                        ))
+                    })?
+                    .map_err(RpProtocolError::Protocol)
+            }
+        }
     }
 
     async fn send_plain(&mut self, value: JsonValue) -> Result<(), RpProtocolError> {
@@ -479,49 +537,69 @@ impl RpPairingControlClient {
     }
 
     async fn recv_envelope(&mut self) -> Result<JsonValue, RpProtocolError> {
-        let mut magic = vec![0u8; RPPAIRING_MAGIC.len()];
-        tokio::time::timeout(Duration::from_secs(5), self.stream.read_exact(&mut magic))
-            .await
-            .map_err(|_| {
-                RpProtocolError::Transport(LockdownError::with_errno(
-                    LockdownErrorKind::Timeout,
-                    LockdownStage::Protocol,
-                    Some(60),
-                    "Timeout waiting for RPPairing response header",
-                ))
-            })?
-            .map_err(|e| {
-                let code = e.raw_os_error().unwrap_or(54);
-                RpProtocolError::Transport(LockdownError::with_errno(
-                    if code == 54 { LockdownErrorKind::SocketReset } else { LockdownErrorKind::ProtocolError },
-                    LockdownStage::Protocol,
-                    Some(code),
-                    format!("RPPairing magic read failed: {}", e),
-                ))
-            })?;
+        match &mut self.transport {
+            RpControlTransport::TcpRPPairing(stream) => {
+                let mut magic = vec![0u8; RPPAIRING_MAGIC.len()];
+                tokio::time::timeout(Duration::from_secs(5), stream.read_exact(&mut magic))
+                    .await
+                    .map_err(|_| {
+                        RpProtocolError::Transport(LockdownError::with_errno(
+                            LockdownErrorKind::Timeout,
+                            LockdownStage::Protocol,
+                            Some(60),
+                            "Timeout waiting for RPPairing response header",
+                        ))
+                    })?
+                    .map_err(|e| {
+                        let code = e.raw_os_error().unwrap_or(54);
+                        RpProtocolError::Transport(LockdownError::with_errno(
+                            if code == 54 { LockdownErrorKind::SocketReset } else { LockdownErrorKind::ProtocolError },
+                            LockdownStage::Protocol,
+                            Some(code),
+                            format!("RPPairing magic read failed: {}", e),
+                        ))
+                    })?;
 
-        if magic.as_slice() != RPPAIRING_MAGIC {
-            return Err(RpProtocolError::NotRpPairing(format!(
-                "Non-RPPairing response header: {:02x?}",
-                magic
-            )));
+                if magic.as_slice() != RPPAIRING_MAGIC {
+                    return Err(RpProtocolError::NotRpPairing(format!(
+                        "Non-RPPairing response header: {:02x?}",
+                        magic
+                    )));
+                }
+
+                let mut len_buf = [0u8; 2];
+                tokio::time::timeout(Duration::from_secs(5), stream.read_exact(&mut len_buf))
+                    .await
+                    .map_err(|_| RpProtocolError::Protocol("Timeout reading RPPairing frame length".to_string()))?
+                    .map_err(|e| RpProtocolError::Protocol(format!("RPPairing length read failed: {}", e)))?;
+                let packet_len = u16::from_be_bytes(len_buf) as usize;
+
+                let mut body = vec![0u8; packet_len];
+                tokio::time::timeout(Duration::from_secs(5), stream.read_exact(&mut body))
+                    .await
+                    .map_err(|_| RpProtocolError::Protocol("Timeout reading RPPairing frame body".to_string()))?
+                    .map_err(|e| RpProtocolError::Protocol(format!("RPPairing body read failed: {}", e)))?;
+
+                serde_json::from_slice(&body)
+                    .map_err(|e| RpProtocolError::Protocol(format!("Invalid RPPairing JSON: {}", e)))
+            }
+            RpControlTransport::RemoteXpc(xpc) => {
+                let (_, xpc_val) = tokio::time::timeout(Duration::from_secs(6), xpc.recv_any())
+                    .await
+                    .map_err(|_| {
+                        RpProtocolError::Transport(LockdownError::with_errno(
+                            LockdownErrorKind::Timeout,
+                            LockdownStage::Protocol,
+                            Some(60),
+                            "Timeout waiting for RemotePairing XPC response",
+                        ))
+                    })?
+                    .map_err(RpProtocolError::Protocol)?;
+                let body = extract_rppairing_xpc_payload(&xpc_val)?;
+                serde_json::from_slice(&body)
+                    .map_err(|e| RpProtocolError::Protocol(format!("Invalid RemotePairing XPC JSON: {}", e)))
+            }
         }
-
-        let mut len_buf = [0u8; 2];
-        tokio::time::timeout(Duration::from_secs(5), self.stream.read_exact(&mut len_buf))
-            .await
-            .map_err(|_| RpProtocolError::Protocol("Timeout reading RPPairing frame length".to_string()))?
-            .map_err(|e| RpProtocolError::Protocol(format!("RPPairing length read failed: {}", e)))?;
-        let packet_len = u16::from_be_bytes(len_buf) as usize;
-
-        let mut body = vec![0u8; packet_len];
-        tokio::time::timeout(Duration::from_secs(5), self.stream.read_exact(&mut body))
-            .await
-            .map_err(|_| RpProtocolError::Protocol("Timeout reading RPPairing frame body".to_string()))?
-            .map_err(|e| RpProtocolError::Protocol(format!("RPPairing body read failed: {}", e)))?;
-
-        serde_json::from_slice(&body)
-            .map_err(|e| RpProtocolError::Protocol(format!("Invalid RPPairing JSON: {}", e)))
     }
 
     async fn recv_plain_inner(&mut self) -> Result<JsonValue, RpProtocolError> {
@@ -1459,32 +1537,50 @@ impl<S: AsyncRead + AsyncWrite + Unpin + Send> RemoteXpcConn<S> {
         self.recv_channel_xpc(XPC_REPLY_CHANNEL).await
     }
 
-    async fn recv_channel_xpc(&mut self, channel: u32) -> Result<XpcValue, String> {
+    fn try_pop_channel_xpc(&mut self, channel: u32) -> Result<Option<XpcValue>, String> {
         loop {
-            {
-                let buf = self.partial_xpc.entry(channel).or_default();
-                if let Some((msg, consumed)) = XpcMessage::try_decode(buf)? {
-                    buf.drain(..consumed);
-                    let _ = msg.flags;
-                    if let Some(inner) = msg.message {
-                        if let Some(entries) = inner.as_dict() {
-                            if entries.is_empty() {
-                                continue;
-                            }
-                        }
-                        return Ok(inner);
-                    }
+            if let Some(q) = self.cache.get_mut(&channel) {
+                while let Some(chunk) = q.pop_front() {
+                    self.partial_xpc.entry(channel).or_default().extend_from_slice(&chunk);
+                }
+            }
+            let Some(buf) = self.partial_xpc.get_mut(&channel) else {
+                return Ok(None);
+            };
+            let Some((msg, consumed)) = XpcMessage::try_decode(buf)? else {
+                return Ok(None);
+            };
+            buf.drain(..consumed);
+            let _ = msg.flags;
+            if let Some(inner) = msg.message {
+                if inner.as_dict().map(|d| d.is_empty()).unwrap_or(false) {
                     continue;
                 }
+                return Ok(Some(inner));
             }
-            self.cache.entry(channel).or_default();
-            loop {
-                if let Some(chunk) = self.cache.get_mut(&channel).and_then(|c| c.pop_front()) {
-                    self.partial_xpc.entry(channel).or_default().extend_from_slice(&chunk);
-                    break;
+        }
+    }
+
+    /// Receives the next non-empty decoded XPC object on either `XPC_REPLY_CHANNEL` (3)
+    /// or `XPC_ROOT_CHANNEL` (1), returning `(channel_id, value)`.
+    pub async fn recv_any(&mut self) -> Result<(u32, XpcValue), String> {
+        const CHANNELS: [u32; 2] = [XPC_REPLY_CHANNEL, XPC_ROOT_CHANNEL];
+        loop {
+            for &ch in &CHANNELS {
+                if let Some(val) = self.try_pop_channel_xpc(ch)? {
+                    return Ok((ch, val));
                 }
-                self.pump().await?;
             }
+            self.pump().await?;
+        }
+    }
+
+    async fn recv_channel_xpc(&mut self, channel: u32) -> Result<XpcValue, String> {
+        loop {
+            if let Some(val) = self.try_pop_channel_xpc(channel)? {
+                return Ok(val);
+            }
+            self.pump().await?;
         }
     }
 
@@ -1697,6 +1793,264 @@ impl AsyncWrite for RsdAsyncStream {
     }
 }
 
+pub const SERVICE_COREDEVICE_PROXY: &str = "com.apple.internal.devicecompute.CoreDeviceProxy";
+pub const SERVICE_UNTRUSTED_TUNNEL: &str = "com.apple.internal.dt.coredevice.untrusted.tunnelservice";
+pub const SERVICE_STREAMING_ZIP_CONDUIT_SHIM: &str = "com.apple.streaming_zip_conduit.shim.remote";
+pub const SERVICE_STREAMING_ZIP_CONDUIT: &str = "com.apple.streaming_zip_conduit";
+const SERVICE_LOCKDOWN_REMOTE_TRUSTED: &str = "com.apple.mobile.lockdown.remote.trusted";
+const SERVICE_LOCKDOWN_REMOTE_UNTRUSTED: &str = "com.apple.mobile.lockdown.remote.untrusted";
+const SERVICE_FILESERVICE_CTRL_CAP: &str = "com.apple.coredevice.fileservice.controlcapacity";
+const SERVICE_FILESERVICE_CTRL: &str = "com.apple.coredevice.fileservice.control";
+const SERVICE_FILESERVICE_DATA_SVC: &str = "com.apple.coredevice.fileservice.data";
+
+#[allow(dead_code)]
+struct AsyncTlsStream<S> {
+    inner: S,
+    conn: ClientConnection,
+    out_buf: Vec<u8>,
+    eof: bool,
+}
+
+impl<S: AsyncRead + AsyncWrite + Unpin + Send + Sync> AsyncTlsStream<S> {
+    async fn handshake(mut inner: S, pairing: &PairingFile) -> Result<Self, String> {
+        let config = build_tls_client_config(pairing, LockdownStage::TlsUpgrade)
+            .map_err(|e| e.to_string())?;
+        let server_name = ServerName::try_from("apple-device.local")
+            .unwrap_or_else(|_| ServerName::try_from("localhost").unwrap());
+        let mut conn = ClientConnection::new(config, server_name)
+            .map_err(|e| format!("Async TLS ClientConnection failed: {}", e))?;
+
+        while conn.is_handshaking() || conn.wants_write() {
+            while conn.wants_write() {
+                let mut tx = Vec::new();
+                conn.write_tls(&mut tx)
+                    .map_err(|e| format!("Async TLS write_tls failed: {}", e))?;
+                if !tx.is_empty() {
+                    inner
+                        .write_all(&tx)
+                        .await
+                        .map_err(|e| format!("Async TLS socket write failed: {}", e))?;
+                }
+            }
+            let _ = inner.flush().await;
+            if !conn.is_handshaking() {
+                break;
+            }
+            let mut tmp = [0u8; 4096];
+            let n = tokio::time::timeout(Duration::from_secs(6), inner.read(&mut tmp))
+                .await
+                .map_err(|_| "Async TLS handshake read timeout".to_string())?
+                .map_err(|e| format!("Async TLS handshake read failed: {}", e))?;
+            if n == 0 {
+                return Err("Async TLS handshake closed by peer".to_string());
+            }
+            let mut cur = Cursor::new(&tmp[..n]);
+            conn.read_tls(&mut cur)
+                .map_err(|e| format!("Async TLS read_tls failed: {}", e))?;
+            conn.process_new_packets()
+                .map_err(|e| format!("Async TLS process_new_packets failed: {}", e))?;
+        }
+
+        Ok(Self {
+            inner,
+            conn,
+            out_buf: Vec::new(),
+            eof: false,
+        })
+    }
+}
+
+fn flush_tls_out<S: AsyncWrite + Unpin>(
+    inner: &mut S,
+    conn: &mut ClientConnection,
+    out_buf: &mut Vec<u8>,
+    cx: &mut Context<'_>,
+) -> Poll<io::Result<()>> {
+    while conn.wants_write() {
+        let mut tmp = Vec::new();
+        if conn.write_tls(&mut tmp)? == 0 {
+            break;
+        }
+        out_buf.extend_from_slice(&tmp);
+    }
+    while !out_buf.is_empty() {
+        match Pin::new(&mut *inner).poll_write(cx, out_buf) {
+            Poll::Ready(Ok(0)) => {
+                return Poll::Ready(Err(io::Error::new(
+                    io::ErrorKind::WriteZero,
+                    "TLS underlying write zero",
+                )));
+            }
+            Poll::Ready(Ok(n)) => {
+                out_buf.drain(..n);
+            }
+            Poll::Ready(Err(e)) => return Poll::Ready(Err(e)),
+            Poll::Pending => return Poll::Pending,
+        }
+    }
+    Poll::Ready(Ok(()))
+}
+
+impl<S: AsyncRead + AsyncWrite + Unpin + Send + Sync> AsyncRead for AsyncTlsStream<S> {
+    fn poll_read(
+        self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        buf: &mut ReadBuf<'_>,
+    ) -> Poll<io::Result<()>> {
+        if buf.remaining() == 0 {
+            return Poll::Ready(Ok(()));
+        }
+        let this = self.get_mut();
+        loop {
+            let dst = buf.initialize_unfilled();
+            match this.conn.reader().read(dst) {
+                Ok(0) => {
+                    this.eof = true;
+                    return Poll::Ready(Ok(()));
+                }
+                Ok(n) => {
+                    buf.advance(n);
+                    return Poll::Ready(Ok(()));
+                }
+                Err(e) if e.kind() == io::ErrorKind::WouldBlock => {
+                    if this.eof {
+                        return Poll::Ready(Ok(()));
+                    }
+                    let _ = flush_tls_out(&mut this.inner, &mut this.conn, &mut this.out_buf, cx);
+                    let mut raw = [0u8; 8192];
+                    let mut raw_buf = ReadBuf::new(&mut raw);
+                    match Pin::new(&mut this.inner).poll_read(cx, &mut raw_buf) {
+                        Poll::Pending => return Poll::Pending,
+                        Poll::Ready(Err(err)) => return Poll::Ready(Err(err)),
+                        Poll::Ready(Ok(())) => {
+                            let n = raw_buf.filled().len();
+                            if n == 0 {
+                                this.eof = true;
+                                return Poll::Ready(Ok(()));
+                            }
+                            let mut cur = Cursor::new(raw_buf.filled());
+                            if let Err(err) = this.conn.read_tls(&mut cur) {
+                                return Poll::Ready(Err(err));
+                            }
+                            if let Err(err) = this.conn.process_new_packets() {
+                                return Poll::Ready(Err(io::Error::new(
+                                    io::ErrorKind::InvalidData,
+                                    format!("TLS alert/decrypt error: {}", err),
+                                )));
+                            }
+                        }
+                    }
+                }
+                Err(e) => return Poll::Ready(Err(e)),
+            }
+        }
+    }
+}
+
+impl<S: AsyncRead + AsyncWrite + Unpin + Send + Sync> AsyncWrite for AsyncTlsStream<S> {
+    fn poll_write(
+        self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        buf: &[u8],
+    ) -> Poll<io::Result<usize>> {
+        if buf.is_empty() {
+            return Poll::Ready(Ok(0));
+        }
+        let this = self.get_mut();
+        match flush_tls_out(&mut this.inner, &mut this.conn, &mut this.out_buf, cx) {
+            Poll::Pending => return Poll::Pending,
+            Poll::Ready(Err(e)) => return Poll::Ready(Err(e)),
+            Poll::Ready(Ok(())) => {}
+        }
+        let written = this.conn.writer().write(buf)?;
+        match flush_tls_out(&mut this.inner, &mut this.conn, &mut this.out_buf, cx) {
+            Poll::Ready(Err(e)) => Poll::Ready(Err(e)),
+            _ => Poll::Ready(Ok(written)),
+        }
+    }
+
+    fn poll_flush(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+        let this = self.get_mut();
+        match flush_tls_out(&mut this.inner, &mut this.conn, &mut this.out_buf, cx) {
+            Poll::Pending => return Poll::Pending,
+            Poll::Ready(Err(e)) => return Poll::Ready(Err(e)),
+            Poll::Ready(Ok(())) => {}
+        }
+        Pin::new(&mut this.inner).poll_flush(cx)
+    }
+
+    fn poll_shutdown(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+        let this = self.get_mut();
+        this.conn.send_close_notify();
+        match flush_tls_out(&mut this.inner, &mut this.conn, &mut this.out_buf, cx) {
+            Poll::Pending => return Poll::Pending,
+            Poll::Ready(Err(e)) => return Poll::Ready(Err(e)),
+            Poll::Ready(Ok(())) => {}
+        }
+        Pin::new(&mut this.inner).poll_shutdown(cx)
+    }
+}
+
+/// Native pure-Rust `CoreDeviceProxy` implementation mirroring `idevice`'s
+/// `CoreDeviceProxy::create_software_tunnel` flow (`CDTunnel` handshake + userspace TCP/IPv6).
+pub struct CoreDeviceProxy<S> {
+    stream: S,
+    pub info: CdTunnelInfo,
+}
+
+impl<S: AsyncRead + AsyncWrite + Unpin + Send + Sync + 'static> CoreDeviceProxy<S> {
+    pub async fn new(stream: S) -> Result<Self, String> {
+        let (stream, info) = connect_cd_tunnel_plain(stream).await?;
+        Ok(Self { stream, info })
+    }
+
+    pub fn create_software_tunnel(self) -> Result<(Adapter, CdTunnelInfo), String> {
+        let client_ip: IpAddr = self
+            .info
+            .client_address
+            .parse()
+            .map_err(|e| format!("Bad CoreDeviceProxy client IP '{}': {}", self.info.client_address, e))?;
+        let server_ip: IpAddr = self
+            .info
+            .server_address
+            .parse()
+            .map_err(|e| format!("Bad CoreDeviceProxy server IP '{}': {}", self.info.server_address, e))?;
+        let mut adapter = Adapter::new(Box::new(self.stream), client_ip, server_ip);
+        adapter.set_mss((self.info.mtu as usize).min(8192).saturating_sub(60).max(512));
+        Ok((adapter, self.info))
+    }
+}
+
+async fn complete_coredevice_proxy_tunnel<
+    S: AsyncRead + AsyncWrite + Unpin + Send + Sync + 'static,
+>(
+    proxy: CoreDeviceProxy<S>,
+    uuid_seed: Option<&str>,
+    fallback_udid: Option<&str>,
+) -> Result<(AdapterHandle, RsdHandshakeData), String> {
+    let (adapter, info) = proxy.create_software_tunnel()?;
+    let mut trusted_handle = adapter.to_async_handle();
+    let rsd_stream = tokio::time::timeout(
+        Duration::from_secs(6),
+        trusted_handle.connect(info.server_rsd_port),
+    )
+    .await
+    .map_err(|_| {
+        format!(
+            "Software tunnel connect RSD port {} timed out",
+            info.server_rsd_port
+        )
+    })?
+    .map_err(|e| {
+        format!(
+            "Software tunnel connect RSD port {} failed: {}",
+            info.server_rsd_port, e
+        )
+    })?;
+    let rsd2 = perform_rsd_handshake(rsd_stream, uuid_seed, fallback_udid).await?;
+    Ok((trusted_handle, rsd2))
+}
+
 #[allow(dead_code)]
 pub enum RsdTransport {
     CdTunnel {
@@ -1706,6 +2060,130 @@ pub enum RsdTransport {
     DirectHost {
         host: String,
     },
+    LayeredTunnel {
+        outer: Box<RsdTransport>,
+        trusted_handle: AdapterHandle,
+        extra_control: Option<Arc<tokio::sync::Mutex<RpPairingControlClient>>>,
+    },
+}
+
+#[derive(Clone)]
+pub enum RsdPortDialer {
+    Jktcp(AdapterHandle),
+    Direct(String),
+}
+
+impl RsdPortDialer {
+    pub async fn connect(&self, port: u16) -> Result<RsdAsyncStream, String> {
+        match self {
+            RsdPortDialer::Jktcp(handle) => {
+                let mut h = handle.clone();
+                let s = tokio::time::timeout(Duration::from_secs(6), h.connect(port))
+                    .await
+                    .map_err(|_| format!("Tunnel connect port {} timeout", port))?
+                    .map_err(|e| format!("Tunnel connect port {} failed: {}", port, e))?;
+                Ok(RsdAsyncStream::Jktcp(s))
+            }
+            RsdPortDialer::Direct(host) => {
+                let t = connect_async_transport(
+                    host.clone(),
+                    port,
+                    Duration::from_secs(4),
+                    LockdownStage::StartService,
+                    false,
+                )
+                .await
+                .map_err(|e| e.to_string())?;
+                Ok(RsdAsyncStream::Direct(t))
+            }
+        }
+    }
+}
+
+impl RsdTransport {
+    fn dialer(&self) -> Result<RsdPortDialer, String> {
+        match self {
+            RsdTransport::CdTunnel { handle, .. } => Ok(RsdPortDialer::Jktcp(handle.clone())),
+            RsdTransport::DirectHost { host } => Ok(RsdPortDialer::Direct(host.clone())),
+            RsdTransport::LayeredTunnel { trusted_handle, .. } => {
+                Ok(RsdPortDialer::Jktcp(trusted_handle.clone()))
+            }
+        }
+    }
+
+    async fn connect_raw_port(&self, port: u16) -> Result<RsdAsyncStream, String> {
+        match self {
+            RsdTransport::CdTunnel { handle, .. } => {
+                let mut h = handle.clone();
+                let s = tokio::time::timeout(Duration::from_secs(6), h.connect(port))
+                    .await
+                    .map_err(|_| format!("Tunnel connect port {} timeout", port))?
+                    .map_err(|e| format!("Tunnel connect port {} failed: {}", port, e))?;
+                Ok(RsdAsyncStream::Jktcp(s))
+            }
+            RsdTransport::DirectHost { host } => {
+                let t = connect_async_transport(
+                    host.clone(),
+                    port,
+                    Duration::from_secs(4),
+                    LockdownStage::StartService,
+                    false,
+                )
+                .await
+                .map_err(|e| e.to_string())?;
+                Ok(RsdAsyncStream::Direct(t))
+            }
+            RsdTransport::LayeredTunnel { outer, .. } => {
+                Box::pin(outer.connect_raw_port(port)).await
+            }
+        }
+    }
+
+    async fn connect_service_port(
+        &self,
+        port: u16,
+        use_trusted: bool,
+    ) -> Result<RsdAsyncStream, String> {
+        match self {
+            RsdTransport::LayeredTunnel {
+                outer,
+                trusted_handle,
+                ..
+            } => {
+                if use_trusted {
+                    let mut h = trusted_handle.clone();
+                    let s = tokio::time::timeout(Duration::from_secs(6), h.connect(port))
+                        .await
+                        .map_err(|_| format!("Trusted tunnel connect port {} timeout", port))?
+                        .map_err(|e| {
+                            format!("Trusted tunnel connect port {} failed: {}", port, e)
+                        })?;
+                    Ok(RsdAsyncStream::Jktcp(s))
+                } else {
+                    Box::pin(outer.connect_raw_port(port)).await
+                }
+            }
+            _ => self.connect_raw_port(port).await,
+        }
+    }
+
+    async fn close_async(self) {
+        match self {
+            RsdTransport::CdTunnel { mut handle, .. } => {
+                let _ = tokio::time::timeout(Duration::from_millis(250), handle.close()).await;
+            }
+            RsdTransport::DirectHost { .. } => {}
+            RsdTransport::LayeredTunnel {
+                outer,
+                mut trusted_handle,
+                ..
+            } => {
+                let _ =
+                    tokio::time::timeout(Duration::from_millis(250), trusted_handle.close()).await;
+                Box::pin(outer.close_async()).await;
+            }
+        }
+    }
 }
 
 #[allow(dead_code)]
@@ -1717,24 +2195,471 @@ pub struct RsdTunnelSession {
     pub product_type: Option<String>,
     pub os_version: Option<String>,
     pub services: HashMap<String, RsdServiceInfo>,
+    pub untrusted_services: HashMap<String, RsdServiceInfo>,
+    pub trusted_services: HashMap<String, RsdServiceInfo>,
+    pub coredevice_proxy_active: bool,
+    pub coredevice_tunnel_status: Option<String>,
     pub transport: RsdTransport,
 }
 
+fn has_trusted_fileservice_pair(services: &HashMap<String, RsdServiceInfo>) -> bool {
+    (services.contains_key(SERVICE_FILESERVICE_CTRL_CAP)
+        || services.contains_key(SERVICE_FILESERVICE_CTRL))
+        && services.contains_key(SERVICE_FILESERVICE_DATA_SVC)
+}
+
+async fn async_send_plist<S: AsyncWrite + Unpin>(
+    stream: &mut S,
+    dict: &HashMap<String, PlistValue>,
+) -> Result<(), String> {
+    let xml = serialize_xml_dict(dict);
+    let bytes = xml.as_bytes();
+    let len = u32::try_from(bytes.len()).map_err(|_| "Plist too large".to_string())?;
+    let mut frame = Vec::with_capacity(4 + bytes.len());
+    frame.extend_from_slice(&len.to_be_bytes());
+    frame.extend_from_slice(bytes);
+    tokio::time::timeout(Duration::from_secs(6), stream.write_all(&frame))
+        .await
+        .map_err(|_| "Plist write timeout".to_string())?
+        .map_err(|e| format!("Plist write failed: {}", e))?;
+    let _ = stream.flush().await;
+    Ok(())
+}
+
+async fn async_read_plist<S: AsyncRead + Unpin>(stream: &mut S) -> Result<PlistValue, String> {
+    let mut len_buf = [0u8; 4];
+    tokio::time::timeout(Duration::from_secs(6), stream.read_exact(&mut len_buf))
+        .await
+        .map_err(|_| "Plist length read timeout".to_string())?
+        .map_err(|e| format!("Plist length read failed: {}", e))?;
+    let len = u32::from_be_bytes(len_buf) as usize;
+    if len == 0 || len > 16 * 1024 * 1024 {
+        return Err(format!("Invalid plist packet size: {}", len));
+    }
+    let mut payload = vec![0u8; len];
+    tokio::time::timeout(Duration::from_secs(8), stream.read_exact(&mut payload))
+        .await
+        .map_err(|_| "Plist payload read timeout".to_string())?
+        .map_err(|e| format!("Plist payload read failed: {}", e))?;
+    parse_plist(&payload).map_err(|e| format!("Plist parse failed: {}", e))
+}
+
+async fn async_rsd_checkin<S: AsyncRead + AsyncWrite + Unpin>(stream: &mut S) -> Result<(), String> {
+    let mut req = HashMap::new();
+    req.insert("Label".to_string(), PlistValue::String("3105-x-PHUCVN".to_string()));
+    req.insert("ProtocolVersion".to_string(), PlistValue::String("2".to_string()));
+    req.insert("Request".to_string(), PlistValue::String("RSDCheckin".to_string()));
+    async_send_plist(stream, &req).await?;
+    let resp1 = async_read_plist(stream).await?;
+    if resp1.get_string("Request").as_deref() != Some("RSDCheckin") {
+        return Err("RSDCheckin reply mismatch".to_string());
+    }
+    let resp2 = async_read_plist(stream).await?;
+    if resp2.get_string("Request").as_deref() != Some("StartService") {
+        return Err("RSDCheckin StartService reply mismatch".to_string());
+    }
+    Ok(())
+}
+
+async fn async_start_service_over_lockdown_stream<
+    S: AsyncRead + AsyncWrite + Unpin + Send + Sync + 'static,
+>(
+    mut stream: S,
+    service_name: &str,
+) -> Result<(u16, bool), String> {
+    let mut query = HashMap::new();
+    query.insert("Label".to_string(), PlistValue::String("3105-x-PHUCVN".to_string()));
+    query.insert("Request".to_string(), PlistValue::String("QueryType".to_string()));
+    let _ = async_send_plist(&mut stream, &query).await;
+    let _ = async_read_plist(&mut stream).await;
+
+    let mut start_req = HashMap::new();
+    start_req.insert("Label".to_string(), PlistValue::String("3105-x-PHUCVN".to_string()));
+    start_req.insert("Request".to_string(), PlistValue::String("StartService".to_string()));
+    start_req.insert(
+        "Service".to_string(),
+        PlistValue::String(service_name.to_string()),
+    );
+    async_send_plist(&mut stream, &start_req).await?;
+    let reply = async_read_plist(&mut stream).await?;
+    if let Some(err) = reply.get_string("Error") {
+        return Err(format!("Lockdown StartService({}): {}", service_name, err));
+    }
+    let port = reply
+        .dict_get_ci(&["Port", "port"])
+        .and_then(|v| match v {
+            PlistValue::Integer(i) if *i > 0 && *i <= 65535 => Some(*i as u16),
+            _ => None,
+        })
+        .ok_or_else(|| format!("Lockdown StartService({}) thiếu Port", service_name))?;
+    let enable_ssl = reply
+        .dict_get_ci(&["EnableServiceSSL", "enableServiceSSL"])
+        .and_then(|v| match v {
+            PlistValue::Boolean(b) => Some(*b),
+            _ => None,
+        })
+        .unwrap_or(false);
+    Ok((port, enable_ssl))
+}
+
+async fn establish_coredevice_proxy_tunnel(
+    outer: &RsdTransport,
+    services1: &HashMap<String, RsdServiceInfo>,
+    endpoint_host: &str,
+    rp_opt: Option<&RemotePairingFile>,
+    lockdown_opt: Option<&PairingFile>,
+    uuid_seed: Option<&str>,
+    fallback_udid: Option<&str>,
+) -> Result<
+    (
+        AdapterHandle,
+        RsdHandshakeData,
+        Option<Arc<tokio::sync::Mutex<RpPairingControlClient>>>,
+    ),
+    String,
+> {
+    let mut attempt_errors: Vec<String> = Vec::new();
+
+    // Strategy 1: Direct `com.apple.internal.devicecompute.CoreDeviceProxy` in RsdHandshake #1
+    if let Some(proxy_info) = services1.get(SERVICE_COREDEVICE_PROXY) {
+        let direct_attempt = async {
+            let s = outer.connect_raw_port(proxy_info.port).await?;
+            match CoreDeviceProxy::new(s).await {
+                Ok(proxy) => complete_coredevice_proxy_tunnel(proxy, uuid_seed, fallback_udid).await,
+                Err(first_err) if !proxy_info.uses_remote_xpc => {
+                    let mut s2 = outer.connect_raw_port(proxy_info.port).await?;
+                    if let Err(checkin_err) = async_rsd_checkin(&mut s2).await {
+                        return Err(format!("{} | checkin fallback: {}", first_err, checkin_err));
+                    }
+                    let proxy2 = CoreDeviceProxy::new(s2).await?;
+                    complete_coredevice_proxy_tunnel(proxy2, uuid_seed, fallback_udid).await
+                }
+                Err(first_err) => Err(first_err),
+            }
+        }
+        .await;
+
+        match direct_attempt {
+            Ok((handle, rsd2)) => return Ok((handle, rsd2, None)),
+            Err(e) => attempt_errors.push(format!("CoreDeviceProxy(port {}): {}", proxy_info.port, e)),
+        }
+    }
+
+    // Strategy 2: `com.apple.mobile.lockdown.remote.trusted` / `.untrusted` -> StartService(CoreDeviceProxy)
+    if let Some(ld_info) = services1
+        .get(SERVICE_LOCKDOWN_REMOTE_TRUSTED)
+        .or_else(|| services1.get(SERVICE_LOCKDOWN_REMOTE_UNTRUSTED))
+    {
+        let ld_attempt = async {
+            let mut s = outer.connect_raw_port(ld_info.port).await?;
+            async_rsd_checkin(&mut s).await?;
+            let (svc_port, enable_ssl) =
+                async_start_service_over_lockdown_stream(s, SERVICE_COREDEVICE_PROXY).await?;
+            let svc_stream = outer.connect_raw_port(svc_port).await?;
+            if enable_ssl {
+                let pairing = lockdown_opt.ok_or_else(|| {
+                    "lockdown.remote StartService(CoreDeviceProxy) yêu cầu EnableServiceSSL nhưng thiếu X.509 PairingFile".to_string()
+                })?;
+                let tls = AsyncTlsStream::handshake(svc_stream, pairing).await?;
+                let proxy = CoreDeviceProxy::new(tls).await?;
+                complete_coredevice_proxy_tunnel(proxy, uuid_seed, fallback_udid).await
+            } else {
+                let proxy = CoreDeviceProxy::new(svc_stream).await?;
+                complete_coredevice_proxy_tunnel(proxy, uuid_seed, fallback_udid).await
+            }
+        }
+        .await;
+
+        match ld_attempt {
+            Ok((handle, rsd2)) => return Ok((handle, rsd2, None)),
+            Err(e) => attempt_errors.push(format!("lockdown.remote: {}", e)),
+        }
+    }
+
+    // Strategy 3: `com.apple.internal.dt.coredevice.untrusted.tunnelservice` + pairingFile credentials
+    if let Some(ut_info) = services1.get(SERVICE_UNTRUSTED_TUNNEL) {
+        if let Some(rp) = rp_opt {
+            let ut_attempt = async {
+                let s = outer.connect_raw_port(ut_info.port).await?;
+                let xpc = RemoteXpcConn::connect_and_handshake(s).await?;
+                let mut ctrl = RpPairingControlClient::from_remote_xpc(xpc).await?;
+                ctrl.attempt_pair_verify()
+                    .await
+                    .map_err(|e| e.into_lockdown_error(LockdownStage::Protocol).to_string())?;
+                ctrl.validate_pairing(rp)
+                    .await
+                    .map_err(|e| e.into_lockdown_error(LockdownStage::StartSession).to_string())?;
+                let listener_port = ctrl
+                    .create_tcp_listener()
+                    .await
+                    .map_err(|e| e.into_lockdown_error(LockdownStage::StartService).to_string())?;
+                let tun_stream = outer.connect_raw_port(listener_port).await?;
+                let (tls_stream, tun_info) =
+                    connect_cd_tunnel(tun_stream, &ctrl.encryption_key).await?;
+                let client_ip: IpAddr = tun_info
+                    .client_address
+                    .parse()
+                    .map_err(|e| format!("Bad CDTunnel client IP: {}", e))?;
+                let server_ip: IpAddr = tun_info
+                    .server_address
+                    .parse()
+                    .map_err(|e| format!("Bad CDTunnel server IP: {}", e))?;
+                let mut adapter = Adapter::new(Box::new(tls_stream), client_ip, server_ip);
+                adapter.set_mss((tun_info.mtu as usize).min(8192).saturating_sub(60).max(512));
+                let mut trusted_handle = adapter.to_async_handle();
+                let rsd_stream = tokio::time::timeout(
+                    Duration::from_secs(6),
+                    trusted_handle.connect(tun_info.server_rsd_port),
+                )
+                .await
+                .map_err(|_| {
+                    format!(
+                        "untrusted.tunnelservice connect RSD port {} timed out",
+                        tun_info.server_rsd_port
+                    )
+                })?
+                .map_err(|e| {
+                    format!(
+                        "untrusted.tunnelservice connect RSD port {} failed: {}",
+                        tun_info.server_rsd_port, e
+                    )
+                })?;
+                let rsd2 = perform_rsd_handshake(rsd_stream, uuid_seed, fallback_udid).await?;
+                Ok::<_, String>((trusted_handle, rsd2, Arc::new(tokio::sync::Mutex::new(ctrl))))
+            }
+            .await;
+
+            match ut_attempt {
+                Ok((handle, rsd2, ctrl)) => return Ok((handle, rsd2, Some(ctrl))),
+                Err(e) => attempt_errors.push(format!("untrusted.tunnelservice: {}", e)),
+            }
+        } else {
+            attempt_errors.push(
+                "untrusted.tunnelservice có mặt nhưng thiếu RemotePairing credentials (identifier/alt_irk/private_key/public_key)".to_string(),
+            );
+        }
+    }
+
+    // Strategy 4: Classic Lockdown `62078` -> StartService(CoreDeviceProxy) when available
+    if let Some(pairing) = lockdown_opt {
+        if endpoint_host != "127.0.0.1" {
+            let probe_host = endpoint_host.to_string();
+            let port_open = tokio::task::spawn_blocking(move || {
+                probe_tcp_open(&probe_host, 62078, Duration::from_millis(300)).is_ok()
+            })
+            .await
+            .unwrap_or(false);
+            if port_open {
+                let classic_attempt = async {
+                    let mut raw = connect_async_transport(
+                        endpoint_host.to_string(),
+                        62078,
+                        Duration::from_millis(1200),
+                        LockdownStage::TcpConnect,
+                        false,
+                    )
+                    .await
+                    .map_err(|e| e.to_string())?;
+                    let mut sess_req = HashMap::new();
+                    sess_req.insert("Label".to_string(), PlistValue::String("3105-x-PHUCVN".to_string()));
+                    sess_req.insert("Request".to_string(), PlistValue::String("StartSession".to_string()));
+                    sess_req.insert("HostID".to_string(), PlistValue::String(pairing.host_id.clone()));
+                    sess_req.insert(
+                        "SystemBUID".to_string(),
+                        PlistValue::String(pairing.system_buid.clone()),
+                    );
+                    async_send_plist(&mut raw, &sess_req).await?;
+                    let sess_resp = async_read_plist(&mut raw).await?;
+                    if let Some(err) = sess_resp.get_string("Error") {
+                        return Err(format!("Lockdown StartSession: {}", err));
+                    }
+                    let use_tls = sess_resp
+                        .dict_get_ci(&["EnableSessionSSL", "enableSessionSSL"])
+                        .and_then(|v| match v {
+                            PlistValue::Boolean(b) => Some(*b),
+                            _ => None,
+                        })
+                        .unwrap_or(true);
+                    let (svc_port, svc_ssl) = if use_tls {
+                        let tls_ctrl = AsyncTlsStream::handshake(raw, pairing).await?;
+                        async_start_service_over_lockdown_stream(tls_ctrl, SERVICE_COREDEVICE_PROXY)
+                            .await?
+                    } else {
+                        async_start_service_over_lockdown_stream(raw, SERVICE_COREDEVICE_PROXY)
+                            .await?
+                    };
+                    let svc_raw = connect_async_transport(
+                        endpoint_host.to_string(),
+                        svc_port,
+                        Duration::from_secs(4),
+                        LockdownStage::StartService,
+                        false,
+                    )
+                    .await
+                    .map_err(|e| e.to_string())?;
+                    if svc_ssl {
+                        let tls_svc = AsyncTlsStream::handshake(svc_raw, pairing).await?;
+                        let proxy = CoreDeviceProxy::new(tls_svc).await?;
+                        complete_coredevice_proxy_tunnel(proxy, uuid_seed, fallback_udid).await
+                    } else {
+                        let proxy = CoreDeviceProxy::new(svc_raw).await?;
+                        complete_coredevice_proxy_tunnel(proxy, uuid_seed, fallback_udid).await
+                    }
+                }
+                .await;
+
+                match classic_attempt {
+                    Ok((handle, rsd2)) => return Ok((handle, rsd2, None)),
+                    Err(e) => attempt_errors.push(format!("Lockdown(62078): {}", e)),
+                }
+            }
+        }
+    }
+
+    if attempt_errors.is_empty() {
+        Err(format!(
+            "RsdHandshake #1 ({} dịch vụ) không quảng bá {} hay dịch vụ leo thang Trusted Tunnel",
+            services1.len(),
+            SERVICE_COREDEVICE_PROXY
+        ))
+    } else {
+        Err(attempt_errors.join(" | "))
+    }
+}
+
 impl RsdTunnelSession {
+    async fn finalize_with_software_tunnel(
+        endpoint_host: String,
+        endpoint_port: u16,
+        iface: Option<String>,
+        udid: String,
+        rsd1: RsdHandshakeData,
+        transport1: RsdTransport,
+        rp_opt: Option<&RemotePairingFile>,
+        lockdown_opt: Option<&PairingFile>,
+        uuid_seed: Option<&str>,
+    ) -> Self {
+        let untrusted_services = rsd1.services;
+
+        if has_trusted_fileservice_pair(&untrusted_services) {
+            let status_line = format!(
+                "[LOCALDEV LIVE] CoreDeviceProxy tunnel active — {} trusted services",
+                untrusted_services.len()
+            );
+            eprintln!("{}", status_line);
+            return RsdTunnelSession {
+                endpoint_host,
+                endpoint_port,
+                iface,
+                udid,
+                product_type: rsd1.product_type,
+                os_version: rsd1.os_version,
+                services: untrusted_services.clone(),
+                trusted_services: untrusted_services.clone(),
+                untrusted_services,
+                coredevice_proxy_active: true,
+                coredevice_tunnel_status: Some(status_line),
+                transport: transport1,
+            };
+        }
+
+        let seed = uuid_seed.or(Some(udid.as_str()));
+        let fallback_id = Some(udid.as_str());
+        match establish_coredevice_proxy_tunnel(
+            &transport1,
+            &untrusted_services,
+            &endpoint_host,
+            rp_opt,
+            lockdown_opt,
+            seed,
+            fallback_id,
+        )
+        .await
+        {
+            Ok((trusted_handle, rsd2, extra_control)) => {
+                let trusted_services = rsd2.services;
+                let trusted_count = trusted_services.len();
+                let mut combined_services = untrusted_services.clone();
+                combined_services.extend(trusted_services.clone());
+
+                let resolved_udid = if !rsd2.uuid.is_empty() {
+                    rsd2.uuid
+                } else {
+                    udid
+                };
+                let status_line = format!(
+                    "[LOCALDEV LIVE] CoreDeviceProxy tunnel active — {} trusted services",
+                    trusted_count
+                );
+                eprintln!("{}", status_line);
+
+                RsdTunnelSession {
+                    endpoint_host,
+                    endpoint_port,
+                    iface,
+                    udid: resolved_udid,
+                    product_type: rsd2.product_type.or(rsd1.product_type),
+                    os_version: rsd2.os_version.or(rsd1.os_version),
+                    services: combined_services,
+                    untrusted_services,
+                    trusted_services,
+                    coredevice_proxy_active: true,
+                    coredevice_tunnel_status: Some(status_line),
+                    transport: RsdTransport::LayeredTunnel {
+                        outer: Box::new(transport1),
+                        trusted_handle,
+                        extra_control,
+                    },
+                }
+            }
+            Err(err_reason) => {
+                let status_line = format!("CoreDeviceProxy tunnel failed: {}", err_reason);
+                eprintln!("{}", status_line);
+                RsdTunnelSession {
+                    endpoint_host,
+                    endpoint_port,
+                    iface,
+                    udid,
+                    product_type: rsd1.product_type,
+                    os_version: rsd1.os_version,
+                    services: untrusted_services.clone(),
+                    untrusted_services,
+                    trusted_services: HashMap::new(),
+                    coredevice_proxy_active: false,
+                    coredevice_tunnel_status: Some(status_line),
+                    transport: transport1,
+                }
+            }
+        }
+    }
+
     /// Connects to `host:port` (typically `10.7.0.1:49152`), performs RPPairing
     /// `attemptPairVerify` + `verifyManualPairing` + `createListener` + TLS-PSK `CDTunnel`
-    /// + `jktcp` TCP/IPv6 + `RsdHandshake`.
+    /// + `jktcp` TCP/IPv6 + `RsdHandshake`, then escalates via `CoreDeviceProxy::create_software_tunnel`
+    /// and `RsdHandshake` #2 when Trusted RSD Services are not yet exposed.
+    #[allow(dead_code)]
     pub fn connect_remote_pairing(
         host: &str,
         port: u16,
         iface: Option<String>,
         rp: &RemotePairingFile,
     ) -> Result<Self, LockdownError> {
+        Self::connect_remote_pairing_with_options(host, port, iface, rp, None)
+    }
+
+    pub fn connect_remote_pairing_with_options(
+        host: &str,
+        port: u16,
+        iface: Option<String>,
+        rp: &RemotePairingFile,
+        lockdown: Option<&PairingFile>,
+    ) -> Result<Self, LockdownError> {
         let rt = runtime().map_err(|e| {
             LockdownError::new(LockdownErrorKind::ProtocolError, LockdownStage::Protocol, e)
         })?;
         let host_owned = host.to_string();
         let rp_cloned = rp.clone();
+        let lockdown_cloned = lockdown.cloned();
         let iface_clone = iface.clone();
 
         rt.block_on(async move {
@@ -1749,7 +2674,15 @@ impl RsdTunnelSession {
             if let Err(err) = control.attempt_pair_verify().await {
                 if matches!(err, RpProtocolError::NotRpPairing(_)) {
                     // Some custom setups forward 49152 straight to HTTP/2 RSD
-                    return Self::connect_direct_rsd_async(host_owned, port, iface_clone, Some(rp_cloned.identifier)).await;
+                    return Self::connect_direct_rsd_async(
+                        host_owned,
+                        port,
+                        iface_clone,
+                        Some(rp_cloned.identifier.clone()),
+                        Some(rp_cloned),
+                        lockdown_cloned,
+                    )
+                    .await;
                 }
                 return Err(err.into_lockdown_error(LockdownStage::Protocol));
             }
@@ -1828,37 +2761,61 @@ impl RsdTunnelSession {
                 })?;
 
             let resolved_udid = if !rsd.uuid.is_empty() {
-                rsd.uuid
+                rsd.uuid.clone()
             } else {
                 fallback_id
             };
+            let transport1 = RsdTransport::CdTunnel {
+                handle,
+                control: Arc::new(tokio::sync::Mutex::new(control)),
+            };
 
-            Ok(RsdTunnelSession {
-                endpoint_host: host_owned,
-                endpoint_port: port,
-                iface: iface_clone,
-                udid: resolved_udid,
-                product_type: rsd.product_type,
-                os_version: rsd.os_version,
-                services: rsd.services,
-                transport: RsdTransport::CdTunnel {
-                    handle,
-                    control: Arc::new(tokio::sync::Mutex::new(control)),
-                },
-            })
+            Ok(Self::finalize_with_software_tunnel(
+                host_owned,
+                port,
+                iface_clone,
+                resolved_udid,
+                rsd,
+                transport1,
+                Some(&rp_cloned),
+                lockdown_cloned.as_ref(),
+                Some(&rp_cloned.identifier),
+            )
+            .await)
         })
     }
 
+    #[allow(dead_code)]
     pub fn connect_direct_rsd(
         host: &str,
         port: u16,
         iface: Option<String>,
     ) -> Result<Self, LockdownError> {
+        Self::connect_direct_rsd_with_options(host, port, iface, None, None)
+    }
+
+    pub fn connect_direct_rsd_with_options(
+        host: &str,
+        port: u16,
+        iface: Option<String>,
+        rp: Option<&RemotePairingFile>,
+        lockdown: Option<&PairingFile>,
+    ) -> Result<Self, LockdownError> {
         let rt = runtime().map_err(|e| {
             LockdownError::new(LockdownErrorKind::ProtocolError, LockdownStage::Protocol, e)
         })?;
         let host_owned = host.to_string();
-        rt.block_on(Self::connect_direct_rsd_async(host_owned, port, iface, None))
+        let rp_cloned = rp.cloned();
+        let lockdown_cloned = lockdown.cloned();
+        let uuid_seed = rp_cloned.as_ref().map(|r| r.identifier.clone());
+        rt.block_on(Self::connect_direct_rsd_async(
+            host_owned,
+            port,
+            iface,
+            uuid_seed,
+            rp_cloned,
+            lockdown_cloned,
+        ))
     }
 
     async fn connect_direct_rsd_async(
@@ -1866,6 +2823,8 @@ impl RsdTunnelSession {
         port: u16,
         iface: Option<String>,
         uuid_seed: Option<String>,
+        rp_opt: Option<RemotePairingFile>,
+        lockdown_opt: Option<PairingFile>,
     ) -> Result<Self, LockdownError> {
         let stream = connect_async_transport(
             host.clone(),
@@ -1885,16 +2844,20 @@ impl RsdTunnelSession {
                 )
             })?;
 
-        Ok(RsdTunnelSession {
-            endpoint_host: host.clone(),
-            endpoint_port: port,
+        let resolved_udid = rsd.uuid.clone();
+        let transport1 = RsdTransport::DirectHost { host: host.clone() };
+        Ok(Self::finalize_with_software_tunnel(
+            host,
+            port,
             iface,
-            udid: rsd.uuid,
-            product_type: rsd.product_type,
-            os_version: rsd.os_version,
-            services: rsd.services,
-            transport: RsdTransport::DirectHost { host },
-        })
+            resolved_udid,
+            rsd,
+            transport1,
+            rp_opt.as_ref(),
+            lockdown_opt.as_ref(),
+            uuid_seed.as_deref(),
+        )
+        .await)
     }
 
     pub fn endpoint_iface_label(&self) -> String {
@@ -1904,69 +2867,82 @@ impl RsdTunnelSession {
         }
     }
 
-    pub fn resolve_service_pair(&self, names: &[&str]) -> Option<(String, RsdServiceInfo)> {
+    /// Resolves `names` prioritizing `trusted_services` (CoreDeviceProxy software tunnel)
+    /// over `untrusted_services`, returning `(name, service_info, is_trusted)`.
+    pub fn resolve_layered_service(&self, names: &[&str]) -> Option<(String, RsdServiceInfo, bool)> {
+        for name in names {
+            if let Some(info) = self.trusted_services.get(*name) {
+                return Some(((*name).to_string(), info.clone(), true));
+            }
+        }
         for name in names {
             if let Some(info) = self.services.get(*name) {
-                return Some(((*name).to_string(), info.clone()));
+                return Some(((*name).to_string(), info.clone(), false));
             }
         }
         None
     }
 
+    pub fn resolve_service_pair(&self, names: &[&str]) -> Option<(String, RsdServiceInfo)> {
+        self.resolve_layered_service(names)
+            .map(|(n, info, _)| (n, info))
+    }
+
+    pub fn has_trusted_service(&self, name: &str) -> bool {
+        self.trusted_services.contains_key(name)
+    }
+
+    pub async fn connect_service_async(
+        &self,
+        names: &[&str],
+    ) -> Result<(String, RsdServiceInfo, RsdAsyncStream), String> {
+        let (name, info, use_trusted) = self.resolve_layered_service(names).ok_or_else(|| {
+            format!(
+                "RSD chưa cung cấp dịch vụ {:?} (trusted={}, total={})",
+                names,
+                self.trusted_services.len(),
+                self.services.len()
+            )
+        })?;
+        let stream = self
+            .transport
+            .connect_service_port(info.port, use_trusted)
+            .await?;
+        Ok((name, info, stream))
+    }
+
+    #[allow(dead_code)]
     pub async fn connect_port_async(&self, service_port: u16) -> Result<RsdAsyncStream, String> {
-        match &self.transport {
-            RsdTransport::CdTunnel { handle, .. } => {
-                let mut h = handle.clone();
-                let s = tokio::time::timeout(Duration::from_secs(6), h.connect(service_port))
-                    .await
-                    .map_err(|_| format!("Tunnel connect port {} timeout", service_port))?
-                    .map_err(|e| format!("Tunnel connect port {} failed: {}", service_port, e))?;
-                Ok(RsdAsyncStream::Jktcp(s))
+        let use_trusted = self.trusted_services.values().any(|s| s.port == service_port);
+        self.transport
+            .connect_service_port(service_port, use_trusted)
+            .await
+    }
+
+    pub fn port_dialer(&self, use_trusted: bool) -> Result<RsdPortDialer, String> {
+        match (&self.transport, use_trusted) {
+            (RsdTransport::LayeredTunnel { trusted_handle, .. }, true) => {
+                Ok(RsdPortDialer::Jktcp(trusted_handle.clone()))
             }
-            RsdTransport::DirectHost { host } => {
-                let t = connect_async_transport(
-                    host.clone(),
-                    service_port,
-                    Duration::from_secs(4),
-                    LockdownStage::StartService,
-                    false,
-                )
-                .await
-                .map_err(|e| e.to_string())?;
-                Ok(RsdAsyncStream::Direct(t))
-            }
+            (RsdTransport::LayeredTunnel { outer, .. }, false) => outer.dialer(),
+            (transport, _) => transport.dialer(),
         }
     }
 
-    fn connect_port_sync(&self, service_port: u16) -> Result<SyncTunnelStream, String> {
+    fn connect_service_port_sync(
+        &self,
+        service_port: u16,
+        use_trusted: bool,
+    ) -> Result<SyncTunnelStream, String> {
         let rt = runtime()?;
-        match &self.transport {
-            RsdTransport::CdTunnel { handle, .. } => {
-                let mut h = handle.clone();
-                let s = rt.block_on(async move {
-                    tokio::time::timeout(Duration::from_secs(6), h.connect(service_port))
-                        .await
-                        .map_err(|_| format!("Tunnel connect port {} timeout", service_port))?
-                        .map_err(|e| format!("Tunnel connect port {} failed: {}", service_port, e))
-                })?;
-                Ok(SyncTunnelStream::Jktcp {
-                    stream: s,
-                    read_timeout_secs: Arc::new(AtomicU64::new(12)),
-                    write_timeout_secs: Arc::new(AtomicU64::new(12)),
-                })
-            }
-            RsdTransport::DirectHost { host } => {
-                let h = host.clone();
-                let t = rt.block_on(connect_async_transport(
-                    h,
-                    service_port,
-                    Duration::from_secs(4),
-                    LockdownStage::StartService,
-                    false,
-                ))
-                .map_err(|e| e.to_string())?;
-                Ok(SyncTunnelStream::Direct(t))
-            }
+        let stream = rt.block_on(self.transport.connect_service_port(service_port, use_trusted))?;
+        match stream {
+            RsdAsyncStream::Jktcp(s) => Ok(SyncTunnelStream::Jktcp {
+                stream: s,
+                read_timeout_secs: Arc::new(AtomicU64::new(12)),
+                write_timeout_secs: Arc::new(AtomicU64::new(12)),
+            }),
+            RsdAsyncStream::Direct(d) => Ok(SyncTunnelStream::Direct(d)),
         }
     }
 
@@ -1976,9 +2952,9 @@ impl RsdTunnelSession {
     pub fn open_checked_in_service(&self, service_names: &[&str]) -> Result<SyncTunnelStream, String> {
         let mut last_err = String::new();
         for name in service_names {
-            if let Some(info) = self.services.get(*name) {
+            if let Some((_, info, use_trusted)) = self.resolve_layered_service(&[*name]) {
                 let mut stream = self
-                    .connect_port_sync(info.port)?
+                    .connect_service_port_sync(info.port, use_trusted)?
                     .with_timeouts(12, 12);
                 match perform_rsd_checkin(&mut stream) {
                     Ok(()) => return Ok(stream),
@@ -1989,12 +2965,10 @@ impl RsdTunnelSession {
             }
         }
         if last_err.is_empty() {
-            let mut avail: Vec<&str> = self.services.keys().map(|s| s.as_str()).collect();
-            avail.sort_unstable();
             Err(format!(
                 "RSD chưa cung cấp dịch vụ {:?} (có {} services)",
                 service_names,
-                avail.len()
+                self.services.len()
             ))
         } else {
             Err(last_err)
@@ -2105,7 +3079,7 @@ impl RsdTunnelSession {
         }
 
         let app_svc_name = obfstr!("com.apple.coredevice.appservice").to_string();
-        let Some(info) = self.services.get(app_svc_name.as_str()) else {
+        let Some((_, info, use_trusted)) = self.resolve_layered_service(&[app_svc_name.as_str()]) else {
             if have_inst_apps {
                 return Ok(merged_apps);
             }
@@ -2116,42 +3090,20 @@ impl RsdTunnelSession {
         };
         let port = info.port;
 
-        let core_device_req = |transport: &RsdTransport| -> Result<Vec<LocalDevAppInfo>, String> {
+        let core_device_req = || -> Result<Vec<LocalDevAppInfo>, String> {
             let rt = runtime()?;
-            match transport {
-                RsdTransport::CdTunnel { handle, .. } => {
-                    let mut h = handle.clone();
-                    rt.block_on(async move {
-                        let s = tokio::time::timeout(Duration::from_secs(6), h.connect(port))
-                            .await
-                            .map_err(|_| "AppService connect timeout".to_string())?
-                            .map_err(|e| format!("AppService connect failed: {}", e))?;
-                        tokio::time::timeout(Duration::from_secs(12), fetch_apps_via_coredevice_xpc(s))
-                            .await
-                            .map_err(|_| "AppService RPC timeout".to_string())?
-                    })
-                }
-                RsdTransport::DirectHost { host } => {
-                    let host_c = host.clone();
-                    rt.block_on(async move {
-                        let s = connect_async_transport(
-                            host_c,
-                            port,
-                            Duration::from_secs(4),
-                            LockdownStage::StartService,
-                            false,
-                        )
-                        .await
-                        .map_err(|e| e.to_string())?;
-                        tokio::time::timeout(Duration::from_secs(12), fetch_apps_via_coredevice_xpc(s))
-                            .await
-                            .map_err(|_| "AppService RPC timeout".to_string())?
-                    })
-                }
-            }
+            rt.block_on(async move {
+                let s = self
+                    .transport
+                    .connect_service_port(port, use_trusted)
+                    .await?;
+                tokio::time::timeout(Duration::from_secs(12), fetch_apps_via_coredevice_xpc(s))
+                    .await
+                    .map_err(|_| "AppService RPC timeout".to_string())?
+            })
         };
 
-        let core_result = core_device_req(&self.transport);
+        let core_result = core_device_req();
         match (have_inst_apps, core_result) {
             (true, Ok(extra)) => {
                 eprintln!(
@@ -2172,13 +3124,75 @@ impl RsdTunnelSession {
     }
 
     pub fn close(self) {
-        if let RsdTransport::CdTunnel { mut handle, .. } = self.transport {
-            if let Ok(rt) = runtime() {
-                let _ = rt.block_on(async move {
-                    let _ = tokio::time::timeout(Duration::from_millis(250), handle.close()).await;
-                });
-            }
+        if let Ok(rt) = runtime() {
+            rt.block_on(async move {
+                self.transport.close_async().await;
+            });
         }
+    }
+}
+
+/// Client metadata & stream binder for `com.apple.streaming_zip_conduit.shim.remote` /
+/// `com.apple.streaming_zip_conduit` over the Trusted RSD Software Tunnel.
+#[allow(dead_code)]
+pub struct StreamingZipConduitClient {
+    pub service_name: String,
+    pub uses_trusted_tunnel: bool,
+    pub port: u16,
+}
+
+#[allow(dead_code)]
+impl StreamingZipConduitClient {
+    pub fn probe(session: &RsdTunnelSession) -> Option<(String, RsdServiceInfo, bool)> {
+        session.resolve_layered_service(&[
+            SERVICE_STREAMING_ZIP_CONDUIT_SHIM,
+            SERVICE_STREAMING_ZIP_CONDUIT,
+        ])
+    }
+
+    pub fn open_checked_in_sync(
+        session: &RsdTunnelSession,
+    ) -> Result<(Self, SyncTunnelStream), String> {
+        let (name, info, use_trusted) = Self::probe(session).ok_or_else(|| {
+            "RSD chưa quảng bá com.apple.streaming_zip_conduit(.shim.remote)".to_string()
+        })?;
+        let mut stream = session
+            .connect_service_port_sync(info.port, use_trusted)?
+            .with_timeouts(15, 15);
+        if !info.uses_remote_xpc {
+            perform_rsd_checkin(&mut stream)?;
+        }
+        Ok((
+            Self {
+                service_name: name,
+                uses_trusted_tunnel: use_trusted,
+                port: info.port,
+            },
+            stream,
+        ))
+    }
+
+    pub async fn connect_async(
+        session: &RsdTunnelSession,
+    ) -> Result<(Self, RsdAsyncStream), String> {
+        let (name, info, use_trusted) = Self::probe(session).ok_or_else(|| {
+            "RSD chưa quảng bá com.apple.streaming_zip_conduit(.shim.remote)".to_string()
+        })?;
+        let mut stream = session
+            .transport
+            .connect_service_port(info.port, use_trusted)
+            .await?;
+        if !info.uses_remote_xpc {
+            async_rsd_checkin(&mut stream).await?;
+        }
+        Ok((
+            Self {
+                service_name: name,
+                uses_trusted_tunnel: use_trusted,
+                port: info.port,
+            },
+            stream,
+        ))
     }
 }
 

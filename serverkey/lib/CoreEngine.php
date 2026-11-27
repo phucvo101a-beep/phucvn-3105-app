@@ -456,17 +456,26 @@ final class CoreEngine {
                     return ['ok' => false, 'code' => 'PACKAGE_DENIED', 'msg' => 'Mã Key không hợp lệ cho gói ứng dụng này.'];
                 }
 
-                $durSecs = self::durationSeconds((string)($rec['duration'] ?? '30d'));
+                $rawDur = trim((string)($rec['duration'] ?? ''));
+                if ($rawDur === '' && isset($rec['days'])) {
+                    $daysVal = intval($rec['days']);
+                    $rawDur = ($daysVal <= 0) ? 'permanent' : ($daysVal . 'd');
+                }
+                if ($rawDur === '') {
+                    $rawDur = '30d';
+                }
+                $durSecs = self::durationSeconds($rawDur);
                 $isPerm = ($durSecs === null);
                 $expTs = isset($rec['expiry_ts']) ? intval($rec['expiry_ts']) : 0;
                 if ($expTs === 0 && !empty($rec['expiry_date']) && $rec['expiry_date'] !== 'permanent') {
                     $parsed = strtotime((string)$rec['expiry_date']);
                     if ($parsed !== false) $expTs = $parsed;
                 }
-                if (empty($rec['is_used']) && $expTs === 0 && !$isPerm) {
+                if ($expTs <= 0 && !$isPerm) {
                     $expTs = $now + $durSecs;
                     $rec['expiry_ts'] = $expTs;
                     $rec['expiry_date'] = date('Y-m-d H:i:s', $expTs);
+                    $dirty = true;
                 } elseif ($expTs > 0) {
                     $rec['expiry_ts'] = $expTs;
                 }

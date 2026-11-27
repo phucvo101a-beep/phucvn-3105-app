@@ -4,6 +4,9 @@ use obfstr::obfstr;
 use sha2::{Digest, Sha256};
 #[cfg(target_vendor = "apple")]
 use std::ffi::{c_void, CString};
+use std::sync::OnceLock;
+
+static CACHED_DEVICE_FP: OnceLock<String> = OnceLock::new();
 
 #[cfg(target_vendor = "apple")]
 extern "C" {
@@ -160,28 +163,33 @@ fn keychain_write_string(_service: &str, _account: &str, _val: &str) -> bool {
     false
 }
 
-/// Computes persistent hardware-bound SHA-256 device fingerprint (64 hex chars).
+/// Computes persistent hardware-bound SHA-256 device fingerprint (64 hex chars),
+/// cached in `OnceLock` so transient Keychain locks never alter HWID between preflight/activate/heartbeat.
 pub fn get_device_fingerprint() -> String {
-    let hw = get_hardware_machine();
-    let svc = obfstr!("com.phucvn.3105.devfp").to_string();
-    let acc = obfstr!("device_secret_id").to_string();
+    CACHED_DEVICE_FP
+        .get_or_init(|| {
+            let hw = get_hardware_machine();
+            let svc = obfstr!("com.phucvn.3105.devfp").to_string();
+            let acc = obfstr!("device_secret_id").to_string();
 
-    let persistent_id = match keychain_read_string(&svc, &acc) {
-        Some(existing) if !existing.trim().is_empty() => existing,
-        _ => {
-            let mut rnd = [0u8; 16];
-            rand::RngCore::fill_bytes(&mut rand::rngs::OsRng, &mut rnd);
-            let generated = hex::encode(rnd);
-            let _ = keychain_write_string(&svc, &acc, &generated);
-            keychain_read_string(&svc, &acc).unwrap_or(generated)
-        }
-    };
+            let persistent_id = match keychain_read_string(&svc, &acc) {
+                Some(existing) if !existing.trim().is_empty() => existing,
+                _ => {
+                    let mut rnd = [0u8; 16];
+                    rand::RngCore::fill_bytes(&mut rand::rngs::OsRng, &mut rnd);
+                    let generated = hex::encode(rnd);
+                    let _ = keychain_write_string(&svc, &acc, &generated);
+                    keychain_read_string(&svc, &acc).unwrap_or(generated)
+                }
+            };
 
-    let hwid_tag = obfstr!("PHUCVN3105-HWID-V3|").to_string();
-    let mut hasher = Sha256::new();
-    hasher.update(hwid_tag.as_bytes());
-    hasher.update(hw.as_bytes());
-    hasher.update(b"|");
-    hasher.update(persistent_id.as_bytes());
-    hex::encode(hasher.finalize())
+            let hwid_tag = obfstr!("PHUCVN3105-HWID-V3|").to_string();
+            let mut hasher = Sha256::new();
+            hasher.update(hwid_tag.as_bytes());
+            hasher.update(hw.as_bytes());
+            hasher.update(b"|");
+            hasher.update(persistent_id.as_bytes());
+            hex::encode(hasher.finalize())
+        })
+        .clone()
 }

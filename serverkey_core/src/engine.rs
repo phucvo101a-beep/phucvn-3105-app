@@ -637,14 +637,29 @@ pub fn handle_v3_request(
                 ));
             }
 
-            // Compute or activate expiry_ts cleanly (fixes bug in old api_v2.php!)
+            // Compute or backfill expiry_ts cleanly so non-permanent keys never emit expiry_ts=0
+            let effective_dur = if rec.duration.trim().is_empty() {
+                if let Some(days_val) = rec.extra.get("days").and_then(|v| v.as_i64()) {
+                    if days_val <= 0 {
+                        "permanent".to_string()
+                    } else {
+                        format!("{days_val}d")
+                    }
+                } else {
+                    "30d".to_string()
+                }
+            } else {
+                rec.duration.clone()
+            };
             let mut exp_ts = rec
                 .expiry_ts
                 .or_else(|| rec.expiry_date.as_deref().and_then(parse_expiry_ts))
                 .unwrap_or(0);
+            let dur_opt = duration_to_seconds(&effective_dur);
+            let is_permanent = exp_ts == 0 && dur_opt.is_none();
 
-            if !rec.is_used && exp_ts == 0 {
-                if let Some(dur_secs) = duration_to_seconds(&rec.duration) {
+            if exp_ts <= 0 {
+                if let Some(dur_secs) = dur_opt {
                     exp_ts = now + dur_secs;
                     rec.expiry_ts = Some(exp_ts);
                     rec.expiry_date = Some(format_vn_time(exp_ts));
@@ -656,7 +671,6 @@ pub fn handle_v3_request(
                 rec.expiry_ts = Some(exp_ts);
             }
 
-            let is_permanent = exp_ts == 0 && duration_to_seconds(&rec.duration).is_none();
             if exp_ts > 0 && now >= exp_ts {
                 return Ok(KeyCheckOutcome::Fail(
                     "KEY_EXPIRED",
