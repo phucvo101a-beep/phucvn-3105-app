@@ -2158,6 +2158,25 @@ class SecuritySuiteTests(unittest.TestCase):
         self.assertIn("has_fd00_upgrade", mod)
         self.assertIn("connect_service_event_handshake", rsd)
 
+    def test_24_ula_upgrade_probes_reachability_and_verify_alive_fallbacks(self):
+        repo_root = Path(__file__).resolve().parent.parent
+        mod_src = (repo_root / "sec_core" / "src" / "localdev" / "mod.rs").read_text(encoding="utf-8")
+        rsd_src = (repo_root / "sec_core" / "src" / "localdev" / "rsd.rs").read_text(encoding="utf-8")
+
+        self.assertIn("fn has_reachable_ula_upgrade(&mut self) -> bool", mod_src)
+        self.assertIn("Self::expand_ula_peer_candidates(&self.candidates, self.port)", mod_src)
+        self.assertIn("tunnel::probe_tcp_open(host, *port, Duration::from_millis(120)).is_ok()", mod_src)
+        self.assertIn("last_failed_ula_probe", mod_src)
+        self.assertIn("let should_upgrade_to_ula = self.has_reachable_ula_upgrade();", mod_src)
+        self.assertIn("let has_fd00_upgrade = self.has_reachable_ula_upgrade();", mod_src)
+        self.assertIn("self.last_failed_ula_probe = None;", mod_src)
+
+        verify_start = rsd_src.index("pub fn verify_alive(&self) -> Result<(), String>")
+        verify_body = rsd_src[verify_start : verify_start + 1200]
+        self.assertIn("if let Ok(stream) = self.open_checked_in_service(&[ld.as_str()])", verify_body)
+        self.assertIn("com.apple.mobile.heartbeat.shim.remote", verify_body)
+
+
 def main():
     parser = argparse.ArgumentParser(description="Run 3105 5-Scenario Security Test Suite")
     parser.add_argument("--rust-bin", type=Path, default=None)

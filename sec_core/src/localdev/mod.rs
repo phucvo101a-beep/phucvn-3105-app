@@ -32,7 +32,7 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Mutex;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 use tunnel::{
     LockdownClient, LockdownError, LockdownErrorKind, LockdownStage, LockdownStream,
     DEFAULT_LOCALDEV_IP, DEFAULT_LOCKDOWN_PORT, DEFAULT_REMOTE_PAIRING_PORT, MAX_HANDSHAKE_ATTEMPTS,
@@ -122,6 +122,7 @@ pub struct LocalDevManager {
     pub cached_apps: HashMap<String, LocalDevAppInfo>,
     pub did_scan_for_cache: bool,
     pub last_airlift_route: Option<AirLiftRouteInfo>,
+    last_failed_ula_probe: Option<(Vec<String>, Instant)>,
 }
 
 impl Default for LocalDevManager {
@@ -151,6 +152,7 @@ impl LocalDevManager {
             cached_apps: HashMap::new(),
             did_scan_for_cache: false,
             last_airlift_route: None,
+            last_failed_ula_probe: None,
         }
     }
 
@@ -161,6 +163,7 @@ impl LocalDevManager {
         }
         self.did_scan_for_cache = false;
         self.last_airlift_route = None;
+        self.last_failed_ula_probe = None;
     }
 
     /// Updates dynamic tunnel candidate endpoints discovered via Swift `getifaddrs()` (`utun`)
@@ -376,11 +379,8 @@ impl LocalDevManager {
         };
 
         // Reuse active verified RSD tunnel if healthy — unless we only had an untrusted session
-        // and a direct fd00::/8 IPv6 ULA Trusted CDTunnel interface just became available.
-        let has_fd00_candidate = self
-            .candidates
-            .iter()
-            .any(|c| tunnel::is_strict_ipv6_ula_fd00(&c.host));
+        // and a direct reachable fd00::/8 IPv6 ULA Trusted CDTunnel listener is confirmed open.
+        let should_upgrade_to_ula = self.has_reachable_ula_upgrade();
         if let Some(ref sess) = self.active_rsd {
             let has_lan_lockdown_upgrade = pairing.lockdown.is_some()
                 && !sess.is_trusted_tunnel()
@@ -390,9 +390,6 @@ impl LocalDevManager {
                             || c.source.as_deref() == Some("wifi-en0-lockdown"))
                         && tunnel::is_lan_ipv4(&c.host)
                 });
-            let should_upgrade_to_ula = has_fd00_candidate
-                && !sess.is_trusted_tunnel()
-                && !tunnel::is_strict_ipv6_ula_fd00(&sess.endpoint_host);
             if !has_lan_lockdown_upgrade && !should_upgrade_to_ula && sess.verify_alive().is_ok() {
                 let iface_label = sess.endpoint_iface_label();
                 self.host = sess.endpoint_host.clone();
@@ -441,6 +438,10 @@ impl LocalDevManager {
 
         // Priority #0: Direct connection to Trusted CDTunnel IPv6 ULA (`fd00::/8`, e.g. utun5 `fd2b:...::2`/`::1`)
         // across ports `49152`, `58783`, and mDNS (`_remotepairing._tcp` / `_remoted._tcp`) ahead of `10.7.0.1:49152`.
+        let has_fd00_candidate = self
+            .candidates
+            .iter()
+            .any(|c| tunnel::is_strict_ipv6_ula_fd00(&c.host));
         if has_fd00_candidate {
             if let Some(ula_session) = self.probe_and_connect_ipv6_ula(&pairing, rp_port) {
                 return Ok(self.activate_rsd_session(ula_session, &pairing.udid));
@@ -711,14 +712,42 @@ fn expand_ula_peer_candidates(candidates: &[TunnelCandidate], fallback_port: u16
         }
     }
 
-    fn ensure_backend(&mut self) -> Result<bool, String> {
-        let has_fd00_upgrade = self
-            .candidates
+    /// Probes strict `fd00::/8` IPv6 ULA peers (via `expand_ula_peer_candidates`) with a brief
+    /// non-destructive TCP check BEFORE tearing down a healthy `10.7.0.1:49152` RSD session.
+    /// When `CDTunnel` itself spawns a local `utun5` (`fdXX::1`), no listener accepts on ULA, so
+    /// probing first and caching failed ULA probes prevents tearing down our own active tunnel.
+    fn has_reachable_ula_upgrade(&mut self) -> bool {
+        let needs_upgrade_probe = self.active_rsd.as_ref().is_some_and(|s| {
+            !s.is_trusted_tunnel() && !tunnel::is_strict_ipv6_ula_fd00(&s.endpoint_host)
+        });
+        if !needs_upgrade_probe {
+            return false;
+        }
+        let ula_targets = Self::expand_ula_peer_candidates(&self.candidates, self.port);
+        if ula_targets.is_empty() {
+            return false;
+        }
+        let probe_key: Vec<String> = ula_targets
             .iter()
-            .any(|c| tunnel::is_strict_ipv6_ula_fd00(&c.host))
-            && self.active_rsd.as_ref().is_some_and(|s| {
-                !s.is_trusted_tunnel() && !tunnel::is_strict_ipv6_ula_fd00(&s.endpoint_host)
-            });
+            .map(|(h, p, _)| format!("{}:{}", h, p))
+            .collect();
+        if let Some((ref failed_key, failed_at)) = self.last_failed_ula_probe {
+            if *failed_key == probe_key && failed_at.elapsed() < Duration::from_secs(20) {
+                return false;
+            }
+        }
+        for (host, port, _) in &ula_targets {
+            if tunnel::probe_tcp_open(host, *port, Duration::from_millis(120)).is_ok() {
+                self.last_failed_ula_probe = None;
+                return true;
+            }
+        }
+        self.last_failed_ula_probe = Some((probe_key, Instant::now()));
+        false
+    }
+
+    fn ensure_backend(&mut self) -> Result<bool, String> {
+        let has_fd00_upgrade = self.has_reachable_ula_upgrade();
         if self.active_rsd.is_some() && !has_fd00_upgrade {
             return Ok(true);
         }

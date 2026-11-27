@@ -3409,15 +3409,17 @@ impl RsdTunnelSession {
     pub fn verify_alive(&self) -> Result<(), String> {
         let ld = obfstr!("com.apple.mobile.lockdown.remote.trusted").to_string();
         if self.services.contains_key(ld.as_str()) {
-            let mut stream = self
-                .open_checked_in_service(&[ld.as_str()])?
-                .with_timeouts(2, 2);
-            let mut ping = HashMap::new();
-            ping.insert("Label".to_string(), PlistValue::String("3105-x-PHUCVN".to_string()));
-            ping.insert("Request".to_string(), PlistValue::String("QueryType".to_string()));
-            super::tunnel::send_plist(&mut stream, &ping)?;
-            let _ = super::tunnel::read_plist(&mut stream)?;
-            return Ok(());
+            if let Ok(stream) = self.open_checked_in_service(&[ld.as_str()]) {
+                let mut stream = stream.with_timeouts(2, 2);
+                let mut ping = HashMap::new();
+                ping.insert("Label".to_string(), PlistValue::String("3105-x-PHUCVN".to_string()));
+                ping.insert("Request".to_string(), PlistValue::String("QueryType".to_string()));
+                if super::tunnel::send_plist(&mut stream, &ping).is_ok()
+                    && super::tunnel::read_plist(&mut stream).is_ok()
+                {
+                    return Ok(());
+                }
+            }
         }
         let hb = obfstr!("com.apple.mobile.heartbeat.shim.remote").to_string();
         let inst = obfstr!("com.apple.mobile.installation_proxy.shim.remote").to_string();
