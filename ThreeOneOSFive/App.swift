@@ -107,7 +107,7 @@ private struct SecurityGateRootView: View {
                             let ext = url.pathExtension.lowercased()
                             if let validURL = ContainerStore.validatedExternalFileURL(url) {
                                 if ext == "mobiledevicepairing" || ext == "pairing"
-                                    || (ext == "plist" && LocalDevBridge.looksLikePairingFile(at: validURL)) {
+                                    || ((ext == "plist" || ext == "json") && LocalDevBridge.looksLikePairingFile(at: validURL)) {
                                     _ = LocalDevBridge.shared.importPairingFile(from: validURL)
                                     return
                                 }

@@ -400,8 +400,8 @@ impl LocalDevManager {
                     code: LocalDevStatusCode::RemotePairingUnsupported as i32,
                     status: "CẦN FILE REMOTE PAIRING CHO CỔNG 49152".to_string(),
                     message: format!(
-                        "Phát hiện cổng RemotePairing/RSD {}:{} đang OPEN (iOS 27.2.1 đã đóng cổng Lockdown 62078). Tệp hiện tại chỉ có Lockdown X.509 cũ — hãy tạo & nhập tệp Remote Pairing từ `idevice_pair` (chứa `public_key`, `private_key`, `identifier`, `alt_irk`).",
-                        ep_host, ep_port
+                        "Phát hiện cổng RemotePairing/RSD {}:{} đang OPEN (iOS 27.2.1 không dùng cổng Lockdown 62078). Tệp hiện tại là Lockdown X.509 cũ (chỉ có HostCertificate/HostID) — hãy chọn đúng file Remote Pairing từ idevice_pair (Plist/JSON có public_key, private_key, identifier, alt_irk) cho cổng {}.",
+                        ep_host, ep_port, ep_port
                     ),
                     host: ep_host,
                     port: ep_port,

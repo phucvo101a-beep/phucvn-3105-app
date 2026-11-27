@@ -1360,7 +1360,18 @@ class SecuritySuiteTests(unittest.TestCase):
         self.assertNotRegex(cargo_toml, r'(?m)^\s*plist\s*=')
 
         pairing_rs = (REPO_ROOT / "sec_core" / "src" / "localdev" / "pairing.rs").read_text(encoding="utf-8")
-        for sym in ("pub struct RemotePairingFile", "pub struct UnifiedPairing", "impl UnifiedPairing", "pub fn parse(raw_data: &[u8])", "tunnel_port"):
+        for sym in (
+            "pub struct RemotePairingFile",
+            "pub struct UnifiedPairing",
+            "impl UnifiedPairing",
+            "pub fn parse(raw_data: &[u8])",
+            "parse_pairing_document",
+            "json_to_plist_value",
+            "collect_candidate_dicts",
+            "normalize_ed25519_private_key",
+            "normalize_ed25519_public_key",
+            "tunnel_port",
+        ):
             self.assertIn(sym, pairing_rs)
         self.assertNotIn("REMOTE_PAIRING_UNSUPPORTED", pairing_rs)
 
@@ -1373,12 +1384,17 @@ class SecuritySuiteTests(unittest.TestCase):
             "RpPairingControlClient",
             "RemoteXpcConn",
             "perform_rsd_handshake",
+            "extract_rsd_device_id",
+            "dict_get_ci",
+            "as_id_string",
+            "summarize_dict_keys",
             "pub struct RsdTunnelSession",
             "connect_remote_pairing",
             "perform_rsd_checkin",
             "fetch_apps_via_coredevice_xpc",
         ):
             self.assertIn(sym, rsd_rs)
+        self.assertNotIn("Missing UUID in RSD Handshake response", rsd_rs)
         for forbidden_raw in ("bplist00",):
             self.assertNotIn(forbidden_raw, rsd_rs)
             self.assertNotIn(forbidden_raw, tls_psk_rs)
@@ -1396,12 +1412,24 @@ class SecuritySuiteTests(unittest.TestCase):
         self.assertIn("mgr.write_file", ffi_rs)
 
         ld_swift = (REPO_ROOT / "ThreeOneOSFive" / "helpers" / "LocalDevBridge.swift").read_text(encoding="utf-8")
-        self.assertIn("defaultRemotePairingPort: UInt16 = 49152", ld_swift)
-        self.assertIn("detectPreferredTunnelPort()", ld_swift)
+        for sym in (
+            "defaultRemotePairingPort: UInt16 = 49152",
+            "detectPreferredTunnelPort()",
+            "parsePairingObject",
+            "normalizePairingKey",
+            "JSONSerialization.jsonObject",
+            "pairingRecord",
+            "remotePairing",
+        ):
+            self.assertIn(sym, ld_swift)
         self.assertNotIn("func remotePairingUnsupportedStatus", ld_swift)
 
         card_swift = (REPO_ROOT / "ThreeOneOSFive" / "views" / "LocalDevStatusCard.swift").read_text(encoding="utf-8")
         self.assertIn("bridge.currentStatus.port ?? 49152", card_swift)
+        self.assertIn("UTType.json", card_swift)
+
+        app_swift = (REPO_ROOT / "ThreeOneOSFive" / "App.swift").read_text(encoding="utf-8")
+        self.assertIn('ext == "json"', app_swift)
 
 
 def main():

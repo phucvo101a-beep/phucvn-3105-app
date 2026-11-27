@@ -331,6 +331,7 @@ public struct LocalDevStatusCard: View {
                 allowedContentTypes: [
                     UTType.propertyList,
                     UTType.xml,
+                    UTType.json,
                     UTType.data,
                     UTType.item
                 ],

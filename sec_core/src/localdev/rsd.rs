@@ -790,6 +790,22 @@ pub enum XpcValue {
 
 #[allow(dead_code)]
 impl XpcValue {
+    fn type_tag(&self) -> &'static str {
+        match self {
+            XpcValue::Null => "Null",
+            XpcValue::Bool(_) => "Bool",
+            XpcValue::Dictionary(_) => "Dict",
+            XpcValue::Array(_) => "Array",
+            XpcValue::Double(_) => "Double",
+            XpcValue::Int64(_) => "Int64",
+            XpcValue::UInt64(_) => "UInt64",
+            XpcValue::DateNanos(_) => "Date",
+            XpcValue::String(_) => "String",
+            XpcValue::Data(_) => "Data",
+            XpcValue::Uuid(_) => "Uuid",
+        }
+    }
+
     fn dict_get(&self, key: &str) -> Option<&XpcValue> {
         match self {
             XpcValue::Dictionary(entries) => entries.iter().find(|(k, _)| k == key).map(|(_, v)| v),
@@ -797,9 +813,59 @@ impl XpcValue {
         }
     }
 
+    fn dict_get_ci(&self, candidates: &[&str]) -> Option<&XpcValue> {
+        let entries = self.as_dict()?;
+        for name in candidates {
+            if let Some((_, v)) = entries.iter().find(|(k, _)| k == name) {
+                return Some(v);
+            }
+        }
+        for name in candidates {
+            let target = name.to_ascii_lowercase();
+            if let Some((_, v)) = entries.iter().find(|(k, _)| k.to_ascii_lowercase() == target) {
+                return Some(v);
+            }
+        }
+        None
+    }
+
+    fn summarize_dict_keys(&self) -> String {
+        match self.as_dict() {
+            Some(entries) => entries
+                .iter()
+                .map(|(k, v)| format!("{}:{}", k, v.type_tag()))
+                .collect::<Vec<_>>()
+                .join(", "),
+            None => self.type_tag().to_string(),
+        }
+    }
+
     fn as_str(&self) -> Option<&str> {
         match self {
             XpcValue::String(s) => Some(s.as_str()),
+            _ => None,
+        }
+    }
+
+    fn as_id_string(&self) -> Option<String> {
+        match self {
+            XpcValue::String(s) => {
+                let trimmed = s.trim();
+                if trimmed.is_empty() { None } else { Some(trimmed.to_string()) }
+            }
+            XpcValue::Uuid(bytes) => Some(format_uuid_hyphenated(bytes)),
+            XpcValue::Data(bytes) => {
+                if bytes.len() == 16 {
+                    if let Ok(arr) = <[u8; 16]>::try_from(bytes.as_slice()) {
+                        return Some(format_uuid_hyphenated(&arr));
+                    }
+                }
+                std::str::from_utf8(bytes)
+                    .ok()
+                    .map(str::trim)
+                    .filter(|s| !s.is_empty())
+                    .map(|s| s.to_string())
+            }
             _ => None,
         }
     }
@@ -815,7 +881,7 @@ impl XpcValue {
         match self {
             XpcValue::Int64(v) => Some(*v),
             XpcValue::UInt64(v) => i64::try_from(*v).ok(),
-            XpcValue::String(s) => s.parse().ok(),
+            XpcValue::String(s) => s.trim().parse().ok(),
             _ => None,
         }
     }
@@ -824,7 +890,7 @@ impl XpcValue {
         match self {
             XpcValue::UInt64(v) => u16::try_from(*v).ok(),
             XpcValue::Int64(v) => u16::try_from(*v).ok(),
-            XpcValue::String(s) => s.parse().ok(),
+            XpcValue::String(s) => s.trim().parse().ok(),
             _ => None,
         }
     }
@@ -1441,52 +1507,112 @@ pub struct RsdHandshakeData {
     pub os_version: Option<String>,
 }
 
+const RSD_UUID_KEY_CANDIDATES: &[&str] = &[
+    "UUID",
+    "uuid",
+    "UniqueDeviceID",
+    "DeviceID",
+    "UDID",
+    "udid",
+    "identifier",
+    "pairedUDID",
+];
+
+fn extract_rsd_device_id(root: &XpcValue, props: Option<&XpcValue>) -> Option<String> {
+    if let Some(p) = props {
+        for key in ["UniqueDeviceID", "DeviceID", "UDID", "udid", "pairedUDID", "UUID", "uuid", "identifier"] {
+            if let Some(id) = p.dict_get_ci(&[key]).and_then(|v| v.as_id_string()) {
+                return Some(id);
+            }
+        }
+    }
+    for key in RSD_UUID_KEY_CANDIDATES {
+        if let Some(id) = root.dict_get_ci(&[key]).and_then(|v| v.as_id_string()) {
+            return Some(id);
+        }
+    }
+    None
+}
+
 async fn perform_rsd_handshake<S: AsyncRead + AsyncWrite + Unpin + Send>(
     stream: S,
     uuid_seed: Option<&str>,
+    fallback_udid: Option<&str>,
 ) -> Result<RsdHandshakeData, String> {
     let host_uuid = stable_handshake_uuid(uuid_seed);
     let mut xpc = RemoteXpcConn::connect_and_handshake(stream).await?;
     xpc.send_rsd_device_handshake(host_uuid).await?;
-    let root = xpc.recv_channel_xpc(XPC_ROOT_CHANNEL).await?;
 
-    let mut uuid = root
-        .dict_get("UUID")
-        .and_then(|v| v.as_str())
-        .map(|s| s.to_string())
-        .ok_or_else(|| "Missing UUID in RSD Handshake response".to_string())?;
-
-    let props = root.dict_get("Properties");
-    if let Some(real_udid) = props
-        .and_then(|p| p.dict_get("UniqueDeviceID"))
-        .and_then(|v| v.as_str())
-        .filter(|s| !s.is_empty())
-    {
-        uuid = real_udid.to_string();
+    let mut root = xpc.recv_channel_xpc(XPC_ROOT_CHANNEL).await?;
+    for attempt in 0..3 {
+        let msg_type = root
+            .dict_get_ci(&["MessageType", "messageType"])
+            .and_then(|v| v.as_str())
+            .map(|s| s.to_string());
+        let has_services = root.dict_get_ci(&["Services", "services"]).is_some();
+        let props_summary = root
+            .dict_get_ci(&["Properties", "properties"])
+            .map(|p| p.summarize_dict_keys())
+            .unwrap_or_default();
+        eprintln!(
+            "localdev: rsd handshake rx#{} msg_type={:?} keys=[{}] props=[{}]",
+            attempt + 1,
+            msg_type,
+            root.summarize_dict_keys(),
+            props_summary
+        );
+        if has_services
+            || msg_type
+                .as_deref()
+                .map(|m| m.eq_ignore_ascii_case("Handshake"))
+                .unwrap_or(false)
+        {
+            break;
+        }
+        match tokio::time::timeout(Duration::from_millis(1200), xpc.recv_channel_xpc(XPC_ROOT_CHANNEL)).await {
+            Ok(Ok(next_msg)) => root = next_msg,
+            _ => break,
+        }
     }
-    let product_type = props
-        .and_then(|p| p.dict_get("ProductType"))
-        .and_then(|v| v.as_str())
-        .map(|s| s.to_string());
-    let os_version = props
-        .and_then(|p| p.dict_get("OSVersion"))
-        .and_then(|v| v.as_str())
-        .map(|s| s.to_string());
 
+    let props = root.dict_get_ci(&["Properties", "properties"]);
+    let uuid = extract_rsd_device_id(&root, props)
+        .or_else(|| fallback_udid.map(str::trim).filter(|s| !s.is_empty()).map(str::to_string))
+        .or_else(|| uuid_seed.map(str::trim).filter(|s| !s.is_empty()).map(str::to_string))
+        .unwrap_or_else(|| format_uuid_hyphenated(&host_uuid));
+
+    let product_type = props
+        .and_then(|p| p.dict_get_ci(&["ProductType", "productType"]))
+        .and_then(|v| v.as_id_string());
+    let os_version = props
+        .and_then(|p| p.dict_get_ci(&["OSVersion", "osVersion", "ProductVersion"]))
+        .and_then(|v| v.as_id_string());
+
+    let root_keys_diag = root.summarize_dict_keys();
     let services_dict = root
-        .dict_get("Services")
+        .dict_get_ci(&["Services", "services"])
         .and_then(|v| v.as_dict())
-        .ok_or_else(|| "Missing Services dictionary in RSD Handshake response".to_string())?;
+        .or_else(|| {
+            props
+                .and_then(|p| p.dict_get_ci(&["Services", "services"]))
+                .and_then(|v| v.as_dict())
+        })
+        .ok_or_else(|| {
+            format!(
+                "Missing Services dictionary in RSD Handshake response (keys: [{}])",
+                root_keys_diag
+            )
+        })?;
 
     let mut services = HashMap::new();
     for (name, svc) in services_dict {
-        let port = match svc.dict_get("Port").and_then(|v| v.as_u16()) {
+        let port = match svc.dict_get_ci(&["Port", "port"]).and_then(|v| v.as_u16()) {
             Some(p) => p,
             None => continue,
         };
         let uses_remote_xpc = svc
-            .dict_get("Properties")
-            .and_then(|p| p.dict_get("UsesRemoteXPC"))
+            .dict_get_ci(&["Properties", "properties"])
+            .and_then(|p| p.dict_get_ci(&["UsesRemoteXPC", "usesRemoteXPC"]))
             .and_then(|v| v.as_bool())
             .unwrap_or(false);
         services.insert(
@@ -1625,7 +1751,12 @@ impl RsdTunnelSession {
                 )
             })?;
 
-            let rsd = perform_rsd_handshake(rsd_stream, Some(&rp_cloned.identifier))
+            let fallback_id = control
+                .peer_udid
+                .clone()
+                .or_else(|| rp_cloned.udid.clone())
+                .unwrap_or_else(|| rp_cloned.identifier.clone());
+            let rsd = perform_rsd_handshake(rsd_stream, Some(&rp_cloned.identifier), Some(&fallback_id))
                 .await
                 .map_err(|e| {
                     LockdownError::new(LockdownErrorKind::ProtocolError, LockdownStage::Protocol, e)
@@ -1633,12 +1764,8 @@ impl RsdTunnelSession {
 
             let resolved_udid = if !rsd.uuid.is_empty() {
                 rsd.uuid
-            } else if let Some(u) = control.peer_udid.clone() {
-                u
-            } else if let Some(u) = rp_cloned.udid.clone() {
-                u
             } else {
-                rp_cloned.identifier.clone()
+                fallback_id
             };
 
             Ok(RsdTunnelSession {
@@ -1683,7 +1810,7 @@ impl RsdTunnelSession {
             false,
         )
         .await?;
-        let rsd = perform_rsd_handshake(stream, uuid_seed.as_deref())
+        let rsd = perform_rsd_handshake(stream, uuid_seed.as_deref(), uuid_seed.as_deref())
             .await
             .map_err(|e| {
                 LockdownError::new(

@@ -698,13 +698,13 @@ public final class LocalDevBridge: ObservableObject {
         for fileName in ["remote_pairing.plist", "pairing.mobiledevicepairing", "pairing.plist"] {
             let fileURL = dir.appendingPathComponent(fileName)
             guard let data = try? Data(contentsOf: fileURL),
-                  let dict = Self.parsePlistDictionary(from: Self.stripUTF8BOM(data)),
-                  let unwrapped = Self.unwrapPairingDictionary(from: dict) else { continue }
+                  let parsed = Self.parsePairingObject(from: Self.stripUTF8BOM(data)).object,
+                  let unwrapped = Self.unwrapPairingDictionary(from: parsed) else { continue }
             for key in ["tunnel_port", "tunnelPort", "RemotePairPort", "remote_pair_port", "rsd_port", "rsdPort", "port"] {
-                if let portNum = unwrapped[key] as? Int, portNum > 0 && portNum <= 65535 {
+                if let portNum = Self.lookupPairingValue(unwrapped, keys: [key]) as? Int, portNum > 0 && portNum <= 65535 {
                     return UInt16(portNum)
                 }
-                if let portStr = unwrapped[key] as? String,
+                if let portStr = Self.lookupPairingValue(unwrapped, keys: [key]) as? String,
                    let portNum = UInt16(portStr.trimmingCharacters(in: .whitespacesAndNewlines)),
                    portNum > 0 {
                     return portNum
@@ -1420,9 +1420,9 @@ public final class LocalDevBridge: ObservableObject {
             guard let files = try? FileManager.default.contentsOfDirectory(at: dir, includingPropertiesForKeys: nil) else { continue }
             for file in files {
                 let fileExt = file.pathExtension.lowercased()
-                if fileExt == "mobiledevicepairing" || fileExt == "plist" || fileExt == "pairing",
+                if fileExt == "mobiledevicepairing" || fileExt == "plist" || fileExt == "pairing" || fileExt == "json",
                    let validURL = ContainerStore.validatedExternalFileURL(file, requireExists: true) {
-                    if fileExt == "plist" && !Self.looksLikePairingFile(at: validURL) {
+                    if (fileExt == "plist" || fileExt == "json") && !Self.looksLikePairingFile(at: validURL) {
                         continue
                     }
                     if importPairingData(from: validURL) {
@@ -1603,16 +1603,25 @@ public final class LocalDevBridge: ObservableObject {
         }
         guard let handle = try? FileHandle(forReadingFrom: validURL) else { return false }
         defer { try? handle.close() }
-        let prefix = handle.readData(ofLength: 8192)
+        let prefix = handle.readData(ofLength: 65536)
         guard !prefix.isEmpty else { return false }
         let normalized = Self.stripUTF8BOM(prefix)
-        if let dict = Self.parsePlistDictionary(from: normalized),
-           let unwrapped = Self.unwrapPairingDictionary(from: dict) {
+        if let parsedObj = Self.parsePairingObject(from: normalized).object,
+           let unwrapped = Self.unwrapPairingDictionary(from: parsedObj) {
             let analysis = Self.classifyPairingDictionary(unwrapped)
             if analysis.isValid { return true }
         }
         if let str = String(data: normalized, encoding: .utf8) ?? String(data: normalized, encoding: .ascii) {
-            if str.contains("HostCertificate") || str.contains("HostID") || str.contains("public_key") || str.contains("private_key") || str.contains("alt_irk") {
+            let lower = str.lowercased()
+            if lower.contains("hostcertificate")
+                || lower.contains("hostid")
+                || lower.contains("public_key")
+                || lower.contains("publickey")
+                || lower.contains("private_key")
+                || lower.contains("privatekey")
+                || lower.contains("alt_irk")
+                || lower.contains("altirk")
+                || lower.contains("remotepairing") {
                 return true
             }
         }
@@ -1664,32 +1673,65 @@ public final class LocalDevBridge: ObservableObject {
         return data
     }
 
-    private static func parsePlistDictionary(from data: Data) -> [String: Any]? {
-        var format: PropertyListSerialization.PropertyListFormat = .xml
-        if let obj = try? PropertyListSerialization.propertyList(from: data, options: [], format: &format),
-           let dict = obj as? [String: Any] {
-            return dict
+    private static func normalizePairingKey(_ key: String) -> String {
+        key.lowercased()
+            .replacingOccurrences(of: "_", with: "")
+            .replacingOccurrences(of: "-", with: "")
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    private static func lookupPairingValue(_ dict: [String: Any], keys: [String]) -> Any? {
+        for key in keys {
+            if let v = dict[key] { return v }
+        }
+        let targets = Set(keys.map(normalizePairingKey))
+        for (k, v) in dict {
+            if targets.contains(normalizePairingKey(k)) {
+                return v
+            }
         }
         return nil
     }
 
+    private static func parsePairingObject(from data: Data) -> (object: Any?, formatLabel: String) {
+        if let firstByte = data.first(where: { $0 != 0x20 && $0 != 0x09 && $0 != 0x0A && $0 != 0x0D }),
+           firstByte == 0x7B || firstByte == 0x5B {
+            if let jsonObj = try? JSONSerialization.jsonObject(with: data, options: [.fragmentsAllowed]) {
+                return (jsonObj, "json")
+            }
+        }
+
+        var format: PropertyListSerialization.PropertyListFormat = .xml
+        if let plistObj = try? PropertyListSerialization.propertyList(from: data, options: [], format: &format) {
+            let label = (format == .binary) ? "bplist00" : "xml-plist"
+            return (plistObj, label)
+        }
+
+        if let jsonObj = try? JSONSerialization.jsonObject(with: data, options: [.fragmentsAllowed]) {
+            return (jsonObj, "json")
+        }
+        return (nil, "raw")
+    }
+
+    private static let pairingKnownMarkers: Set<String> = [
+        "hostcertificate", "devicecertificate", "rootcertificate",
+        "hostprivatekey", "rootprivatekey", "deviceprivatekey",
+        "hostid", "systembuid", "escrowbag", "wifimacaddress",
+        "publickey", "ed25519publickey", "hostpublickey",
+        "privatekey", "ed25519privatekey", "secretkey",
+        "altirk", "irk", "identifier", "hostidentifier"
+    ]
+
     private static func unwrapPairingDictionary(from rawObject: Any, depth: Int = 0) -> [String: Any]? {
-        guard depth < 4, let dict = rawObject as? [String: Any] else { return nil }
-        let lowerKeys = Set(dict.keys.map { $0.lowercased() })
-        let knownMarkers: Set<String> = [
-            "hostcertificate", "devicecertificate", "rootcertificate",
-            "hostprivatekey", "rootprivatekey", "deviceprivatekey",
-            "hostid", "systembuid", "escrowbag", "wifimacaddress",
-            "public_key", "private_key", "alt_irk", "identifier"
-        ]
-        if !lowerKeys.isDisjoint(with: knownMarkers) {
+        guard depth < 5, let dict = rawObject as? [String: Any] else { return nil }
+        let normalizedKeys = Set(dict.keys.map(normalizePairingKey))
+        if !normalizedKeys.isDisjoint(with: pairingKnownMarkers) {
             return dict
         }
-        for key in ["PairRecord", "PairingRecord", "RemotePairing", "pairing", "record"] {
-            if let nested = dict[key],
-               let found = unwrapPairingDictionary(from: nested, depth: depth + 1) {
-                return found
-            }
+        let wrapperKeys = ["PairRecord", "PairingRecord", "pairingRecord", "pairing_record", "RemotePairing", "remotePairing", "remote_pairing", "pairing", "record", "data", "identity"]
+        if let nested = lookupPairingValue(dict, keys: wrapperKeys),
+           let found = unwrapPairingDictionary(from: nested, depth: depth + 1) {
+            return found
         }
         for value in dict.values {
             if let found = unwrapPairingDictionary(from: value, depth: depth + 1) {
@@ -1701,7 +1743,7 @@ public final class LocalDevBridge: ObservableObject {
 
     private static func classifyPairingDictionary(_ dict: [String: Any]) -> (isValid: Bool, isRemotePairing: Bool, udid: String?, keys: [String]) {
         let lookup = Dictionary(
-            dict.map { ($0.key.lowercased(), $0.value) },
+            dict.map { (normalizePairingKey($0.key), $0.value) },
             uniquingKeysWith: { first, _ in first }
         )
         let sortedKeys = dict.keys.sorted()
@@ -1714,18 +1756,19 @@ public final class LocalDevBridge: ObservableObject {
         let hasSystemBUID = lookup["systembuid"] != nil
         let hasEscrowBag = lookup["escrowbag"] != nil
 
-        let hasPublicKey = lookup["public_key"] != nil
-        let hasPrivateKey = lookup["private_key"] != nil
-        let hasIdentifier = lookup["identifier"] != nil
-        let hasAltIRK = lookup["alt_irk"] != nil
+        let hasPublicKey = lookup["publickey"] != nil || lookup["ed25519publickey"] != nil || lookup["hostpublickey"] != nil
+        let hasPrivateKey = lookup["privatekey"] != nil || lookup["ed25519privatekey"] != nil || lookup["secretkey"] != nil
+        let hasIdentifier = lookup["identifier"] != nil || lookup["hostidentifier"] != nil
+        let hasAltIRK = lookup["altirk"] != nil || lookup["irk"] != nil
 
         let isLockdown = (hasHostCert || hasDeviceCert || hasRootCert || hasHostPriv)
             && (hasHostID || hasSystemBUID || hasHostCert || hasEscrowBag)
-        let isRemote = (hasPublicKey && hasPrivateKey)
+        let isRemote = (hasPrivateKey && (hasPublicKey || hasIdentifier || hasAltIRK))
+            || (hasPublicKey && hasPrivateKey)
             || (hasIdentifier && hasAltIRK && (hasPublicKey || hasPrivateKey))
 
         var udid: String? = nil
-        for key in ["udid", "deviceid", "identifier"] {
+        for key in ["udid", "uniquedeviceid", "deviceid", "pairedudid", "identifier", "hostidentifier"] {
             if let str = lookup[key] as? String, !str.isEmpty {
                 udid = str
                 break
@@ -1749,18 +1792,17 @@ public final class LocalDevBridge: ObservableObject {
         let data = Self.stripUTF8BOM(rawData)
 
         // 1. Validate Pairing File:
-        //    - Classic Lockdown XML/bplist00 (`HostCertificate`/`DeviceCertificate` + `HostID`/`SystemBUID`)
-        //    - `idevice pair v1.2.0` Remote Pairing XML/bplist00 (`public_key`, `private_key`, `identifier`, `alt_irk`)
+        //    - `idevice pair v1.2.0` Remote Pairing (XML/bplist00/JSON: `public_key`/`PublicKey`, `private_key`/`PrivateKey`, `identifier`/`Identifier`, `alt_irk`/`AltIRK`)
+        //    - Classic Lockdown X.509 (`HostCertificate`/`DeviceCertificate` + `HostID`/`SystemBUID`)
         var parsedUDID: String? = nil
         var isValidPairing = false
         var isRemotePairingFormat = false
         var parsedKeys: [String] = []
-        var plistFormatLabel = "raw"
+        let parsedDoc = Self.parsePairingObject(from: data)
+        var plistFormatLabel = parsedDoc.formatLabel
 
-        var detectedFormat: PropertyListSerialization.PropertyListFormat = .xml
-        if let plistObj = try? PropertyListSerialization.propertyList(from: data, options: [], format: &detectedFormat),
-           let unwrapped = Self.unwrapPairingDictionary(from: plistObj) {
-            plistFormatLabel = (detectedFormat == .binary) ? "bplist00" : "xml-plist"
+        if let parsedObj = parsedDoc.object,
+           let unwrapped = Self.unwrapPairingDictionary(from: parsedObj) {
             let analysis = Self.classifyPairingDictionary(unwrapped)
             isValidPairing = analysis.isValid
             isRemotePairingFormat = analysis.isRemotePairing
@@ -1774,17 +1816,19 @@ public final class LocalDevBridge: ObservableObject {
             parsedUDID = filename
         }
 
-        // Binary plist / XML pairing fallback check (stack-obfuscated on CI builds)
+        // Binary plist / XML / JSON pairing fallback check (stack-obfuscated on CI builds)
         if !isValidPairing {
-            let prefixData = Data(data.prefix(4096))
+            let prefixData = Data(data.prefix(8192))
             let bplistSig = "bplist00"
             if data.starts(with: Data(bplistSig.utf8)) {
                 isValidPairing = parsedKeys.isEmpty
                 plistFormatLabel = bplistSig
             } else if let prefixStr = String(data: prefixData, encoding: .utf8) ?? String(data: prefixData, encoding: .ascii) {
+                let lower = prefixStr.lowercased()
                 if prefixStr.contains("HostCertificate") || prefixStr.contains("HostID") || prefixStr.contains(bplistSig) {
                     isValidPairing = true
-                } else if prefixStr.contains("public_key") && prefixStr.contains("private_key") {
+                } else if (lower.contains("public_key") || lower.contains("publickey"))
+                    && (lower.contains("private_key") || lower.contains("privatekey")) {
                     isValidPairing = true
                     isRemotePairingFormat = true
                 }
@@ -1792,8 +1836,8 @@ public final class LocalDevBridge: ObservableObject {
         }
 
         guard isValidPairing else {
-            let keyDesc = parsedKeys.isEmpty ? "không đọc được khóa plist" : "keys=[\(parsedKeys.joined(separator: ", "))]"
-            let msg = "Tệp '\(validURL.lastPathComponent)' không hợp lệ (\(plistFormatLabel), \(data.count) bytes, \(keyDesc)). Cần file Lockdown (HostCertificate/HostID) hoặc Remote Pairing từ idevice pair v1.2.0 (public_key/private_key)."
+            let keyDesc = parsedKeys.isEmpty ? "không đọc được khóa plist/json" : "keys=[\(parsedKeys.joined(separator: ", "))]"
+            let msg = "Tệp '\(validURL.lastPathComponent)' không hợp lệ (\(plistFormatLabel), \(data.count) bytes, \(keyDesc)). Cần file Remote Pairing từ idevice pair v1.2.0 (Plist/JSON có public_key, private_key, identifier, alt_irk) hoặc file Lockdown (HostCertificate/HostID)."
             log("localdev: rejected pairing file — \(msg)")
             DispatchQueue.main.async {
                 self.lastError = msg
