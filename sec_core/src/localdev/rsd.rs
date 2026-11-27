@@ -2482,6 +2482,102 @@ async fn async_start_service_over_lockdown_stream<
     Ok((port, enable_ssl))
 }
 
+async fn establish_via_lockdown_62078(
+    endpoint_host: &str,
+    lockdown_port: u16,
+    pairing: &PairingFile,
+    uuid_seed: Option<&str>,
+    fallback_udid: Option<&str>,
+) -> Result<(AdapterHandle, RsdHandshakeData), LockdownError> {
+    if endpoint_host == "127.0.0.1" || endpoint_host == "::1" {
+        return Err(LockdownError::new(
+            LockdownErrorKind::ProtocolError,
+            LockdownStage::TcpConnect,
+            "Loại bỏ 127.0.0.1 khỏi luồng en0 Lockdown CoreDeviceProxy",
+        ));
+    }
+    let mut raw = connect_async_transport(
+        endpoint_host.to_string(),
+        lockdown_port,
+        Duration::from_millis(1200),
+        LockdownStage::TcpConnect,
+        false,
+    )
+    .await?;
+
+    let mut sess_req = HashMap::new();
+    sess_req.insert("Label".to_string(), PlistValue::String("3105-x-PHUCVN".to_string()));
+    sess_req.insert("Request".to_string(), PlistValue::String("StartSession".to_string()));
+    sess_req.insert("HostID".to_string(), PlistValue::String(pairing.host_id.clone()));
+    sess_req.insert(
+        "SystemBUID".to_string(),
+        PlistValue::String(pairing.system_buid.clone()),
+    );
+    async_send_plist(&mut raw, &sess_req)
+        .await
+        .map_err(|e| LockdownError::new(LockdownErrorKind::SocketReset, LockdownStage::StartSession, e))?;
+    let sess_resp = async_read_plist(&mut raw)
+        .await
+        .map_err(|e| LockdownError::new(LockdownErrorKind::ProtocolError, LockdownStage::StartSession, e))?;
+    if let Some(err) = sess_resp.get_string("Error") {
+        let low = err.to_ascii_lowercase();
+        let kind = if low.contains("pair") || low.contains("hostid") || low.contains("escrow") {
+            LockdownErrorKind::PairingRejected
+        } else {
+            LockdownErrorKind::ProtocolError
+        };
+        return Err(LockdownError::new(
+            kind,
+            LockdownStage::StartSession,
+            format!("Lockdown StartSession: {}", err),
+        ));
+    }
+
+    let use_tls = plist_get_ci(&sess_resp, &["EnableSessionSSL", "enableSessionSSL"])
+        .and_then(|v| v.as_bool())
+        .unwrap_or(true);
+    let (svc_port, svc_ssl) = if use_tls {
+        let tls_ctrl = AsyncTlsStream::handshake(raw, pairing)
+            .await
+            .map_err(|e| LockdownError::new(LockdownErrorKind::PairingRejected, LockdownStage::TlsUpgrade, e))?;
+        async_start_service_over_lockdown_stream(tls_ctrl, SERVICE_COREDEVICE_PROXY)
+            .await
+            .map_err(|e| LockdownError::new(LockdownErrorKind::ProtocolError, LockdownStage::StartService, e))?
+    } else {
+        async_start_service_over_lockdown_stream(raw, SERVICE_COREDEVICE_PROXY)
+            .await
+            .map_err(|e| LockdownError::new(LockdownErrorKind::ProtocolError, LockdownStage::StartService, e))?
+    };
+
+    let svc_raw = connect_async_transport(
+        endpoint_host.to_string(),
+        svc_port,
+        Duration::from_secs(4),
+        LockdownStage::StartService,
+        false,
+    )
+    .await?;
+
+    if svc_ssl {
+        let tls_svc = AsyncTlsStream::handshake(svc_raw, pairing)
+            .await
+            .map_err(|e| LockdownError::new(LockdownErrorKind::ProtocolError, LockdownStage::TlsUpgrade, e))?;
+        let proxy = CoreDeviceProxy::new(tls_svc)
+            .await
+            .map_err(|e| LockdownError::new(LockdownErrorKind::ProtocolError, LockdownStage::Protocol, e))?;
+        complete_coredevice_proxy_tunnel(proxy, uuid_seed, fallback_udid)
+            .await
+            .map_err(|e| LockdownError::new(LockdownErrorKind::ProtocolError, LockdownStage::Protocol, e))
+    } else {
+        let proxy = CoreDeviceProxy::new(svc_raw)
+            .await
+            .map_err(|e| LockdownError::new(LockdownErrorKind::ProtocolError, LockdownStage::Protocol, e))?;
+        complete_coredevice_proxy_tunnel(proxy, uuid_seed, fallback_udid)
+            .await
+            .map_err(|e| LockdownError::new(LockdownErrorKind::ProtocolError, LockdownStage::Protocol, e))
+    }
+}
+
 async fn establish_coredevice_proxy_tunnel(
     outer: &RsdTransport,
     services1: &HashMap<String, RsdServiceInfo>,
@@ -2656,61 +2752,15 @@ async fn establish_coredevice_proxy_tunnel(
             .await
             .unwrap_or(false);
             if port_open {
-                let classic_attempt = async {
-                    let mut raw = connect_async_transport(
-                        endpoint_host.to_string(),
-                        62078,
-                        Duration::from_millis(1200),
-                        LockdownStage::TcpConnect,
-                        false,
-                    )
-                    .await
-                    .map_err(|e| e.to_string())?;
-                    let mut sess_req = HashMap::new();
-                    sess_req.insert("Label".to_string(), PlistValue::String("3105-x-PHUCVN".to_string()));
-                    sess_req.insert("Request".to_string(), PlistValue::String("StartSession".to_string()));
-                    sess_req.insert("HostID".to_string(), PlistValue::String(pairing.host_id.clone()));
-                    sess_req.insert(
-                        "SystemBUID".to_string(),
-                        PlistValue::String(pairing.system_buid.clone()),
-                    );
-                    async_send_plist(&mut raw, &sess_req).await?;
-                    let sess_resp = async_read_plist(&mut raw).await?;
-                    if let Some(err) = sess_resp.get_string("Error") {
-                        return Err(format!("Lockdown StartSession: {}", err));
-                    }
-                    let use_tls = plist_get_ci(&sess_resp, &["EnableSessionSSL", "enableSessionSSL"])
-                        .and_then(|v| v.as_bool())
-                        .unwrap_or(true);
-                    let (svc_port, svc_ssl) = if use_tls {
-                        let tls_ctrl = AsyncTlsStream::handshake(raw, pairing).await?;
-                        async_start_service_over_lockdown_stream(tls_ctrl, SERVICE_COREDEVICE_PROXY)
-                            .await?
-                    } else {
-                        async_start_service_over_lockdown_stream(raw, SERVICE_COREDEVICE_PROXY)
-                            .await?
-                    };
-                    let svc_raw = connect_async_transport(
-                        endpoint_host.to_string(),
-                        svc_port,
-                        Duration::from_secs(4),
-                        LockdownStage::StartService,
-                        false,
-                    )
-                    .await
-                    .map_err(|e| e.to_string())?;
-                    if svc_ssl {
-                        let tls_svc = AsyncTlsStream::handshake(svc_raw, pairing).await?;
-                        let proxy = CoreDeviceProxy::new(tls_svc).await?;
-                        complete_coredevice_proxy_tunnel(proxy, uuid_seed, fallback_udid).await
-                    } else {
-                        let proxy = CoreDeviceProxy::new(svc_raw).await?;
-                        complete_coredevice_proxy_tunnel(proxy, uuid_seed, fallback_udid).await
-                    }
-                }
-                .await;
-
-                match classic_attempt {
+                match establish_via_lockdown_62078(
+                    endpoint_host,
+                    62078,
+                    pairing,
+                    uuid_seed,
+                    fallback_udid,
+                )
+                .await
+                {
                     Ok((handle, rsd2)) => return Ok((handle, rsd2, None)),
                     Err(e) => attempt_errors.push(format!("Lockdown(62078): {}", e)),
                 }
@@ -2994,6 +3044,70 @@ impl RsdTunnelSession {
         iface: Option<String>,
     ) -> Result<Self, LockdownError> {
         Self::connect_direct_rsd_with_options(host, port, iface, None, None)
+    }
+
+    /// Strategy 4 entry (`strategy=lockdown_first` over `en0:62078`):
+    /// `Lockdown StartSession` -> TLS -> `StartService("com.apple.internal.devicecompute.CoreDeviceProxy")`
+    /// -> `CoreDeviceProxy::create_software_tunnel()` -> Trusted RSD handshake (`com.apple.coredevice.fileservice.data`).
+    pub fn connect_lockdown_coredevice_proxy(
+        host: &str,
+        port: u16,
+        iface: Option<String>,
+        pairing: &PairingFile,
+    ) -> Result<Self, LockdownError> {
+        let rt = runtime().map_err(|e| {
+            LockdownError::new(LockdownErrorKind::ProtocolError, LockdownStage::Protocol, e)
+        })?;
+        let host_owned = host.to_string();
+        let pairing_cloned = pairing.clone();
+        let iface_clone = iface.clone();
+        rt.block_on(async move {
+            let fallback_id = if pairing_cloned.udid.is_empty() {
+                None
+            } else {
+                Some(pairing_cloned.udid.as_str())
+            };
+            let (trusted_handle, rsd2) = establish_via_lockdown_62078(
+                &host_owned,
+                port,
+                &pairing_cloned,
+                Some(&pairing_cloned.host_id),
+                fallback_id,
+            )
+            .await?;
+
+            let trusted_services = rsd2.services;
+            let trusted_count = trusted_services.len();
+            let resolved_udid = if !rsd2.uuid.is_empty() {
+                rsd2.uuid
+            } else {
+                pairing_cloned.udid.clone()
+            };
+            let status_line = format!(
+                "[LOCALDEV LIVE] strategy=lockdown_first ({}:{}) CoreDeviceProxy tunnel active — {} trusted services",
+                host_owned, port, trusted_count
+            );
+            eprintln!("{}", status_line);
+
+            Ok(Self {
+                endpoint_host: host_owned.clone(),
+                endpoint_port: port,
+                iface: iface_clone,
+                udid: resolved_udid,
+                product_type: rsd2.product_type,
+                os_version: rsd2.os_version,
+                services: trusted_services.clone(),
+                untrusted_services: HashMap::new(),
+                trusted_services,
+                coredevice_proxy_active: true,
+                coredevice_tunnel_status: Some(status_line),
+                transport: RsdTransport::LayeredTunnel {
+                    outer: Box::new(RsdTransport::DirectHost { host: host_owned }),
+                    trusted_handle,
+                    extra_control: None,
+                },
+            })
+        })
     }
 
     pub fn connect_direct_rsd_with_options(

@@ -52,6 +52,7 @@ LOCALDEV_CABI_SYMBOLS = [
     "localdev_fileservice_list",
     "localdev_fileservice_read",
     "localdev_fileservice_write",
+    "localdev_fileservice_write_opts",
     "localdev_fileservice_mkdir",
     "localdev_fileservice_remove",
     "localdev_airlift_route_info",

@@ -99,6 +99,14 @@ pub struct AirLiftRouteInfo {
     pub app_group_paths: Vec<String>,
     pub control_capacity: u64,
     pub detail: Option<String>,
+    #[serde(default)]
+    pub direct_known_path_mode: bool,
+    #[serde(default)]
+    pub bulk_directory_disabled: bool,
+    #[serde(default)]
+    pub direct_read_disabled: bool,
+    #[serde(default)]
+    pub strategy: Option<String>,
 }
 
 pub struct LocalDevManager {
@@ -374,10 +382,18 @@ impl LocalDevManager {
             .iter()
             .any(|c| tunnel::is_strict_ipv6_ula_fd00(&c.host));
         if let Some(ref sess) = self.active_rsd {
+            let has_lan_lockdown_upgrade = pairing.lockdown.is_some()
+                && !sess.is_trusted_tunnel()
+                && self.candidates.iter().any(|c| {
+                    c.host != "127.0.0.1"
+                        && (c.iface.as_deref().is_some_and(|i| i.starts_with("en"))
+                            || c.source.as_deref() == Some("wifi-en0-lockdown"))
+                        && tunnel::is_lan_ipv4(&c.host)
+                });
             let should_upgrade_to_ula = has_fd00_candidate
                 && !sess.is_trusted_tunnel()
                 && !tunnel::is_strict_ipv6_ula_fd00(&sess.endpoint_host);
-            if !should_upgrade_to_ula && sess.verify_alive().is_ok() {
+            if !has_lan_lockdown_upgrade && !should_upgrade_to_ula && sess.verify_alive().is_ok() {
                 let iface_label = sess.endpoint_iface_label();
                 self.host = sess.endpoint_host.clone();
                 self.port = sess.endpoint_port;
@@ -416,6 +432,12 @@ impl LocalDevManager {
         }
 
         let rp_port = pairing.tunnel_port.unwrap_or(DEFAULT_REMOTE_PAIRING_PORT);
+
+        // Priority -1 (`strategy=lockdown_first`): Wi-Fi LAN `en0:62078` Lockdown -> CoreDeviceProxy::create_software_tunnel()
+        // when valid Lockdown X.509 pairing exists in app sandbox and `127.0.0.1` is excluded.
+        if let Some(lan_lockdown_session) = self.probe_and_connect_en0_lockdown_strategy4(&pairing) {
+            return Ok(self.activate_rsd_session(lan_lockdown_session, &pairing.udid));
+        }
 
         // Priority #0: Direct connection to Trusted CDTunnel IPv6 ULA (`fd00::/8`, e.g. utun5 `fd2b:...::2`/`::1`)
         // across ports `49152`, `58783`, and mDNS (`_remotepairing._tcp` / `_remoted._tcp`) ahead of `10.7.0.1:49152`.
@@ -676,6 +698,64 @@ impl LocalDevManager {
         Err(report.message)
     }
 
+    fn probe_and_connect_en0_lockdown_strategy4(
+        &self,
+        pairing: &UnifiedPairing,
+    ) -> Option<RsdTunnelSession> {
+        let lockdown_pairing = pairing.lockdown.as_ref()?;
+        let mut en_hosts: Vec<(String, Option<String>)> = Vec::new();
+        for c in &self.candidates {
+            let trimmed = c.host.trim();
+            if trimmed.is_empty() || trimmed == "127.0.0.1" || trimmed == "::1" {
+                continue;
+            }
+            let is_en_iface = c
+                .iface
+                .as_deref()
+                .map(|i| i.starts_with("en"))
+                .unwrap_or(false)
+                || c.source.as_deref() == Some("wifi-en0-lockdown");
+            if (is_en_iface || tunnel::is_lan_ipv4(trimmed)) && tunnel::is_lan_ipv4(trimmed) {
+                if !en_hosts.iter().any(|(h, _)| h == trimmed) {
+                    en_hosts.push((trimmed.to_string(), c.iface.clone()));
+                }
+            }
+        }
+        if tunnel::is_lan_ipv4(&self.host)
+            && self.host != "127.0.0.1"
+            && !en_hosts.iter().any(|(h, _)| h == &self.host)
+        {
+            en_hosts.push((self.host.clone(), self.active_iface.clone()));
+        }
+
+        for (host, iface) in en_hosts {
+            if tunnel::probe_tcp_open(&host, DEFAULT_LOCKDOWN_PORT, Duration::from_millis(450)).is_err() {
+                continue;
+            }
+            eprintln!(
+                "localdev: strategy=lockdown_first probing {}:{} ({}) -> CoreDeviceProxy::create_software_tunnel()",
+                host,
+                DEFAULT_LOCKDOWN_PORT,
+                iface.as_deref().unwrap_or("en0")
+            );
+            match RsdTunnelSession::connect_lockdown_coredevice_proxy(
+                &host,
+                DEFAULT_LOCKDOWN_PORT,
+                iface.clone(),
+                lockdown_pairing,
+            ) {
+                Ok(sess) => return Some(sess),
+                Err(err) => {
+                    eprintln!(
+                        "localdev: strategy=lockdown_first {}:{} CoreDeviceProxy fallback: {}",
+                        host, DEFAULT_LOCKDOWN_PORT, err
+                    );
+                }
+            }
+        }
+        None
+    }
+
     fn probe_and_connect_ipv6_ula(
         &self,
         pairing: &UnifiedPairing,
@@ -906,6 +986,7 @@ impl LocalDevManager {
         path: &str,
         cap: u64,
         detail: Option<String>,
+        direct_mode: bool,
     ) -> AirLiftRouteInfo {
         let app_group_paths = ctx
             .system_app_group_identifiers
@@ -917,6 +998,14 @@ impl LocalDevManager {
                     .unwrap_or_else(|| app_group_container_path(gid))
             })
             .collect();
+        let strategy = self
+            .active_rsd
+            .as_ref()
+            .and_then(|s| s.coredevice_tunnel_status.as_deref())
+            .and_then(|st| {
+                st.contains("strategy=lockdown_first")
+                    .then(|| "lockdown_first".to_string())
+            });
         let info = AirLiftRouteInfo {
             attempt,
             fallback,
@@ -929,15 +1018,21 @@ impl LocalDevManager {
             app_group_paths,
             control_capacity: cap,
             detail,
+            direct_known_path_mode: direct_mode,
+            bulk_directory_disabled: direct_mode,
+            direct_read_disabled: direct_mode,
+            strategy,
         };
         eprintln!(
-            "patch.airlift attempt={} fallback={} reason={} backend={} bundle={} path={} detail={}",
+            "patch.airlift attempt={} fallback={} reason={} backend={} bundle={} path={} direct_known_path={} strategy={} detail={}",
             info.attempt,
             info.fallback,
             info.reason.as_deref().unwrap_or("none"),
             info.backend,
             info.bundle_id,
             info.path,
+            info.direct_known_path_mode,
+            info.strategy.as_deref().unwrap_or("rsd"),
             info.detail.as_deref().unwrap_or("ok")
         );
         self.last_airlift_route = Some(info.clone());
@@ -958,6 +1053,27 @@ impl LocalDevManager {
         afc_op: impl Fn(AfcClient, String, &str) -> Result<T, String>,
         local_op: impl Fn(&std::path::Path, &str) -> Result<T, String>,
     ) -> Result<(T, AirLiftRouteInfo), String> {
+        self.execute_airlift_app_op_with_mode(
+            bundle_id,
+            path,
+            control_capacity,
+            false,
+            fs_op,
+            afc_op,
+            local_op,
+        )
+    }
+
+    fn execute_airlift_app_op_with_mode<T>(
+        &mut self,
+        bundle_id: &str,
+        path: &str,
+        control_capacity: u64,
+        direct_mode: bool,
+        fs_op: impl Fn(&mut CoreDeviceFileServiceClient, &FileServiceTargetContext, &str) -> Result<T, CoreDeviceFileServiceError>,
+        afc_op: impl Fn(AfcClient, String, &str) -> Result<T, String>,
+        local_op: impl Fn(&std::path::Path, &str) -> Result<T, String>,
+    ) -> Result<(T, AirLiftRouteInfo), String> {
         let cap = normalize_control_capacity(control_capacity);
         let ctx = self.resolve_target_context(bundle_id);
         let is_rsd = self.ensure_backend()?;
@@ -972,8 +1088,12 @@ impl LocalDevManager {
                     .active_rsd
                     .as_ref()
                     .ok_or_else(|| "RSD session unavailable".to_string())?;
-                CoreDeviceFileServiceClient::connect_blocking(sess, cap)
-                    .and_then(|mut client| fs_op(&mut client, &ctx, path))
+                CoreDeviceFileServiceClient::connect_blocking(sess, cap).and_then(|mut client| {
+                    if direct_mode {
+                        client.set_direct_known_path_mode(true);
+                    }
+                    fs_op(&mut client, &ctx, path)
+                })
             };
             match fs_res {
                 Ok(val) => {
@@ -986,6 +1106,7 @@ impl LocalDevManager {
                         path,
                         cap,
                         ctx.data_container_url.clone(),
+                        direct_mode,
                     );
                     return Ok((val, route));
                 }
@@ -1014,6 +1135,7 @@ impl LocalDevManager {
                     path,
                     cap,
                     Some(fs_detail),
+                    direct_mode,
                 );
                 Ok((val, route))
             }
@@ -1027,6 +1149,7 @@ impl LocalDevManager {
                     path,
                     cap,
                     Some(afc_err.clone()),
+                    direct_mode,
                 );
                 Err(afc_err)
             }
@@ -1045,6 +1168,7 @@ impl LocalDevManager {
                                 path,
                                 cap,
                                 Some(local_root.display().to_string()),
+                                direct_mode,
                             );
                             return Ok((val, route));
                         }
@@ -1058,6 +1182,7 @@ impl LocalDevManager {
                                 path,
                                 cap,
                                 Some(local_err.clone()),
+                                direct_mode,
                             );
                             return Err(local_err);
                         }
@@ -1079,6 +1204,7 @@ impl LocalDevManager {
                     path,
                     cap,
                     Some(combined_err.clone()),
+                    direct_mode,
                 );
                 Err(combined_err)
             }
@@ -1351,17 +1477,37 @@ impl LocalDevManager {
         data: &[u8],
         control_capacity: u64,
     ) -> Result<(AirLiftRouteInfo, usize), String> {
+        self.airlift_write_file_opts(bundle_id, path, data, control_capacity, false)
+    }
+
+    pub fn airlift_write_file_opts(
+        &mut self,
+        bundle_id: &str,
+        path: &str,
+        data: &[u8],
+        control_capacity: u64,
+        direct_known_path: bool,
+    ) -> Result<(AirLiftRouteInfo, usize), String> {
         let len = data.len();
-        let (_, route) = self.execute_airlift_app_op(
+        let (_, route) = self.execute_airlift_app_op_with_mode(
             bundle_id,
             path,
             control_capacity,
-            |client, ctx, p| client.fileservice_write(ctx, p, data),
-            |afc, mode, p| HouseArrestClient::write_file_safe_with_afc(afc, &mode, p, data),
+            direct_known_path,
+            |client, ctx, p| client.fileservice_write_with_options(ctx, p, data, direct_known_path),
+            |afc, mode, p| {
+                if direct_known_path {
+                    HouseArrestClient::write_file_direct_known_path_with_afc(afc, &mode, p, data)
+                } else {
+                    HouseArrestClient::write_file_safe_with_afc(afc, &mode, p, data)
+                }
+            },
             |local_target, _| {
-                if let Some(parent) = local_target.parent() {
-                    std::fs::create_dir_all(parent)
-                        .map_err(|e| format!("LocalFS mkdir parent failed: {}", e))?;
+                if !direct_known_path {
+                    if let Some(parent) = local_target.parent() {
+                        std::fs::create_dir_all(parent)
+                            .map_err(|e| format!("LocalFS mkdir parent failed: {}", e))?;
+                    }
                 }
                 std::fs::write(local_target, data)
                     .map_err(|e| format!("LocalFS write failed: {}", e))

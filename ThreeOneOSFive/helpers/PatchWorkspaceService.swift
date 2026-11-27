@@ -313,7 +313,9 @@ enum PatchWorkspaceService {
             rules: rules.sorted {
                 targetKey(bundleID: $0.bundleID, relativePath: $0.relativePath)
                     < targetKey(bundleID: $1.bundleID, relativePath: $1.relativePath)
-            }
+            },
+            appGroupIdentifier: baseProject.appGroupIdentifier,
+            systemAppGroupIdentifier: baseProject.systemAppGroupIdentifier
         )
         try PatchPackageCodec.validate(project)
         return project

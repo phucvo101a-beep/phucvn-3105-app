@@ -261,7 +261,9 @@ struct PatchProjectEditorView: View {
             updatedAt: Date(),
             bundleIdentifiers: bundleIdentifiers,
             directories: directories,
-            rules: rules
+            rules: rules,
+            appGroupIdentifier: existingProject?.appGroupIdentifier,
+            systemAppGroupIdentifier: existingProject?.systemAppGroupIdentifier
         )
         do {
             try PatchPackageCodec.validate(project)

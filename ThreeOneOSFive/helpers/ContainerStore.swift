@@ -88,6 +88,7 @@ enum ContainerStore {
 
     private static let privilegedLock = NSLock()
     private static var didLogSandboxNotice = false
+    private static var registeredAppGroupRootPaths = Set<String>()
 
     // MARK: - Standard iOS Sandbox Roots
 
@@ -178,6 +179,10 @@ enum ContainerStore {
         for groupURL in appGroupContainerURLs(identifiers: appGroupIdentifiers) {
             allowedRoots.append(canonicalResolvedPath(groupURL.path))
         }
+        privilegedLock.lock()
+        let dynamicRoots = registeredAppGroupRootPaths
+        privilegedLock.unlock()
+        allowedRoots.append(contentsOf: dynamicRoots)
 
         for root in allowedRoots where !root.isEmpty {
             if candidate == root || candidate.hasPrefix(root + "/") {
@@ -318,6 +323,91 @@ enum ContainerStore {
         if let scanned = resolveAppContainerPathByMetadataScan(bundleID: bundleID) {
             log("patch: filesystem metadata scan resolved \(bundleID)")
             return scanned
+        }
+        return nil
+    }
+
+    static func registerPermittedAppGroupRoot(_ path: String) {
+        let canonical = canonicalResolvedPath(path)
+        guard !canonical.isEmpty else { return }
+        privilegedLock.lock()
+        registeredAppGroupRootPaths.insert(canonical)
+        privilegedLock.unlock()
+    }
+
+    /// Resolves a writable App Group container URL granted by the signing profile (`FileManager`)
+    /// or `libsystem_containermanager.dylib` (`MCMActivateContainerPath(7, ...)`).
+    static func resolvePermittedAppGroupURL(
+        identifiers: [String],
+        requireWritable: Bool = true
+    ) -> URL? {
+        for rawID in identifiers {
+            let groupID = rawID.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !groupID.isEmpty,
+                  !groupID.contains("/"),
+                  !groupID.contains("\\"),
+                  !groupID.contains("..") else { continue }
+
+            if let stdURL = FileManager.default.containerURL(forSecurityApplicationGroupIdentifier: groupID),
+               let validURL = validatedLocalFileURL(fromPath: stdURL.path, isDirectory: true, requireExists: true),
+               (!requireWritable || FileManager.default.isWritableFile(atPath: validURL.path)) {
+                registerPermittedAppGroupRoot(validURL.path)
+                return validURL
+            }
+
+            if MCMBridgeAvailable() {
+                var lookupError: NSString?
+                if let mcmPath = MCMActivateContainerPath(7, groupID, true, &lookupError),
+                   let validURL = validatedLocalFileURL(fromPath: mcmPath, isDirectory: true, requireExists: true),
+                   (!requireWritable || FileManager.default.isWritableFile(atPath: validURL.path)) {
+                    registerPermittedAppGroupRoot(validURL.path)
+                    return validURL
+                }
+            }
+        }
+        return nil
+    }
+
+    /// Resolves a direct on-device local container or App Group root without opening any tunnel,
+    /// respecting iOS sandbox / entitlement enforcement.
+    static func resolvePermittedDirectContainerURL(
+        bundleID: String,
+        appGroupIdentifiers: [String] = [],
+        requireWritable: Bool = true
+    ) -> URL? {
+        if !appGroupIdentifiers.isEmpty,
+           let groupURL = resolvePermittedAppGroupURL(identifiers: appGroupIdentifiers, requireWritable: requireWritable) {
+            return groupURL
+        }
+
+        if bundleID == ownBundleID {
+            let url = ownSandboxRootURL
+            if !requireWritable || FileManager.default.isWritableFile(atPath: url.path) {
+                return url
+            }
+        }
+
+        if let path = resolveAppContainerPath(bundleID: bundleID),
+           isApplicationContainerPath(path),
+           let containerURL = validatedLocalFileURL(fromPath: path, isDirectory: true, requireExists: true),
+           (!requireWritable || FileManager.default.isWritableFile(atPath: containerURL.path)) {
+            return containerURL
+        }
+
+        if MCMBridgeAvailable() {
+            var lookupError: NSString?
+            if let path = MCMActivateContainerPath(2, bundleID, false, &lookupError),
+               isApplicationContainerPath(path),
+               let containerURL = validatedLocalFileURL(fromPath: path, isDirectory: true, requireExists: true),
+               (!requireWritable || FileManager.default.isWritableFile(atPath: containerURL.path)) {
+                return containerURL
+            }
+        }
+
+        let defaultGroup = "group.\(bundleID)"
+        if !appGroupIdentifiers.contains(defaultGroup),
+           let groupURL = resolvePermittedAppGroupURL(identifiers: [defaultGroup], requireWritable: requireWritable) {
+            return groupURL
         }
         return nil
     }
@@ -648,6 +738,12 @@ enum ContainerStore {
             return true
         }
         for groupURL in appGroupContainerURLs() where canonical == canonicalResolvedPath(groupURL.path) {
+            return true
+        }
+        privilegedLock.lock()
+        let isRegisteredGroup = registeredAppGroupRootPaths.contains(canonical)
+        privilegedLock.unlock()
+        if isRegisteredGroup {
             return true
         }
 

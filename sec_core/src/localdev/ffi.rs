@@ -425,14 +425,13 @@ pub unsafe extern "C" fn localdev_fileservice_read(
     }
 }
 
-/// Writes file bytes via `patch.airlift` router (`fileservice.data` -> HouseArrest -> `afc.shim.remote`)
-#[no_mangle]
-pub unsafe extern "C" fn localdev_fileservice_write(
+unsafe fn ffi_fileservice_write_impl(
     bundle_id: *const c_char,
     path: *const c_char,
     data: *const u8,
     len: usize,
     control_capacity: u64,
+    direct_known_path: bool,
 ) -> *const c_char {
     if path.is_null() || (data.is_null() && len > 0) {
         return to_json_cstr(json!({
@@ -452,7 +451,9 @@ pub unsafe extern "C" fn localdev_fileservice_write(
         std::slice::from_raw_parts(data, len)
     };
 
-    match with_manager(|mgr| mgr.airlift_write_file(b_id, path_str, slice, control_capacity)) {
+    match with_manager(|mgr| {
+        mgr.airlift_write_file_opts(b_id, path_str, slice, control_capacity, direct_known_path)
+    }) {
         Ok((route, written)) => to_json_cstr(json!({
             "success": true,
             "path": path_str,
@@ -468,6 +469,38 @@ pub unsafe extern "C" fn localdev_fileservice_write(
             }))
         }
     }
+}
+
+/// Writes file bytes via `patch.airlift` router (`fileservice.data` -> HouseArrest -> `afc.shim.remote`)
+#[no_mangle]
+pub unsafe extern "C" fn localdev_fileservice_write(
+    bundle_id: *const c_char,
+    path: *const c_char,
+    data: *const u8,
+    len: usize,
+    control_capacity: u64,
+) -> *const c_char {
+    ffi_fileservice_write_impl(bundle_id, path, data, len, control_capacity, false)
+}
+
+/// Writes file bytes via `patch.airlift` with optional `direct_known_path` (`bulk_directory_disabled` + `direct_read_disabled`)
+#[no_mangle]
+pub unsafe extern "C" fn localdev_fileservice_write_opts(
+    bundle_id: *const c_char,
+    path: *const c_char,
+    data: *const u8,
+    len: usize,
+    control_capacity: u64,
+    direct_known_path: i32,
+) -> *const c_char {
+    ffi_fileservice_write_impl(
+        bundle_id,
+        path,
+        data,
+        len,
+        control_capacity,
+        direct_known_path != 0,
+    )
 }
 
 /// Creates a directory via `patch.airlift` router

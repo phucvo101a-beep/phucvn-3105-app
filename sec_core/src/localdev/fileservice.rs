@@ -417,6 +417,19 @@ pub struct CoreDeviceFileServiceClient {
     pub control_capacity: u64,
     pub control_service_name: String,
     pub session_token: String,
+    pub direct_known_path_mode: bool,
+    pub bulk_directory_disabled: bool,
+    pub direct_read_disabled: bool,
+}
+
+pub fn is_readback_or_lookup_denied(detail: &str) -> bool {
+    let lower = detail.to_ascii_lowercase();
+    lower.contains("readback_denied")
+        || lower.contains("installationlookupfailed")
+        || lower.contains("installation_lookup_failed")
+        || lower.contains("retrievedirectorylist")
+        || lower.contains("operation not permitted")
+        || lower.contains("11014")
 }
 
 fn classify_xpc_error(detail: &str) -> FileServiceFailureReason {
@@ -606,6 +619,9 @@ impl CoreDeviceFileServiceClient {
             control_capacity,
             control_service_name: ctrl_name,
             session_token: invocation_identifier_string(),
+            direct_known_path_mode: false,
+            bulk_directory_disabled: false,
+            direct_read_disabled: false,
         })
     }
 
@@ -903,7 +919,9 @@ impl CoreDeviceFileServiceClient {
         };
 
         let mut parsed = Vec::with_capacity(raw_items.len());
-        let mut attrs_supported = raw_items.len() <= 64;
+        let mut attrs_supported = !self.bulk_directory_disabled
+            && !self.direct_known_path_mode
+            && raw_items.len() <= 64;
         for entry in raw_items {
             if let Some(name_str) = entry.as_str().map(str::trim).filter(|s| !s.is_empty()) {
                 if name_str == "." || name_str == ".." {
@@ -1083,17 +1101,43 @@ impl CoreDeviceFileServiceClient {
         Ok(payload)
     }
 
+    pub fn set_direct_known_path_mode(&mut self, enabled: bool) {
+        self.direct_known_path_mode = enabled;
+        self.bulk_directory_disabled = enabled;
+        self.direct_read_disabled = enabled;
+    }
+
     pub async fn fileservice_write_async(
         &mut self,
         ctx: &FileServiceTargetContext,
         path: &str,
         data: &[u8],
     ) -> Result<(), CoreDeviceFileServiceError> {
+        self.fileservice_write_async_with_mode(ctx, path, data, false)
+            .await
+    }
+
+    pub async fn fileservice_write_async_with_mode(
+        &mut self,
+        ctx: &FileServiceTargetContext,
+        path: &str,
+        data: &[u8],
+        direct_known_path: bool,
+    ) -> Result<(), CoreDeviceFileServiceError> {
         let scope = resolve_target_scope(ctx, path)?;
         let (domain, identifier, rel_path) = scope_to_domain_identifier_rel(&scope)?;
         let session_id = self.ensure_session_for_scope(domain, &identifier).await?;
 
-        self.ensure_parent_dirs(&session_id, &rel_path).await?;
+        let use_direct = direct_known_path || self.direct_known_path_mode || self.bulk_directory_disabled;
+        if use_direct {
+            self.set_direct_known_path_mode(true);
+            eprintln!(
+                "fileservice: directKnownPathMode bulk_directory_disabled=true direct_read_disabled=true -> OpenFile(WrOnly) '{}'",
+                rel_path
+            );
+        } else {
+            self.ensure_parent_dirs(&session_id, &rel_path).await?;
+        }
 
         let open_reply = self
             .fs_op(
@@ -1232,8 +1276,18 @@ impl CoreDeviceFileServiceClient {
         path: &str,
         data: &[u8],
     ) -> Result<(), CoreDeviceFileServiceError> {
+        self.fileservice_write_with_options(ctx, path, data, false)
+    }
+
+    pub fn fileservice_write_with_options(
+        &mut self,
+        ctx: &FileServiceTargetContext,
+        path: &str,
+        data: &[u8],
+        direct_known_path: bool,
+    ) -> Result<(), CoreDeviceFileServiceError> {
         let rt = super::rsd::runtime().map_err(CoreDeviceFileServiceError::unavailable)?;
-        rt.block_on(self.fileservice_write_async(ctx, path, data))
+        rt.block_on(self.fileservice_write_async_with_mode(ctx, path, data, direct_known_path))
     }
 
     pub fn fileservice_mkdir(

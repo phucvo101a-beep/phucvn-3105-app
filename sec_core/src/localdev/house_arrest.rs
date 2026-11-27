@@ -199,6 +199,17 @@ impl HouseArrestClient {
         afc.write_file_full(&effective_path, data)
     }
 
+    /// Writes directly to a known path without parent `list_dir` or pre-backup read (`directKnownPathMode`).
+    pub fn write_file_direct_known_path_with_afc(
+        mut afc: AfcClient,
+        mode: &str,
+        path: &str,
+        data: &[u8],
+    ) -> Result<(), String> {
+        let effective_path = normalize_house_arrest_path(mode, path, mode == "VendDocuments");
+        afc.write_file_full(&effective_path, data)
+    }
+
     /// Writes file bytes into target application sandbox with automatic `.bak` backup
     pub fn write_file_safe(
         ip: &str,

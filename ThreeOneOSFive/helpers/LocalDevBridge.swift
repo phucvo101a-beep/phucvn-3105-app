@@ -22,6 +22,7 @@ private typealias CLocalDevFileserviceStatus = @convention(c) (UnsafePointer<CCh
 private typealias CLocalDevFileserviceList = @convention(c) (UnsafePointer<CChar>?, UnsafePointer<CChar>?, UInt64) -> UnsafePointer<CChar>?
 private typealias CLocalDevFileserviceRead = @convention(c) (UnsafePointer<CChar>?, UnsafePointer<CChar>?, UInt64, UnsafeMutablePointer<Int>?, UnsafeMutablePointer<Int32>?) -> UnsafeMutablePointer<UInt8>?
 private typealias CLocalDevFileserviceWrite = @convention(c) (UnsafePointer<CChar>?, UnsafePointer<CChar>?, UnsafePointer<UInt8>?, Int, UInt64) -> UnsafePointer<CChar>?
+private typealias CLocalDevFileserviceWriteOpts = @convention(c) (UnsafePointer<CChar>?, UnsafePointer<CChar>?, UnsafePointer<UInt8>?, Int, UInt64, Int32) -> UnsafePointer<CChar>?
 private typealias CLocalDevFileserviceMkdir = @convention(c) (UnsafePointer<CChar>?, UnsafePointer<CChar>?, UInt64) -> UnsafePointer<CChar>?
 private typealias CLocalDevFileserviceRemove = @convention(c) (UnsafePointer<CChar>?, UnsafePointer<CChar>?, UInt64) -> UnsafePointer<CChar>?
 private typealias CLocalDevAirliftRouteInfo = @convention(c) () -> UnsafePointer<CChar>?
@@ -432,6 +433,7 @@ private final class LocalDevLib {
     var fnFileserviceList: CLocalDevFileserviceList?
     var fnFileserviceRead: CLocalDevFileserviceRead?
     var fnFileserviceWrite: CLocalDevFileserviceWrite?
+    var fnFileserviceWriteOpts: CLocalDevFileserviceWriteOpts?
     var fnFileserviceMkdir: CLocalDevFileserviceMkdir?
     var fnFileserviceRemove: CLocalDevFileserviceRemove?
     var fnAirliftRouteInfo: CLocalDevAirliftRouteInfo?
@@ -511,6 +513,9 @@ private final class LocalDevLib {
         }
         if let sym = dlsym(symTarget, "localdev_fileservice_write") {
             fnFileserviceWrite = unsafeBitCast(sym, to: CLocalDevFileserviceWrite.self)
+        }
+        if let sym = dlsym(symTarget, "localdev_fileservice_write_opts") {
+            fnFileserviceWriteOpts = unsafeBitCast(sym, to: CLocalDevFileserviceWriteOpts.self)
         }
         if let sym = dlsym(symTarget, "localdev_fileservice_mkdir") {
             fnFileserviceMkdir = unsafeBitCast(sym, to: CLocalDevFileserviceMkdir.self)
@@ -670,10 +675,16 @@ public struct AirLiftRouteInfo: Codable, Equatable {
     public let app_group_paths: [String]?
     public let control_capacity: UInt64?
     public let detail: String?
+    public let direct_known_path_mode: Bool?
+    public let bulk_directory_disabled: Bool?
+    public let direct_read_disabled: Bool?
+    public let strategy: String?
 
     public var displayBadgeText: String {
         if backend == "coredevice.fileservice.data" {
-            return "CoreDevice FileService (RSD)"
+            return strategy == "lockdown_first"
+                ? "CoreDevice FileService (Lockdown en0)"
+                : "CoreDevice FileService (RSD)"
         }
         if fallback {
             let reasonLabel = reason.map { " [\($0)]" } ?? ""
@@ -1113,10 +1124,12 @@ public final class LocalDevBridge: ObservableObject {
         return isULA || isLinkLocal
     }
 
-    /// Scans active `utun` interfaces via `getifaddrs()` (`IFF_UP | IFF_RUNNING`, IPv6 ULA `fd00::/8` + IPv4 + `fe80::%utunX`)
-    /// and orders endpoints prioritizing Trusted CDTunnel IPv6 ULA (`fd00::/8`, deriving `::2` & `::1` across `49152`/`58783`/mDNS ports) ahead of `10.7.0.1`.
+    /// Scans active `utun` and `en0` Wi-Fi LAN interfaces via `getifaddrs()` (`IFF_UP | IFF_RUNNING`,
+    /// `en0:62078` Lockdown Strategy 4, IPv6 ULA `fd00::/8` deriving `::2` & `::1`, plus `utun` IPv4),
+    /// excluding loopback `127.0.0.1` from tunnel/LAN priority slots.
     @discardableResult
     public func detectTunnelEndpoints(port: UInt16 = LocalDevBridge.defaultRemotePairingPort) -> [LocalDevTunnelEndpoint] {
+        var wifiLockdownEndpoints: [LocalDevTunnelEndpoint] = []
         var ulaIpv6Endpoints: [LocalDevTunnelEndpoint] = []
         var dstEndpoints: [LocalDevTunnelEndpoint] = []
         var gatewayEndpoints: [LocalDevTunnelEndpoint] = []
@@ -1148,9 +1161,12 @@ public final class LocalDevBridge: ObservableObject {
                 let isLoopback = (flags & IFF_LOOPBACK) != 0
                 guard isUpRunning, !isLoopback, let cName = ifa.ifa_name else { continue }
                 let name = String(cString: cName)
-                guard name.hasPrefix("utun") else { continue }
+                let isUtun = name.hasPrefix("utun")
+                let isEnWifi = name == "en0" || name.hasPrefix("en")
+                guard isUtun || isEnWifi else { continue }
 
                 if let sa = ifa.ifa_addr, sa.pointee.sa_family == sa_family_t(AF_INET6) {
+                    guard isUtun else { continue }
                     if let localV6 = Self.extractIPv6Bytes(from: sa), Self.isTunnelOrPrivateIPv6(localV6) {
                         let isULA = (localV6[0] & 0xFE) == 0xFC
                         let scopeArg: String? = isULA ? nil : name
@@ -1224,6 +1240,20 @@ public final class LocalDevBridge: ObservableObject {
 
                 let localStr = Self.formatIPv4(localIP)
                 let is107Range = (localIP & 0xFFFF_0000) == 0x0A07_0000
+                if isEnWifi {
+                    let is107Subnet = (localIP & 0xFFFF_FF00) == 0x0A07_0000
+                    if !is107Subnet && !localStr.hasPrefix("127.") {
+                        wifiLockdownEndpoints.append(LocalDevTunnelEndpoint(
+                            host: localStr,
+                            port: 62078,
+                            iface: name,
+                            source: "wifi-en0-lockdown"
+                        ))
+                        utunSummaries.append("\(name)(lan:\(localStr):62078)")
+                    }
+                    continue
+                }
+
                 if is107Range && preferred107Iface == nil {
                     preferred107Iface = name
                 }
@@ -1279,7 +1309,10 @@ public final class LocalDevBridge: ObservableObject {
             }
         }
 
-        // Prioritize strict fd00::/8 IPv6 ULA first, then LocalDevVPN 10.7.x endpoints, then link-local/loopback
+        // Prioritize en0 Wi-Fi LAN Lockdown (62078) and strict fd00::/8 IPv6 ULA ahead of 10.7.0.1, then link-local/loopback
+        wifiLockdownEndpoints.sort {
+            ($0.iface == "en0" ? 0 : 1) < ($1.iface == "en0" ? 0 : 1)
+        }
         ulaIpv6Endpoints.sort {
             ($0.host.lowercased().hasPrefix("fd") ? 0 : 1) < ($1.host.lowercased().hasPrefix("fd") ? 0 : 1)
         }
@@ -1287,6 +1320,7 @@ public final class LocalDevBridge: ObservableObject {
         gatewayEndpoints.sort { ($0.host.hasPrefix("10.7.") ? 0 : 1) < ($1.host.hasPrefix("10.7.") ? 0 : 1) }
 
         var rawOrdered: [LocalDevTunnelEndpoint] = []
+        rawOrdered.append(contentsOf: wifiLockdownEndpoints)
         rawOrdered.append(contentsOf: mdnsSnapshot.filter { $0.host.lowercased().hasPrefix("fd") })
         rawOrdered.append(contentsOf: ulaIpv6Endpoints)
         rawOrdered.append(contentsOf: dstEndpoints)
@@ -1888,6 +1922,7 @@ public final class LocalDevBridge: ObservableObject {
             return
         }
 
+        _ = discoverAndLoadSandboxPairingIfNeeded()
         let preferredPort = detectPreferredTunnelPort()
         let candidates = precomputedCandidates ?? detectTunnelEndpoints(port: preferredPort)
         let nonLoopbackTargets = candidates.map(\.host).filter { $0 != "127.0.0.1" }
@@ -1898,7 +1933,7 @@ public final class LocalDevBridge: ObservableObject {
             timeoutMs: 1500
         )
         ensureCoreInitialized()
-        // Re-scan getifaddrs + mDNS immediately after prewarm/LocalDevVPN wake-up so utun5 IPv6 ULA is prioritized
+        // Re-scan getifaddrs + mDNS immediately after prewarm/LocalDevVPN wake-up so en0 / utun5 IPv6 ULA are prioritized
         let refreshedCandidates = precomputedCandidates ?? detectTunnelEndpoints(port: preferredPort)
         syncCandidatesToCore(refreshedCandidates)
         guard let fnStatus = LocalDevLib.shared.fnStatus,
@@ -1916,6 +1951,104 @@ public final class LocalDevBridge: ObservableObject {
         } else {
             DispatchQueue.main.async { self.isCheckingStatus = false }
         }
+    }
+
+    /// Resolves direct on-device App Group (`FileManager.containerURL(forSecurityApplicationGroupIdentifier:)`)
+    /// or `libsystem_containermanager.dylib` (`MCMActivateContainerPath`) root when permitted by signing profile.
+    public func resolveDirectLocalContainerRoot(
+        bundleID: String,
+        appGroupIdentifiers: [String] = [],
+        requireWritable: Bool = true
+    ) -> URL? {
+        ContainerStore.resolvePermittedDirectContainerURL(
+            bundleID: bundleID,
+            appGroupIdentifiers: appGroupIdentifiers,
+            requireWritable: requireWritable
+        )
+    }
+
+    /// Silently searches app-owned sandbox folders (`Documents/.localdev`, `Documents`, `Application Support`,
+    /// permitted App Groups) for an already-saved pairing file so Apply does not require manual re-import.
+    @discardableResult
+    public func discoverAndLoadSandboxPairingIfNeeded() -> Bool {
+        let fm = FileManager.default
+        let dir = self.storageDirectory
+        for storedName in ["remote_pairing.plist", "pairing.mobiledevicepairing", "pairing.plist"] {
+            let url = dir.appendingPathComponent(storedName)
+            if fm.fileExists(atPath: url.path),
+               let attrs = try? fm.attributesOfItem(atPath: url.path),
+               (attrs[.size] as? NSNumber)?.intValue ?? 0 > 0 {
+                return true
+            }
+        }
+
+        var searchRoots: [URL] = []
+        if let docs = fm.urls(for: .documentDirectory, in: .userDomainMask).first {
+            searchRoots.append(docs.appendingPathComponent(".localdev", isDirectory: true))
+            searchRoots.append(docs.appendingPathComponent("Pairing", isDirectory: true))
+            searchRoots.append(docs)
+        }
+        if let appSup = fm.urls(for: .applicationSupportDirectory, in: .userDomainMask).first {
+            searchRoots.append(appSup.appendingPathComponent(".localdev", isDirectory: true))
+            searchRoots.append(appSup)
+        }
+        for groupURL in ContainerStore.appGroupContainerURLs() {
+            searchRoots.append(groupURL.appendingPathComponent(".localdev", isDirectory: true))
+        }
+
+        for root in searchRoots {
+            guard let items = try? fm.contentsOfDirectory(
+                at: root,
+                includingPropertiesForKeys: [.isRegularFileKey],
+                options: [.skipsPackageDescendants]
+            ) else { continue }
+            for fileURL in items {
+                let ext = fileURL.pathExtension.lowercased()
+                guard ext == "mobiledevicepairing" || ext == "plist" || ext == "json" else { continue }
+                let lowerName = fileURL.lastPathComponent.lowercased()
+                if lowerName.hasPrefix("info.") || lowerName.contains("manifest") || lowerName.contains("receipt") || lowerName.contains("journal") {
+                    continue
+                }
+                guard Self.looksLikePairingFile(at: fileURL),
+                      let raw = try? Data(contentsOf: fileURL),
+                      !raw.isEmpty else { continue }
+                let clean = Self.stripUTF8BOM(raw)
+                guard let parsed = Self.parsePairingObject(from: clean).object,
+                      let unwrapped = Self.unwrapPairingDictionary(from: parsed) else { continue }
+                let analysis = Self.classifyPairingDictionary(unwrapped)
+                guard analysis.isValid else { continue }
+
+                let dstName = analysis.isRemotePairing ? "remote_pairing.plist" : "pairing.plist"
+                let dstURL = dir.appendingPathComponent(dstName)
+                do {
+                    try clean.write(to: dstURL, options: .atomic)
+                    log("localdev: auto-discovered sandbox pairing '\(fileURL.lastPathComponent)' -> \(dstName)")
+                    return true
+                } catch {
+                    log("localdev: auto-discovered pairing save error: \(error.localizedDescription)")
+                }
+            }
+        }
+        return false
+    }
+
+    /// Ensures sandbox pairing and `strategy=lockdown_first` (`en0:62078 -> CoreDeviceProxy`) / RSD tunnel
+    /// are initialized synchronously on workerQueue right before `AirLiftPatchTransaction` Apply.
+    @discardableResult
+    public func prepareTunnelAndPairingForApply(timeoutSeconds: TimeInterval = 4.5) -> Bool {
+        guard isModuleEnabled else { return false }
+        _ = discoverAndLoadSandboxPairingIfNeeded()
+        if currentStatusSnapshot.isLive {
+            return true
+        }
+        let sem = DispatchSemaphore(value: 0)
+        workerQueue.async { [weak self] in
+            defer { sem.signal() }
+            guard let self else { return }
+            self.refreshStatusOnWorkerQueue(forcePrewarm: false)
+        }
+        _ = sem.wait(timeout: .now() + max(0.5, timeoutSeconds))
+        return currentStatusSnapshot.isLive
     }
 
     /// Removes only `.localdev` pairing artifacts without touching Sandbox `Documents`, `Patches`, or `3105-Diagnostics`.
@@ -2481,7 +2614,8 @@ public final class LocalDevBridge: ObservableObject {
         bundleID: String,
         path: String,
         data: Data,
-        controlCapacity: UInt64 = defaultFileServiceControlCapacity
+        controlCapacity: UInt64 = defaultFileServiceControlCapacity,
+        directKnownPathMode: Bool = false
     ) -> AirLiftWriteOutcome {
         guard isModuleEnabled else {
             return AirLiftWriteOutcome(success: false, writtenBytes: 0, error: "LocalDev đang tắt", route: nil)
@@ -2491,24 +2625,28 @@ public final class LocalDevBridge: ObservableObject {
         ensureCoreInitialized()
         let safeCap = max(UInt64(1), controlCapacity)
         let bytes = [UInt8](data)
-        if let fnWrite = LocalDevLib.shared.fnFileserviceWrite {
-            let cStr = bytes.withUnsafeBufferPointer { buf in
-                fnWrite(bundleID, path, buf.baseAddress, buf.count, safeCap)
+        let cStr: UnsafePointer<CChar>? = bytes.withUnsafeBufferPointer { buf in
+            if let fnWriteOpts = LocalDevLib.shared.fnFileserviceWriteOpts {
+                return fnWriteOpts(bundleID, path, buf.baseAddress, buf.count, safeCap, directKnownPathMode ? 1 : 0)
             }
-            if let cStr {
-                defer { LocalDevLib.shared.fnFreeString?(cStr) }
-                if let respData = String(cString: cStr).data(using: .utf8),
-                   let resp = try? JSONDecoder().decode(FileserviceWriteResponse.self, from: respData) {
-                    if let route = resp.route {
-                        DispatchQueue.main.async { self.lastAirLiftRoute = route }
-                    }
-                    return AirLiftWriteOutcome(
-                        success: resp.success,
-                        writtenBytes: resp.written_bytes ?? (resp.success ? data.count : 0),
-                        error: resp.error,
-                        route: resp.route
-                    )
+            if let fnWrite = LocalDevLib.shared.fnFileserviceWrite {
+                return fnWrite(bundleID, path, buf.baseAddress, buf.count, safeCap)
+            }
+            return nil
+        }
+        if let cStr {
+            defer { LocalDevLib.shared.fnFreeString?(cStr) }
+            if let respData = String(cString: cStr).data(using: .utf8),
+               let resp = try? JSONDecoder().decode(FileserviceWriteResponse.self, from: respData) {
+                if let route = resp.route {
+                    DispatchQueue.main.async { self.lastAirLiftRoute = route }
                 }
+                return AirLiftWriteOutcome(
+                    success: resp.success,
+                    writtenBytes: resp.written_bytes ?? (resp.success ? data.count : 0),
+                    error: resp.error,
+                    route: resp.route
+                )
             }
         }
         let ok = writeFile(service: .houseArrest, bundleID: bundleID, path: path, data: data)

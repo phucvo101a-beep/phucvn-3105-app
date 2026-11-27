@@ -2023,6 +2023,114 @@ class SecuritySuiteTests(unittest.TestCase):
         rec_block = rsd_rs[rsd_rs.index("XpcRpFrame::SkipServiceVersion(ver)"):rsd_rs.index("Exceeded ServiceVersion metadata XPC frames")]
         self.assertIn("self.send_plain(handshake_payload).await?", rec_block)
 
+    def test_21_app_group_lockdown_strategy4_and_direct_known_path_mode(self):
+        models_sw = (REPO_ROOT / "ThreeOneOSFive" / "helpers" / "PatchProjectModels.swift").read_text("utf-8")
+        for sym in (
+            "var appGroupIdentifier: String?",
+            "var systemAppGroupIdentifier: String?",
+            "var declaredAppGroupIdentifiers: [String]",
+            'case appGroupIdentifierSnake = "app_group_identifier"',
+            'case systemAppGroupIdentifierSnake = "system_app_group_identifier"',
+            "decodeIfPresent(String.self, forKey: .appGroupIdentifier)",
+            "decodeIfPresent(String.self, forKey: .systemAppGroupIdentifier)",
+        ):
+            self.assertIn(sym, models_sw)
+
+        container_sw = (REPO_ROOT / "ThreeOneOSFive" / "helpers" / "ContainerStore.swift").read_text("utf-8")
+        for sym in (
+            "resolvePermittedAppGroupURL",
+            "resolvePermittedDirectContainerURL",
+            "containerURL(forSecurityApplicationGroupIdentifier:",
+            "MCMActivateContainerPath(7,",
+            "MCMActivateContainerPath(2,",
+        ):
+            self.assertIn(sym, container_sw)
+
+        dev_patch_sw = (REPO_ROOT / "ThreeOneOSFive" / "helpers" / "DevicePatchService.swift").read_text("utf-8")
+        self.assertIn("tryResolveAllDirectContainers(project: project, bundleIDs: bundleIDs)", dev_patch_sw)
+        self.assertIn("prepareTunnelAndPairingForApply", dev_patch_sw)
+        self.assertLess(
+            dev_patch_sw.index("tryResolveAllDirectContainers"),
+            dev_patch_sw.index("prepareTunnelAndPairingForApply"),
+        )
+
+        ld_swift = (REPO_ROOT / "ThreeOneOSFive" / "helpers" / "LocalDevBridge.swift").read_text("utf-8")
+        for sym in (
+            "wifiLockdownEndpoints",
+            '"wifi-en0-lockdown"',
+            "port: 62078",
+            "discoverAndLoadSandboxPairingIfNeeded",
+            "prepareTunnelAndPairingForApply",
+            "resolveDirectLocalContainerRoot",
+            '"localdev_fileservice_write_opts"',
+            "directKnownPathMode: Bool = false",
+            "public let direct_known_path_mode: Bool?",
+            "public let bulk_directory_disabled: Bool?",
+            "public let direct_read_disabled: Bool?",
+            "public let strategy: String?",
+        ):
+            self.assertIn(sym, ld_swift)
+
+        tunnel_rs = (REPO_ROOT / "sec_core" / "src" / "localdev" / "tunnel.rs").read_text("utf-8")
+        self.assertIn("pub(crate) fn is_lan_ipv4", tunnel_rs)
+
+        rsd_rs = (REPO_ROOT / "sec_core" / "src" / "localdev" / "rsd.rs").read_text("utf-8")
+        for sym in (
+            "async fn establish_via_lockdown_62078",
+            "pub fn connect_lockdown_coredevice_proxy",
+            "strategy=lockdown_first",
+        ):
+            self.assertIn(sym, rsd_rs)
+
+        mod_rs = (REPO_ROOT / "sec_core" / "src" / "localdev" / "mod.rs").read_text("utf-8")
+        for sym in (
+            "probe_and_connect_en0_lockdown_strategy4",
+            "execute_airlift_app_op_with_mode",
+            "pub fn airlift_write_file_opts",
+            "pub direct_known_path_mode: bool",
+            "pub bulk_directory_disabled: bool",
+            "pub direct_read_disabled: bool",
+        ):
+            self.assertIn(sym, mod_rs)
+        status_block = mod_rs[mod_rs.index("pub fn check_status_report"):mod_rs.index("fn activate_rsd_session")]
+        self.assertLess(
+            status_block.index("probe_and_connect_en0_lockdown_strategy4"),
+            status_block.index("probe_and_connect_ipv6_ula"),
+        )
+
+        fs_rs = (REPO_ROOT / "sec_core" / "src" / "localdev" / "fileservice.rs").read_text("utf-8")
+        for sym in (
+            "pub fn is_readback_or_lookup_denied",
+            "pub fn set_direct_known_path_mode",
+            "pub async fn fileservice_write_async_with_mode",
+            "pub fn fileservice_write_with_options",
+            "!self.bulk_directory_disabled",
+        ):
+            self.assertIn(sym, fs_rs)
+        w_block = fs_rs[fs_rs.index("pub async fn fileservice_write_async_with_mode"):fs_rs.index("pub async fn fileservice_mkdir_async")]
+        self.assertIn("if use_direct {", w_block)
+        self.assertIn("self.ensure_parent_dirs(&session_id, &rel_path).await?;", w_block)
+
+        ffi_rs = (REPO_ROOT / "sec_core" / "src" / "localdev" / "ffi.rs").read_text("utf-8")
+        obf_py = (REPO_ROOT / "scripts" / "obfuscate_build.py").read_text("utf-8")
+        self.assertIn("localdev_fileservice_write_opts", ffi_rs)
+        self.assertIn("ffi_fileservice_write_impl", ffi_rs)
+        self.assertIn('"localdev_fileservice_write_opts"', obf_py)
+
+        airlift_tx = (REPO_ROOT / "ThreeOneOSFive" / "helpers" / "AirLiftPatchTransaction.swift").read_text("utf-8")
+        for sym in (
+            "directKnownPathMode: Bool = false",
+            "isReadbackOrLookupDenied",
+            "var bulkDirectoryDisabled = directKnownPathMode",
+            "var directReadDisabled = directKnownPathMode",
+            "[settle-ack]",
+            "try verifyRemoteSettleCheck(descriptor: desc)",
+        ):
+            self.assertIn(sym, airlift_tx)
+        settle_branch = airlift_tx[airlift_tx.index("if directReadDisabled {"):airlift_tx.index("manifest.status = .applied")]
+        self.assertIn("try verifyRemoteSettleCheck(descriptor: desc)", settle_branch)
+        self.assertIn("writeRes.writtenBytes == desc.replacementData.count", settle_branch)
+
 
 def main():
     parser = argparse.ArgumentParser(description="Run 3105 5-Scenario Security Test Suite")

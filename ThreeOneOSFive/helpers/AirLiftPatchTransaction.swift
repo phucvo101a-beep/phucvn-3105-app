@@ -122,6 +122,8 @@ struct AirLiftPatchBackupManifest: Codable, Equatable {
     var status: Status
     let createdDirectories: [AirLiftPatchDirectoryRecord]
     let entries: [AirLiftPatchBackupEntry]
+    var directKnownPathMode: Bool?
+    var directReadDisabled: Bool?
 }
 
 struct AirLiftDiscardedBackupSummary: Identifiable, Equatable {
@@ -308,18 +310,31 @@ enum AirLiftPatchTransaction {
             backupDirectoryName: backupDir.lastPathComponent,
             status: .applied,
             createdDirectories: [],
-            entries: entries
+            entries: entries,
+            directKnownPathMode: false,
+            directReadDisabled: false
         )
         try writeManifest(manifest, to: backupDir.appendingPathComponent(manifestFilename))
     }
 
     // MARK: - Remote AirLift Transaction Apply (CoreDevice FileService -> HouseArrest -> afc.shim.remote)
 
+    private static func isReadbackOrLookupDenied(_ msg: String?, route: AirLiftRouteInfo?) -> Bool {
+        if route?.direct_read_disabled == true || route?.bulk_directory_disabled == true {
+            return true
+        }
+        let combined = ((msg ?? "") + " " + (route?.detail ?? "")).lowercased()
+        return combined.contains("readback_denied")
+            || combined.contains("installationlookupfailed")
+            || combined.contains("installation_lookup_failed")
+    }
+
     static func applyRemoteAirLift(
         project: PatchProject,
         backupRoot: URL,
         documentsRoot: URL? = nil,
-        fileManager: FileManager = .default
+        fileManager: FileManager = .default,
+        directKnownPathMode: Bool = false
     ) throws -> PatchTransactionReceipt {
         guard latestRemoteReceipt(projectID: project.id, backupRoot: backupRoot, fileManager: fileManager) == nil else {
             throw PatchPackageError.projectAlreadyApplied
@@ -342,82 +357,110 @@ enum AirLiftPatchTransaction {
         try fileManager.createDirectory(at: txDir, withIntermediateDirectories: true)
         let markerURL = txDir.appendingPathComponent(remoteReceiptMarkerFilename)
 
+        var bulkDirectoryDisabled = directKnownPathMode
+        var directReadDisabled = directKnownPathMode
         var entries: [AirLiftPatchBackupEntry] = []
         var createdDirRecords: [AirLiftPatchDirectoryRecord] = []
         var writtenDescriptors: [(descriptor: AirLiftPatchWriteDescriptor, entry: AirLiftPatchBackupEntry)] = []
 
         do {
             // 1. Pre-check target accessibility + ensure directories via `patch.airlift` router
-            for dir in directories {
-                let remotePath = "/" + dir.relativePath
-                let mkdirOutcome = LocalDevBridge.shared.createDirectoryWithAirLift(
-                    bundleID: dir.bundleID,
-                    path: remotePath
-                )
-                if !mkdirOutcome.success {
-                    let errStr = mkdirOutcome.error ?? "mkdir failed"
-                    if errStr.localizedCaseInsensitiveContains("SANDBOX_LOCKED")
-                        || mkdirOutcome.route?.backend == "sandbox_locked" {
-                        throw AirLiftPatchError.sandboxLockedRequiresBackup(bundleID: dir.bundleID, detail: errStr)
-                    }
-                    if let backend = mkdirOutcome.route?.backend, backend != "sandbox_locked" {
-                        throw remoteOperationError("[\(backend)] mkdir '\(remotePath)': \(errStr)")
-                    }
-                    // Fallback probe only when container backend wasn't confirmed open
-                    let probe = LocalDevBridge.shared.listDirectoryWithAirLift(bundleID: dir.bundleID, path: "/")
-                    if !probe.success {
-                        let probeErr = probe.error ?? errStr
-                        if probeErr.localizedCaseInsensitiveContains("SANDBOX_LOCKED")
-                            || probe.route?.backend == "sandbox_locked" {
-                            throw AirLiftPatchError.sandboxLockedRequiresBackup(bundleID: dir.bundleID, detail: probeErr)
-                        }
-                        throw remoteOperationError(probeErr)
-                    }
-                } else {
-                    createdDirRecords.append(
-                        AirLiftPatchDirectoryRecord(bundleID: dir.bundleID, relativePath: dir.relativePath)
+            // Skip parent directory listing/creation when `bulk_directory_disabled == true` (directKnownPathMode)
+            if !bulkDirectoryDisabled {
+                for dir in directories {
+                    let remotePath = "/" + dir.relativePath
+                    let mkdirOutcome = LocalDevBridge.shared.createDirectoryWithAirLift(
+                        bundleID: dir.bundleID,
+                        path: remotePath
                     )
+                    if !mkdirOutcome.success {
+                        let errStr = mkdirOutcome.error ?? "mkdir failed"
+                        if errStr.localizedCaseInsensitiveContains("SANDBOX_LOCKED")
+                            || mkdirOutcome.route?.backend == "sandbox_locked" {
+                            throw AirLiftPatchError.sandboxLockedRequiresBackup(bundleID: dir.bundleID, detail: errStr)
+                        }
+                        if isReadbackOrLookupDenied(errStr, route: mkdirOutcome.route) {
+                            bulkDirectoryDisabled = true
+                            directReadDisabled = true
+                            log("[directKnownPathMode] bulk_directory_disabled=true direct_read_disabled=true (\(errStr)) — bỏ qua duyệt thư mục cha")
+                            break
+                        }
+                        if let backend = mkdirOutcome.route?.backend, backend != "sandbox_locked" {
+                            throw remoteOperationError("[\(backend)] mkdir '\(remotePath)': \(errStr)")
+                        }
+                        // Fallback probe only when container backend wasn't confirmed open
+                        let probe = LocalDevBridge.shared.listDirectoryWithAirLift(bundleID: dir.bundleID, path: "/")
+                        if !probe.success {
+                            let probeErr = probe.error ?? errStr
+                            if probeErr.localizedCaseInsensitiveContains("SANDBOX_LOCKED")
+                                || probe.route?.backend == "sandbox_locked" {
+                                throw AirLiftPatchError.sandboxLockedRequiresBackup(bundleID: dir.bundleID, detail: probeErr)
+                            }
+                            if isReadbackOrLookupDenied(probeErr, route: probe.route) {
+                                bulkDirectoryDisabled = true
+                                directReadDisabled = true
+                                log("[directKnownPathMode] bulk_directory_disabled=true direct_read_disabled=true (\(probeErr)) — chuyển ghi thẳng known path")
+                                break
+                            }
+                            throw remoteOperationError(probeErr)
+                        }
+                    } else {
+                        createdDirRecords.append(
+                            AirLiftPatchDirectoryRecord(bundleID: dir.bundleID, relativePath: dir.relativePath)
+                        )
+                    }
                 }
+            } else {
+                log("[directKnownPathMode] bulk_directory_disabled=true — bỏ qua duyệt thư mục cha, ghi thẳng target paths")
             }
 
             // 2. Snapshot original device files into `.DiscardedPatchBackups-<timestamp>` BEFORE overwriting.
-            // If target file does not exist (`ObjectNotFound` / `0x00000008`), treat as new file and skip original backup.
+            // Skip readback entirely when `direct_read_disabled == true`.
             for desc in descriptors {
                 let remotePath = "/" + desc.relativePath
-                let readRes = LocalDevBridge.shared.readFileWithAirLift(bundleID: desc.bundleID, path: remotePath)
-
                 var originalExisted = false
                 var backupRel: String?
                 var originalDigest: Data?
+                var routeInfo: AirLiftRouteInfo?
 
-                if readRes.success, let originalBytes = readRes.data {
-                    originalExisted = true
-                    let rel = "originals/\(safePathSegment(desc.bundleID))/\(desc.ruleID.uuidString).original"
-                    let backupFileURL = backupDir.appendingPathComponent(rel)
-                    try fileManager.createDirectory(
-                        at: backupFileURL.deletingLastPathComponent(),
-                        withIntermediateDirectories: true
-                    )
-                    try originalBytes.write(to: backupFileURL, options: .atomic)
-                    let writtenDigest = Data(SHA256.hash(data: try Data(contentsOf: backupFileURL)))
-                    originalDigest = Data(SHA256.hash(data: originalBytes))
-                    guard writtenDigest == originalDigest else {
-                        throw PatchPackageError.applyFailed
-                    }
-                    backupRel = rel
-                } else if let readErr = readRes.error,
-                          readErr.localizedCaseInsensitiveContains("SANDBOX_LOCKED")
-                            || readRes.route?.backend == "sandbox_locked" {
-                    throw AirLiftPatchError.sandboxLockedRequiresBackup(bundleID: desc.bundleID, detail: readErr)
+                if directReadDisabled {
+                    log("[backup-skip] direct_read_disabled=true — bỏ qua đọc tệp gốc, ghi thẳng tệp mới (\(desc.bundleID)\(remotePath))")
                 } else {
-                    // Bỏ qua mọi lỗi đọc bản gốc (`ObjectNotFound`, `UnknownError (0x00000001)` trên `op 0x0d`, v.v.)
-                    // để không hủy giao dịch Apply; tiếp tục ghi tệp mới lên thiết bị.
-                    let skipDetail = readRes.error ?? "no original file"
-                    log("[backup-skip] Không có tệp gốc để sao lưu, tiếp tục ghi tệp mới (\(desc.bundleID)\(remotePath): \(skipDetail))")
-                    originalExisted = false
+                    let readRes = LocalDevBridge.shared.readFileWithAirLift(bundleID: desc.bundleID, path: remotePath)
+                    routeInfo = readRes.route
+
+                    if readRes.success, let originalBytes = readRes.data {
+                        originalExisted = true
+                        let rel = "originals/\(safePathSegment(desc.bundleID))/\(desc.ruleID.uuidString).original"
+                        let backupFileURL = backupDir.appendingPathComponent(rel)
+                        try fileManager.createDirectory(
+                            at: backupFileURL.deletingLastPathComponent(),
+                            withIntermediateDirectories: true
+                        )
+                        try originalBytes.write(to: backupFileURL, options: .atomic)
+                        let writtenDigest = Data(SHA256.hash(data: try Data(contentsOf: backupFileURL)))
+                        originalDigest = Data(SHA256.hash(data: originalBytes))
+                        guard writtenDigest == originalDigest else {
+                            throw PatchPackageError.applyFailed
+                        }
+                        backupRel = rel
+                    } else if let readErr = readRes.error,
+                              readErr.localizedCaseInsensitiveContains("SANDBOX_LOCKED")
+                                || readRes.route?.backend == "sandbox_locked" {
+                        throw AirLiftPatchError.sandboxLockedRequiresBackup(bundleID: desc.bundleID, detail: readErr)
+                    } else if isReadbackOrLookupDenied(readRes.error, route: readRes.route) {
+                        bulkDirectoryDisabled = true
+                        directReadDisabled = true
+                        log("[backup-skip] direct_read_disabled=true (\(readRes.error ?? "readback_denied")) — chuyển ghi thẳng và xác nhận qua ACK (\(desc.bundleID)\(remotePath))")
+                    } else {
+                        // Bỏ qua mọi lỗi đọc bản gốc (`ObjectNotFound`, `UnknownError (0x00000001)` trên `op 0x0d`, v.v.)
+                        // để không hủy giao dịch Apply; tiếp tục ghi tệp mới và vẫn chạy SHA-256 settle check.
+                        let skipDetail = readRes.error ?? "no original file"
+                        log("[backup-skip] Không có tệp gốc để sao lưu, tiếp tục ghi tệp mới (\(desc.bundleID)\(remotePath): \(skipDetail))")
+                        originalExisted = false
+                    }
                 }
 
-                let routeInfo = readRes.route
                 entries.append(
                     AirLiftPatchBackupEntry(
                         ruleID: desc.ruleID,
@@ -449,18 +492,34 @@ enum AirLiftPatchTransaction {
                 backupDirectoryName: backupDir.lastPathComponent,
                 status: .prepared,
                 createdDirectories: createdDirRecords,
-                entries: entries
+                entries: entries,
+                directKnownPathMode: bulkDirectoryDisabled,
+                directReadDisabled: directReadDisabled
             )
             try writeManifest(manifest, to: manifestURL)
 
-            // 3. Apply each `AirLiftPatchWriteDescriptor` + perform read-back SHA-256 settle check
+            // 3. Apply each `AirLiftPatchWriteDescriptor` + verify either SHA-256 read-back or write ACK (`direct_read_disabled`)
             for (idx, desc) in descriptors.enumerated() {
                 let remotePath = "/" + desc.relativePath
-                let writeRes = LocalDevBridge.shared.writeFileWithAirLift(
+                var writeRes = LocalDevBridge.shared.writeFileWithAirLift(
                     bundleID: desc.bundleID,
                     path: remotePath,
-                    data: desc.replacementData
+                    data: desc.replacementData,
+                    directKnownPathMode: bulkDirectoryDisabled
                 )
+                if !writeRes.success,
+                   !bulkDirectoryDisabled,
+                   isReadbackOrLookupDenied(writeRes.error, route: writeRes.route) {
+                    bulkDirectoryDisabled = true
+                    directReadDisabled = true
+                    log("[directKnownPathMode] write fallback bulk_directory_disabled=true direct_read_disabled=true (\(writeRes.error ?? "readback_denied")) -> retry OpenFile(\(remotePath))")
+                    writeRes = LocalDevBridge.shared.writeFileWithAirLift(
+                        bundleID: desc.bundleID,
+                        path: remotePath,
+                        data: desc.replacementData,
+                        directKnownPathMode: true
+                    )
+                }
                 guard writeRes.success else {
                     let errMsg = writeRes.error ?? "Ghi tệp qua AirLift thất bại"
                     if errMsg.localizedCaseInsensitiveContains("SANDBOX_LOCKED")
@@ -473,10 +532,27 @@ enum AirLiftPatchTransaction {
                     throw remoteOperationError(errMsg)
                 }
 
+                if writeRes.route?.direct_read_disabled == true {
+                    directReadDisabled = true
+                }
                 writtenDescriptors.append((desc, entries[idx]))
-                try verifyRemoteSettleCheck(descriptor: desc)
+
+                if directReadDisabled {
+                    guard writeRes.writtenBytes == desc.replacementData.count else {
+                        throw AirLiftPatchError.settleCheckFailed(
+                            bundleID: desc.bundleID,
+                            relativePath: desc.relativePath,
+                            reason: "ACK byte count không khớp (\(writeRes.writtenBytes) vs \(desc.replacementData.count))"
+                        )
+                    }
+                    log("[settle-ack] direct_read_disabled=true — bỏ qua verifyRemoteSettleCheck, xác nhận ghi \(writeRes.writtenBytes) bytes qua ACK cho \(desc.bundleID)\(remotePath)")
+                } else {
+                    try verifyRemoteSettleCheck(descriptor: desc)
+                }
             }
 
+            manifest.directKnownPathMode = bulkDirectoryDisabled
+            manifest.directReadDisabled = directReadDisabled
             manifest.status = .applied
             try writeManifest(manifest, to: manifestURL)
 

@@ -552,6 +552,17 @@ pub(crate) fn format_endpoint_label(ip: &str, port: u16) -> String {
     }
 }
 
+pub(crate) fn is_lan_ipv4(host: &str) -> bool {
+    let Ok(v4) = host.trim().parse::<std::net::Ipv4Addr>() else {
+        return false;
+    };
+    let oct = v4.octets();
+    if v4.is_loopback() || oct == [0, 0, 0, 0] || (oct[0] == 169 && oct[1] == 254) {
+        return false;
+    }
+    v4.is_private() && !(oct[0] == 10 && oct[1] == 7 && oct[2] == 0)
+}
+
 pub(crate) fn is_strict_ipv6_ula_fd00(host: &str) -> bool {
     let bare = host.trim().split('%').next().unwrap_or("").trim();
     bare.parse::<Ipv6Addr>()

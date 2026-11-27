@@ -435,6 +435,15 @@ enum PatchPackageCodec {
               !project.allBundleIdentifiers.isEmpty else {
             throw PatchPackageError.invalidProject
         }
+        for groupID in project.declaredAppGroupIdentifiers {
+            guard groupID.utf8.count <= 255,
+                  !groupID.contains("/"),
+                  !groupID.contains("\\"),
+                  !groupID.contains(".."),
+                  !groupID.unicodeScalars.contains(where: CharacterSet.controlCharacters.contains) else {
+                throw PatchPackageError.invalidProject
+            }
+        }
         var bundles = Set<String>()
         for suppliedBundleID in project.bundleIdentifiers {
             let bundleID = try PatchPathValidator.canonicalBundleIdentifier(suppliedBundleID)

@@ -1,12 +1,16 @@
 import Foundation
 
 enum DevicePatchService {
+    private static let directGroupsMetadataFilename = "direct_app_groups.plist"
+
     static func apply(project: PatchProject) throws -> PatchTransactionReceipt {
         let bundleIDs = orderedBundleIdentifiers(in: project)
         let (_, descriptors) = try AirLiftPatchWriteDescriptor.makeDescriptors(from: project)
         let backupRoot = try PatchProjectLibrary.backupRootURL()
 
-        if let localRoots = tryResolveAllLocalContainers(bundleIDs: bundleIDs) {
+        // Step 1 (< 1s): Fast local path via declared App Group (`containerURL(forSecurityApplicationGroupIdentifier:)`)
+        // or entitled container returned by `libsystem_containermanager.dylib` (`MCMActivateContainerPath`).
+        if let localRoots = tryResolveAllDirectContainers(project: project, bundleIDs: bundleIDs) {
             let receipt = try PatchTransaction.apply(
                 project: project,
                 backupRoot: backupRoot,
@@ -17,6 +21,10 @@ enum DevicePatchService {
                     return root
                 }
             )
+            saveDirectAppGroupsMetadata(
+                project.declaredAppGroupIdentifiers,
+                for: receipt
+            )
             try AirLiftPatchTransaction.mirrorLocalTransactionBackupAndSettle(
                 project: project,
                 receipt: receipt,
@@ -26,11 +34,22 @@ enum DevicePatchService {
             return receipt
         }
 
-        if LocalDevBridge.shared.isModuleEnabled && LocalDevBridge.shared.currentStatusSnapshot.isLive {
-            return try AirLiftPatchTransaction.applyRemoteAirLift(
-                project: project,
-                backupRoot: backupRoot
-            )
+        // Step 2: Direct filesystem access denied by sandbox -> silently load any sandbox pairing
+        // and prepare `strategy=lockdown_first` (`en0:62078 -> CoreDeviceProxy`) or IPv6 ULA / RSD tunnel.
+        if LocalDevBridge.shared.isModuleEnabled {
+            if !LocalDevBridge.shared.currentStatusSnapshot.isLive {
+                _ = LocalDevBridge.shared.prepareTunnelAndPairingForApply(timeoutSeconds: 4.5)
+            }
+            if LocalDevBridge.shared.currentStatusSnapshot.isLive {
+                return try AirLiftPatchTransaction.applyRemoteAirLift(
+                    project: project,
+                    backupRoot: backupRoot
+                )
+            }
+            let statusMsg = LocalDevBridge.shared.currentStatusSnapshot.message
+            if !statusMsg.isEmpty {
+                throw AirLiftPatchError.localDevUnavailable(statusMsg)
+            }
         }
 
         if let firstMissing = bundleIDs.first {
@@ -44,7 +63,8 @@ enum DevicePatchService {
             return PatchRestoreInspection(changedTargets: [])
         }
         let bundleIDs = try PatchTransaction.requiredBundleIdentifiers(for: receipt)
-        return try withResolvedContainers(bundleIDs: bundleIDs) { roots in
+        let groupIDs = loadDirectAppGroupsMetadata(for: receipt)
+        return try withResolvedContainers(bundleIDs: bundleIDs, appGroupIdentifiers: groupIDs) { roots in
             try PatchTransaction.inspectRestore(
                 receipt: receipt,
                 containerResolver: { bundleID in
@@ -66,7 +86,8 @@ enum DevicePatchService {
             return
         }
         let bundleIDs = try PatchTransaction.requiredBundleIdentifiers(for: receipt)
-        try withResolvedContainers(bundleIDs: bundleIDs) { roots in
+        let groupIDs = loadDirectAppGroupsMetadata(for: receipt)
+        try withResolvedContainers(bundleIDs: bundleIDs, appGroupIdentifiers: groupIDs) { roots in
             try PatchTransaction.restore(
                 receipt: receipt,
                 allowChangedTargets: allowChangedTargets,
@@ -91,7 +112,8 @@ enum DevicePatchService {
             return
         }
         let bundleIDs = try PatchTransaction.requiredBundleIdentifiers(for: receipt)
-        try withResolvedContainers(bundleIDs: bundleIDs) { roots in
+        let groupIDs = Array(Set(loadDirectAppGroupsMetadata(for: receipt) + project.declaredAppGroupIdentifiers))
+        try withResolvedContainers(bundleIDs: bundleIDs, appGroupIdentifiers: groupIDs) { roots in
             try PatchTransaction.resetToAppliedState(
                 receipt: receipt,
                 fallbackProject: project,
@@ -115,42 +137,58 @@ enum DevicePatchService {
         project.allBundleIdentifiers
     }
 
-    private static func tryResolveAllLocalContainers(bundleIDs: [String]) -> [String: URL]? {
+    private static func tryResolveAllDirectContainers(
+        project: PatchProject,
+        bundleIDs: [String]
+    ) -> [String: URL]? {
+        let declaredGroups = project.declaredAppGroupIdentifiers
         var roots: [String: URL] = [:]
         for bundleID in bundleIDs {
-            guard let path = ContainerStore.resolveAppContainerPath(bundleID: bundleID),
-                  ContainerStore.isApplicationContainerPath(path),
-                  let containerURL = ContainerStore.validatedLocalFileURL(
-                      fromPath: path,
-                      isDirectory: true,
-                      requireExists: true
-                  ),
-                  FileManager.default.isWritableFile(atPath: containerURL.path) else {
+            guard let resolved = LocalDevBridge.shared.resolveDirectLocalContainerRoot(
+                bundleID: bundleID,
+                appGroupIdentifiers: declaredGroups
+            ) else {
                 return nil
             }
-            roots[bundleID] = PatchPathValidator.canonicalFileURL(containerURL)
+            roots[bundleID] = PatchPathValidator.canonicalFileURL(resolved)
         }
         return roots
     }
 
     private static func withResolvedContainers<T>(
         bundleIDs: [String],
+        appGroupIdentifiers: [String] = [],
         operation: ([String: URL]) throws -> T
     ) throws -> T {
         var roots: [String: URL] = [:]
 
         for bundleID in bundleIDs {
-            guard let path = ContainerStore.resolveAppContainerPath(bundleID: bundleID),
-                  ContainerStore.isApplicationContainerPath(path),
-                  let containerURL = ContainerStore.validatedLocalFileURL(
-                      fromPath: path,
-                      isDirectory: true,
-                      requireExists: true
-                  ) else {
-                throw PatchPackageError.targetAppUnavailable(bundleID)
+            if let resolved = LocalDevBridge.shared.resolveDirectLocalContainerRoot(
+                bundleID: bundleID,
+                appGroupIdentifiers: appGroupIdentifiers,
+                requireWritable: false
+            ) {
+                roots[bundleID] = PatchPathValidator.canonicalFileURL(resolved)
+                continue
             }
-            roots[bundleID] = PatchPathValidator.canonicalFileURL(containerURL)
+            throw PatchPackageError.targetAppUnavailable(bundleID)
         }
         return try operation(roots)
+    }
+
+    private static func saveDirectAppGroupsMetadata(_ groupIDs: [String], for receipt: PatchTransactionReceipt) {
+        guard !groupIDs.isEmpty else { return }
+        let url = receipt.journalURL.deletingLastPathComponent().appendingPathComponent(directGroupsMetadataFilename)
+        guard let data = try? PropertyListEncoder().encode(groupIDs) else { return }
+        try? data.write(to: url, options: .atomic)
+    }
+
+    private static func loadDirectAppGroupsMetadata(for receipt: PatchTransactionReceipt) -> [String] {
+        let url = receipt.journalURL.deletingLastPathComponent().appendingPathComponent(directGroupsMetadataFilename)
+        guard let data = try? Data(contentsOf: url),
+              let ids = try? PropertyListDecoder().decode([String].self, from: data) else {
+            return []
+        }
+        return ids
     }
 }
