@@ -665,7 +665,7 @@ public final class LocalDevBridge: ObservableObject {
         )
     }
 
-    private static let defaultRemotePairingPort: UInt16 = 49152
+    public static let defaultRemotePairingPort: UInt16 = 49152
 
     private static func initialMissingPairingStatus() -> LocalDevStatus {
         LocalDevStatus(
