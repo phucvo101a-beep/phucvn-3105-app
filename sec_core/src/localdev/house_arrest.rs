@@ -176,7 +176,7 @@ impl HouseArrestClient {
     pub fn remove_path_with_afc(mut afc: AfcClient, mode: &str, path: &str) -> Result<(), String> {
         let direct_docs = mode == "VendDocuments" && root_is_direct_documents(&mut afc);
         let effective_path = normalize_house_arrest_path(mode, path, direct_docs);
-        afc.remove_path(&effective_path)
+        afc.remove_path_recursive(&effective_path)
     }
 
     /// Writes file bytes into an already-started HouseArrest `(AfcClient, mode)` session in 128 KB chunks.
@@ -252,7 +252,7 @@ pub fn normalize_house_arrest_path(
     }
     let trimmed = clean.trim_start_matches('/');
     if direct_documents_root {
-        if trimmed.is_empty() || trimmed == "Documents" {
+        let resolved = if trimmed.is_empty() || trimmed == "Documents" {
             "/".to_string()
         } else if let Some(rest) = trimmed.strip_prefix("Documents/") {
             let sub = rest.trim_start_matches('/');
@@ -263,7 +263,14 @@ pub fn normalize_house_arrest_path(
             }
         } else {
             format!("/{}", trimmed)
+        };
+        if trimmed == "Documents" || trimmed.starts_with("Documents/") {
+            eprintln!(
+                "[venddocuments] stripped /Documents prefix ('{}' -> '{}')",
+                path, resolved
+            );
         }
+        resolved
     } else if trimmed.is_empty() || trimmed == "Documents" {
         "/Documents".to_string()
     } else if trimmed.starts_with("Documents/") {

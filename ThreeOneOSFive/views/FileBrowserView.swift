@@ -99,7 +99,20 @@ struct FileBrowserView: View {
                 .padding(.top, 12)
                 .padding(.bottom, 5)
 
-            if let route = airliftRouteInfo, LocalDevVirtualPath.isLocalDevPath(currentPath) {
+            if LocalDevVirtualPath.isMediaPath(currentPath) {
+                HStack(spacing: 6) {
+                    Image(systemName: "externaldrive.fill.badge.wifi")
+                        .font(.system(size: 11, weight: .bold))
+                        .foregroundStyle(.cyan)
+                    Text("AFC Media: /var/mobile/Media (afc.shim.remote)")
+                        .font(.system(size: 10.5, weight: .semibold, design: .monospaced))
+                        .foregroundStyle(AppTheme.subduedText)
+                        .lineLimit(1)
+                    Spacer()
+                }
+                .padding(.horizontal, AppTheme.pageInset)
+                .padding(.bottom, 4)
+            } else if let route = airliftRouteInfo, LocalDevVirtualPath.isLocalDevPath(currentPath) {
                 HStack(spacing: 6) {
                     Image(systemName: route.fallback ? "arrow.triangle.branch" : "bolt.horizontal.circle.fill")
                         .font(.system(size: 11, weight: .bold))
@@ -634,8 +647,9 @@ struct FileBrowserView: View {
     private var fileEmptyView: some View {
         VStack(spacing: 12) {
             if let remoteErr = remoteErrorMessage, !remoteErr.isEmpty {
-                let isSandboxLocked = remoteErr.localizedCaseInsensitiveContains("SANDBOX_LOCKED")
-                let targetBundleID = LocalDevVirtualPath.parse(currentPath)?.bundleID ?? bundleID ?? ""
+                let isMedia = LocalDevVirtualPath.isMediaPath(currentPath)
+                let isSandboxLocked = !isMedia && remoteErr.localizedCaseInsensitiveContains("SANDBOX_LOCKED")
+                let targetBundleID = isMedia ? "" : (LocalDevVirtualPath.parse(currentPath)?.bundleID ?? bundleID ?? "")
                 let existingDir = targetBundleID.isEmpty ? nil : backupExtractor.existingExtractedDirectory(for: targetBundleID)
                 let isExtractingThis = backupExtractor.isRunning && backupExtractor.activeBundleID == targetBundleID
 
@@ -882,13 +896,15 @@ struct FileBrowserView: View {
             let targetRemote = parsedRemote.remotePath == "/"
                 ? "/\(trimmed)"
                 : "\(parsedRemote.remotePath.trimmingCharacters(in: CharacterSet(charactersIn: "/")).isEmpty ? "" : parsedRemote.remotePath)/\(trimmed)"
+            let remoteService = LocalDevVirtualPath.serviceType(for: currentPath)
             switch prompt.action {
             case .createFile:
                 performFileOperation(
                     activity: language.text("browser.creating"),
-                    operationName: "airlift create file"
+                    operationName: "remote create file"
                 ) {
-                    let res = LocalDevBridge.shared.writeFileWithAirLift(
+                    let res = writeRemoteVirtualFile(
+                        service: remoteService,
                         bundleID: parsedRemote.bundleID,
                         path: targetRemote,
                         data: Data()
@@ -897,7 +913,7 @@ struct FileBrowserView: View {
                         throw NSError(
                             domain: "com.phucvn.3105",
                             code: 13,
-                            userInfo: [NSLocalizedDescriptionKey: res.error ?? "Không tạo được tệp qua AirLift"]
+                            userInfo: [NSLocalizedDescriptionKey: res.error ?? "Không tạo được tệp từ xa"]
                         )
                     }
                     return targetRemote
@@ -905,9 +921,10 @@ struct FileBrowserView: View {
             case .createFolder:
                 performFileOperation(
                     activity: language.text("browser.creating"),
-                    operationName: "airlift create folder"
+                    operationName: "remote create folder"
                 ) {
-                    let res = LocalDevBridge.shared.createDirectoryWithAirLift(
+                    let res = LocalDevBridge.shared.createDirectory(
+                        service: remoteService,
                         bundleID: parsedRemote.bundleID,
                         path: targetRemote
                     )
@@ -915,7 +932,7 @@ struct FileBrowserView: View {
                         throw NSError(
                             domain: "com.phucvn.3105",
                             code: 13,
-                            userInfo: [NSLocalizedDescriptionKey: res.error ?? "Không tạo được thư mục qua AirLift"]
+                            userInfo: [NSLocalizedDescriptionKey: res.error ?? "Không tạo được thư mục từ xa"]
                         )
                     }
                     return targetRemote
@@ -1026,7 +1043,9 @@ struct FileBrowserView: View {
         ) {
             for entry in targets {
                 if let parsed = LocalDevVirtualPath.parse(entry.path) {
-                    let res = LocalDevBridge.shared.removePathWithAirLift(
+                    let remoteService = LocalDevVirtualPath.serviceType(for: entry.path)
+                    let res = LocalDevBridge.shared.removePath(
+                        service: remoteService,
                         bundleID: parsed.bundleID,
                         path: parsed.remotePath
                     )
@@ -1034,7 +1053,7 @@ struct FileBrowserView: View {
                         throw NSError(
                             domain: "com.phucvn.3105",
                             code: 13,
-                            userInfo: [NSLocalizedDescriptionKey: res.error ?? "Không xóa được qua AirLift"]
+                            userInfo: [NSLocalizedDescriptionKey: res.error ?? "Không xóa được tệp từ xa"]
                         )
                     }
                 } else if let targetURL = ContainerStore.validatedLocalFileURL(
@@ -1326,6 +1345,7 @@ struct FileBrowserView: View {
             }
             if !validSourceURLs.isEmpty,
                let parsedRemote = LocalDevVirtualPath.parse(currentPath) {
+                let remoteService = LocalDevVirtualPath.serviceType(for: currentPath)
                 activityText = language.text("browser.importing", validSourceURLs.first?.lastPathComponent ?? "")
                 DispatchQueue.global(qos: .userInitiated).async {
                     var imported = 0
@@ -1339,7 +1359,8 @@ struct FileBrowserView: View {
                         }
                         let base = parsedRemote.remotePath == "/" ? "" : parsedRemote.remotePath
                         let dest = "\(base)/\(srcURL.lastPathComponent)"
-                        let res = LocalDevBridge.shared.writeFileWithAirLift(
+                        let res = writeRemoteVirtualFile(
+                            service: remoteService,
                             bundleID: parsedRemote.bundleID,
                             path: dest,
                             data: bytes
@@ -1597,8 +1618,9 @@ struct FileBrowserView: View {
         let targetBundleID = bundleID
         DispatchQueue.global(qos: .userInitiated).async {
             if let parsed = LocalDevVirtualPath.parse(path) {
+                let remoteService = LocalDevVirtualPath.serviceType(for: path)
                 let listing = LocalDevBridge.shared.listDirectoryDetailed(
-                    service: .houseArrest,
+                    service: remoteService,
                     bundleID: parsed.bundleID,
                     path: parsed.remotePath
                 )
@@ -1833,6 +1855,7 @@ struct FileBrowserView: View {
             DispatchQueue.global(qos: .userInitiated).async {
                 if let remoteVPath = request.remoteVirtualPath,
                    let parsedRemote = LocalDevVirtualPath.parse(remoteVPath) {
+                    let remoteService = LocalDevVirtualPath.serviceType(for: remoteVPath)
                     guard let validSourceURL = ContainerStore.validatedExternalFileURL(selection.sourceURL) else {
                         DispatchQueue.main.async {
                             activityText = nil
@@ -1848,7 +1871,9 @@ struct FileBrowserView: View {
                     do {
                         let newData = try Data(contentsOf: validSourceURL)
                         // Sao lưu bản gốc vào Documents/.DiscardedPatchBackups-<timestamp> trước khi ghi đè
-                        let readOrig = LocalDevBridge.shared.readFileWithAirLift(
+                        // (nếu bước đọc gốc gặp lỗi, bỏ qua sao lưu và vẫn tiếp tục ghi tệp mới)
+                        let readOrig = LocalDevBridge.shared.readFileOutcome(
+                            service: remoteService,
                             bundleID: parsedRemote.bundleID,
                             path: parsedRemote.remotePath
                         )
@@ -1859,8 +1884,11 @@ struct FileBrowserView: View {
                                 let dst = backupDir.appendingPathComponent(selection.targetName)
                                 try? origData.write(to: dst, options: .atomic)
                             }
+                        } else {
+                            log("[backup-skip] Bỏ qua sao lưu bản gốc cho \(selection.targetName): \(readOrig.error ?? "no original")")
                         }
-                        let writeRes = LocalDevBridge.shared.writeFileWithAirLift(
+                        let writeRes = writeRemoteVirtualFile(
+                            service: remoteService,
                             bundleID: parsedRemote.bundleID,
                             path: parsedRemote.remotePath,
                             data: newData
@@ -1952,6 +1980,18 @@ struct FileBrowserView: View {
                 }
             }
         }
+    }
+
+    private func writeRemoteVirtualFile(
+        service: LocalDevServiceType,
+        bundleID: String,
+        path: String,
+        data: Data
+    ) -> AirLiftWriteOutcome {
+        if service == .houseArrest {
+            return LocalDevBridge.shared.writeFileWithAirLift(bundleID: bundleID, path: path, data: data)
+        }
+        return LocalDevBridge.shared.writeFileOutcome(service: service, bundleID: bundleID, path: path, data: data)
     }
 
     private func replacementErrorMessage(_ error: Error) -> String {
@@ -2322,6 +2362,7 @@ struct FileQuickLookView: View {
                 Result<PreparedFilePreview, Error> {
                     if let parsed = LocalDevVirtualPath.parse(filePath) {
                         return try FilePreviewService.makeRemotePreviewCopy(
+                            service: LocalDevVirtualPath.serviceType(for: filePath),
                             bundleID: parsed.bundleID,
                             remotePath: parsed.remotePath,
                             fileName: fileName
@@ -2402,12 +2443,13 @@ private enum FilePreviewService {
     }
 
     static func makeRemotePreviewCopy(
+        service: LocalDevServiceType = .houseArrest,
         bundleID: String,
         remotePath: String,
         fileName: String
     ) throws -> PreparedFilePreview {
         guard let data = LocalDevBridge.shared.readFile(
-            service: .houseArrest,
+            service: service,
             bundleID: bundleID,
             path: remotePath
         ) else {

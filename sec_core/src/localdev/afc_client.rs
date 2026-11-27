@@ -11,14 +11,20 @@ pub const AFC_MAGIC: u64 = 0x4141504c36414643; // "CFA6LPAA" in little-endian
 pub const AFC_OP_STATUS: u64 = 0x00000001;
 pub const AFC_OP_DATA: u64 = 0x00000002;
 pub const AFC_OP_READ_DIR: u64 = 0x00000003;
+#[allow(dead_code)]
 pub const AFC_OP_READ_FILE: u64 = 0x00000004;
+#[allow(dead_code)]
 pub const AFC_OP_WRITE_FILE: u64 = 0x00000005;
 pub const AFC_OP_REMOVE_PATH: u64 = 0x00000008;
 pub const AFC_OP_MAKE_DIR: u64 = 0x00000009;
 pub const AFC_OP_GET_FILE_INFO: u64 = 0x0000000a;
+pub const AFC_OP_WRITE_FILE_ATOMIC: u64 = 0x0000000c;
 pub const AFC_OP_FILE_OPEN: u64 = 0x0000000d;
+pub const AFC_OP_FILE_READ: u64 = 0x0000000f;
+pub const AFC_OP_FILE_WRITE: u64 = 0x00000010;
 pub const AFC_OP_FILE_CLOSE: u64 = 0x00000014;
 pub const AFC_OP_RENAME_PATH: u64 = 0x00000018;
+pub const AFC_OP_REMOVE_PATH_AND_CONTENTS: u64 = 0x00000022;
 
 // File open modes
 pub const AFC_FOPEN_RDONLY: u64 = 0x00000001;
@@ -63,6 +69,10 @@ pub fn afc_status_name(status: u64) -> &'static str {
 
 pub fn is_afc_not_found(err: &str) -> bool {
     err.contains("ObjectNotFound") || err.contains("0x00000008")
+}
+
+pub fn is_afc_unknown_error(err: &str) -> bool {
+    err.contains("UnknownError") || err.contains("0x00000001")
 }
 
 pub fn is_afc_already_exists(err: &str) -> bool {
@@ -257,7 +267,7 @@ impl AfcClient {
             args[0..8].copy_from_slice(&handle.to_le_bytes());
             args[8..16].copy_from_slice(&chunk_req.to_le_bytes());
 
-            let (op, chunk_data) = self.dispatch(AFC_OP_READ_FILE, &args, &[])?;
+            let (op, chunk_data) = self.dispatch(AFC_OP_FILE_READ, &args, &[])?;
             if op != AFC_OP_DATA || chunk_data.is_empty() {
                 break;
             }
@@ -307,22 +317,19 @@ impl AfcClient {
         Ok(())
     }
 
-    /// Writes an entire file safely over AFC: creates parents, removes old locked file (`remove_path`,
-    /// ignoring `ObjectNotFound`), opens with `AFC_FOPEN_WRONLY`, and streams in 128 KB chunks (`AFC_CHUNK_SIZE`)
-    /// so `TooMuchData` cannot trigger over RSD/afc.shim.remote.
-    pub fn write_file_full(&mut self, path: &str, data: &[u8]) -> Result<(), String> {
-        self.ensure_parent_dirs(path);
+    /// Writes an entire file atomically via `AFC_OP_WRITE_FILE_ATOMIC` (`0x0000000c`).
+    pub fn write_file_atomic(&mut self, path: &str, data: &[u8]) -> Result<(), String> {
+        let mut path_bytes = path.as_bytes().to_vec();
+        path_bytes.push(0);
+        self.dispatch(AFC_OP_WRITE_FILE_ATOMIC, &path_bytes, data)?;
+        Ok(())
+    }
 
-        if let Err(err) = self.remove_path(path) {
-            if !is_afc_not_found(&err) {
-                eprintln!("afc: remove_path '{}' before WrOnly -> {}", path, err);
-            }
-        }
-
-        let handle = self.file_open(path, AFC_FOPEN_WRONLY)?;
+    fn open_and_write_chunked(&mut self, path: &str, data: &[u8], mode: u64) -> Result<(), String> {
+        let handle = self.file_open(path, mode)?;
         let mut write_res: Result<(), String> = Ok(());
         for chunk in data.chunks(AFC_CHUNK_SIZE) {
-            if let Err(err) = self.dispatch(AFC_OP_WRITE_FILE, &handle.to_le_bytes(), chunk) {
+            if let Err(err) = self.dispatch(AFC_OP_FILE_WRITE, &handle.to_le_bytes(), chunk) {
                 write_res = Err(err);
                 break;
             }
@@ -330,6 +337,33 @@ impl AfcClient {
         let close_res = self.file_close(handle);
         write_res?;
         close_res
+    }
+
+    /// Writes an entire file safely over AFC: creates parents, removes old locked file (`remove_path`,
+    /// ignoring `ObjectNotFound`/error), tries `AFC_FOPEN_WRONLY`, retries with `AFC_FOPEN_RW`/`AFC_FOPEN_WR`
+    /// or `AFC_OP_WRITE_FILE_ATOMIC` (`0x0c`) if `UnknownError (0x00000001)` occurs, and streams in 128 KB chunks (`AFC_CHUNK_SIZE`).
+    pub fn write_file_full(&mut self, path: &str, data: &[u8]) -> Result<(), String> {
+        self.ensure_parent_dirs(path);
+
+        if let Err(err) = self.remove_path(path) {
+            if !is_afc_not_found(&err) {
+                eprintln!("afc: remove_path '{}' before write -> {}", path, err);
+            }
+        }
+
+        match self.open_and_write_chunked(path, data, AFC_FOPEN_WRONLY) {
+            Ok(()) => Ok(()),
+            Err(first_err) if is_afc_unknown_error(&first_err) => {
+                if let Ok(()) = self.open_and_write_chunked(path, data, AFC_FOPEN_RW) {
+                    return Ok(());
+                }
+                if let Ok(()) = self.open_and_write_chunked(path, data, AFC_FOPEN_WR) {
+                    return Ok(());
+                }
+                self.write_file_atomic(path, data).map_err(|_| first_err)
+            }
+            Err(first_err) => Err(first_err),
+        }
     }
 
     /// Creates a directory
@@ -346,6 +380,39 @@ impl AfcClient {
         path_bytes.push(0);
         self.dispatch(AFC_OP_REMOVE_PATH, &[], &path_bytes)?;
         Ok(())
+    }
+
+    /// Removes a file or non-empty directory tree cleanly (trying `remove_path`, `RemovePathAndContents`,
+    /// then recursive child deletion for directories such as `/var/mobile/Media/airlift-dir-src-*`).
+    pub fn remove_path_recursive(&mut self, path: &str) -> Result<(), String> {
+        let clean = path.trim().trim_end_matches('/');
+        if clean.is_empty() || clean == "/" {
+            return Err("Không thể xóa thư mục gốc '/'".to_string());
+        }
+        match self.remove_path(clean) {
+            Ok(()) => Ok(()),
+            Err(first_err) => {
+                if is_afc_not_found(&first_err) {
+                    return Ok(());
+                }
+                let mut path_bytes = clean.as_bytes().to_vec();
+                path_bytes.push(0);
+                if self
+                    .dispatch(AFC_OP_REMOVE_PATH_AND_CONTENTS, &[], &path_bytes)
+                    .is_ok()
+                {
+                    return Ok(());
+                }
+                if let Ok(entries) = self.list_dir(clean) {
+                    for name in entries {
+                        let child = format!("{}/{}", clean, name);
+                        self.remove_path_recursive(&child)?;
+                    }
+                    return self.remove_path(clean);
+                }
+                Err(first_err)
+            }
+        }
     }
 
     /// Renames a path

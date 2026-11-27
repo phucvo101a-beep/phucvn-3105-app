@@ -1709,12 +1709,79 @@ class SecuritySuiteTests(unittest.TestCase):
 
         airlift_tx = (REPO_ROOT / "ThreeOneOSFive" / "helpers" / "AirLiftPatchTransaction.swift").read_text("utf-8")
         for sym in (
-            "else if readRes.isNotFoundError",
+            "[backup-skip]",
+            "deviceFileOperationFailed",
             "readRes.route?.backend == \"sandbox_locked\"",
             "mkdirOutcome.route?.backend == \"sandbox_locked\"",
             "writeRes.route?.backend == \"sandbox_locked\"",
         ):
             self.assertIn(sym, airlift_tx)
+
+    # -----------------------------------------------------------------------
+    # SCENARIO 16: Media Isolation, Backup-Skip on Read Errors & AFC Write Opcodes
+    # -----------------------------------------------------------------------
+    def test_16_media_isolation_backup_skip_and_afc_opcodes(self):
+        afc_rs = (REPO_ROOT / "sec_core" / "src" / "localdev" / "afc_client.rs").read_text("utf-8")
+        for sym in (
+            "pub const AFC_OP_WRITE_FILE_ATOMIC: u64 = 0x0000000c;",
+            "pub const AFC_OP_FILE_READ: u64 = 0x0000000f;",
+            "pub const AFC_OP_FILE_WRITE: u64 = 0x00000010;",
+            "pub const AFC_OP_REMOVE_PATH_AND_CONTENTS: u64 = 0x00000022;",
+            "pub fn is_afc_unknown_error",
+            "pub fn write_file_atomic",
+            "pub fn remove_path_recursive",
+            "AFC_FOPEN_WRONLY",
+            "AFC_FOPEN_RW",
+        ):
+            self.assertIn(sym, afc_rs)
+
+        ha_rs = (REPO_ROOT / "sec_core" / "src" / "localdev" / "house_arrest.rs").read_text("utf-8")
+        self.assertIn("[venddocuments] stripped /Documents prefix", ha_rs)
+        self.assertIn("remove_path_recursive", ha_rs)
+
+        mod_rs = (REPO_ROOT / "sec_core" / "src" / "localdev" / "mod.rs").read_text("utf-8")
+        self.assertNotIn("try_afc_container_fallback", mod_rs)
+        airlift_start = mod_rs.index("fn execute_airlift_app_op")
+        airlift_end = mod_rs.index("fn try_house_arrest_only")
+        airlift_code_lines = "\n".join(
+            line for line in mod_rs[airlift_start:airlift_end].splitlines()
+            if not line.lstrip().startswith("//")
+        )
+        self.assertNotIn("com.apple.afc.shim.remote", airlift_code_lines)
+        self.assertNotIn("afc.shim.remote", airlift_code_lines)
+        self.assertIn("local_container_fs", airlift_code_lines)
+        self.assertIn("pub fn make_dir", mod_rs)
+        self.assertIn("pub fn remove_path", mod_rs)
+
+        ffi_rs = (REPO_ROOT / "sec_core" / "src" / "localdev" / "ffi.rs").read_text("utf-8")
+        obf_py = (REPO_ROOT / "scripts" / "obfuscate_build.py").read_text("utf-8")
+        ld_swift = (REPO_ROOT / "ThreeOneOSFive" / "helpers" / "LocalDevBridge.swift").read_text("utf-8")
+        for sym in ("localdev_mkdir", "localdev_remove_path"):
+            self.assertIn(sym, ffi_rs)
+            self.assertIn(sym, obf_py)
+            self.assertIn(f'"{sym}"', ld_swift)
+
+        self.assertIn("localdev-media:///", ld_swift)
+        self.assertIn("func serviceType(for virtualPath: String)", ld_swift)
+        self.assertIn("func removePath(", ld_swift)
+
+        airlift_tx = (REPO_ROOT / "ThreeOneOSFive" / "helpers" / "AirLiftPatchTransaction.swift").read_text("utf-8")
+        for sym in (
+            "case deviceFileOperationFailed(String)",
+            "Lỗi đọc/ghi tệp trên thiết bị:",
+            "[backup-skip] Không có tệp gốc để sao lưu, tiếp tục ghi tệp mới",
+            "private static func remoteOperationError",
+        ):
+            self.assertIn(sym, airlift_tx)
+
+        app_browser = (REPO_ROOT / "ThreeOneOSFive" / "views" / "AppDataBrowserView.swift").read_text("utf-8")
+        self.assertIn("Bộ nhớ Media dùng chung (/var/mobile/Media)", app_browser)
+        self.assertIn("airlift-dir-src-*", app_browser)
+        self.assertIn("LocalDevVirtualPath.mediaRootPath", app_browser)
+
+        fb_swift = (REPO_ROOT / "ThreeOneOSFive" / "views" / "FileBrowserView.swift").read_text("utf-8")
+        self.assertIn("LocalDevVirtualPath.serviceType(for:", fb_swift)
+        self.assertIn("AFC Media: /var/mobile/Media", fb_swift)
 
 
 def main():

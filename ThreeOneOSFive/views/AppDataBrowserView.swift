@@ -242,6 +242,8 @@ struct AppDataBrowserView: View {
                 LocalDevStatusCard()
                     .padding(.bottom, 2)
 
+                sharedMediaShortcutCard
+
                 VStack(alignment: .leading, spacing: 2) {
                     Text("TRUYỀN TỆP WI-FI LAN (3105 AIRLIFT)")
                         .font(.system(size: 10, weight: .heavy, design: .rounded))
@@ -570,6 +572,45 @@ struct AppDataBrowserView: View {
             .padding(13)
             .frame(maxWidth: .infinity, alignment: .leading)
             .background(cardSurface(tint: AppTheme.info))
+            .contentShape(RoundedRectangle(cornerRadius: 21, style: .continuous))
+        }
+        .buttonStyle(AppPressableStyle())
+        .contextMenu {
+            openInNewTabButton(destination)
+        }
+    }
+
+    private var sharedMediaShortcutCard: some View {
+        let destination = FileBrowserDestination(
+            containerPath: LocalDevVirtualPath.mediaRootPath,
+            startPath: LocalDevVirtualPath.mediaRootPath,
+            title: "Bộ nhớ Media dùng chung (/var/mobile/Media)",
+            bundleID: nil
+        )
+
+        return Button {
+            pushDestination(destination)
+        } label: {
+            HStack(spacing: 13) {
+                AppRowIcon(systemName: "externaldrive.fill.badge.wifi", tint: .cyan, symbolSize: 18, frameSize: 45)
+                VStack(alignment: .leading, spacing: 4) {
+                    Text("Bộ nhớ Media dùng chung (/var/mobile/Media)")
+                        .font(.system(size: 13, weight: .bold, design: .rounded))
+                        .foregroundStyle(.white)
+                    Text("Duyệt riêng afc.shim.remote để kiểm tra & dọn thư mục rác airlift-dir-src-*")
+                        .font(.system(size: 10, weight: .medium))
+                        .foregroundStyle(AppTheme.subduedText)
+                }
+                Spacer()
+                Image(systemName: "arrow.up.right")
+                    .font(.system(size: 11, weight: .bold))
+                    .foregroundStyle(.cyan)
+                    .frame(width: 31, height: 31)
+                    .background(Color.cyan.opacity(0.12), in: Circle())
+            }
+            .padding(13)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .background(cardSurface(tint: .cyan))
             .contentShape(RoundedRectangle(cornerRadius: 21, style: .continuous))
         }
         .buttonStyle(AppPressableStyle())

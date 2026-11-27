@@ -16,6 +16,8 @@ private typealias CLocalDevScanApps = @convention(c) () -> UnsafePointer<CChar>?
 private typealias CLocalDevListDir = @convention(c) (Int32, UnsafePointer<CChar>?, UnsafePointer<CChar>) -> UnsafePointer<CChar>?
 private typealias CLocalDevReadFile = @convention(c) (Int32, UnsafePointer<CChar>?, UnsafePointer<CChar>, UnsafeMutablePointer<Int>) -> UnsafeMutablePointer<UInt8>?
 private typealias CLocalDevWriteFile = @convention(c) (Int32, UnsafePointer<CChar>?, UnsafePointer<CChar>, UnsafePointer<UInt8>?, Int) -> UnsafePointer<CChar>?
+private typealias CLocalDevMkdir = @convention(c) (Int32, UnsafePointer<CChar>?, UnsafePointer<CChar>) -> UnsafePointer<CChar>?
+private typealias CLocalDevRemovePath = @convention(c) (Int32, UnsafePointer<CChar>?, UnsafePointer<CChar>) -> UnsafePointer<CChar>?
 private typealias CLocalDevFileserviceStatus = @convention(c) (UnsafePointer<CChar>?, UInt64) -> UnsafePointer<CChar>?
 private typealias CLocalDevFileserviceList = @convention(c) (UnsafePointer<CChar>?, UnsafePointer<CChar>?, UInt64) -> UnsafePointer<CChar>?
 private typealias CLocalDevFileserviceRead = @convention(c) (UnsafePointer<CChar>?, UnsafePointer<CChar>?, UInt64, UnsafeMutablePointer<Int>?, UnsafeMutablePointer<Int32>?) -> UnsafeMutablePointer<UInt8>?
@@ -424,6 +426,8 @@ private final class LocalDevLib {
     var fnListDir: CLocalDevListDir?
     var fnReadFile: CLocalDevReadFile?
     var fnWriteFile: CLocalDevWriteFile?
+    var fnMkdir: CLocalDevMkdir?
+    var fnRemovePath: CLocalDevRemovePath?
     var fnFileserviceStatus: CLocalDevFileserviceStatus?
     var fnFileserviceList: CLocalDevFileserviceList?
     var fnFileserviceRead: CLocalDevFileserviceRead?
@@ -489,6 +493,12 @@ private final class LocalDevLib {
         }
         if let sym = dlsym(symTarget, "localdev_write_file") {
             fnWriteFile = unsafeBitCast(sym, to: CLocalDevWriteFile.self)
+        }
+        if let sym = dlsym(symTarget, "localdev_mkdir") {
+            fnMkdir = unsafeBitCast(sym, to: CLocalDevMkdir.self)
+        }
+        if let sym = dlsym(symTarget, "localdev_remove_path") {
+            fnRemovePath = unsafeBitCast(sym, to: CLocalDevRemovePath.self)
         }
         if let sym = dlsym(symTarget, "localdev_fileservice_status") {
             fnFileserviceStatus = unsafeBitCast(sym, to: CLocalDevFileserviceStatus.self)
@@ -737,9 +747,19 @@ private struct Mb2ExtractResponse: Codable {
 
 public enum LocalDevVirtualPath {
     public static let schemePrefix = "localdev://"
+    public static let mediaSchemePrefix = "localdev-media://"
+    public static let mediaRootPath = "localdev-media:///"
 
     public static func isLocalDevPath(_ path: String) -> Bool {
-        path.hasPrefix(schemePrefix)
+        path.hasPrefix(schemePrefix) || path.hasPrefix(mediaSchemePrefix)
+    }
+
+    public static func isMediaPath(_ path: String) -> Bool {
+        path.hasPrefix(mediaSchemePrefix)
+    }
+
+    public static func serviceType(for virtualPath: String) -> LocalDevServiceType {
+        isMediaPath(virtualPath) ? .deviceAfc : .houseArrest
     }
 
     public static func rootPath(bundleID: String) -> String {
@@ -747,12 +767,20 @@ public enum LocalDevVirtualPath {
     }
 
     public static func childPath(parent: String, name: String) -> String {
-        let base = parent.hasSuffix("/") ? String(parent.dropLast()) : parent
         let cleanName = name.hasPrefix("/") ? String(name.dropFirst()) : name
+        if parent == mediaSchemePrefix || parent == mediaRootPath {
+            return mediaSchemePrefix + "/" + cleanName
+        }
+        let base = parent.hasSuffix("/") ? String(parent.dropLast()) : parent
         return base + "/" + cleanName
     }
 
     public static func parse(_ virtualPath: String) -> (bundleID: String, remotePath: String)? {
+        if virtualPath.hasPrefix(mediaSchemePrefix) {
+            let remainder = String(virtualPath.dropFirst(mediaSchemePrefix.count))
+            let clean = remainder.trimmingCharacters(in: CharacterSet(charactersIn: "/"))
+            return ("", clean.isEmpty ? "/" : "/" + clean)
+        }
         guard virtualPath.hasPrefix(schemePrefix) else { return nil }
         let remainder = String(virtualPath.dropFirst(schemePrefix.count))
         guard !remainder.isEmpty else { return nil }
@@ -2427,6 +2455,110 @@ public final class LocalDevBridge: ObservableObject {
         defer { LocalDevLib.shared.fnFreeString?(cStr) }
         let jsonStr = String(cString: cStr)
         return jsonStr.contains("\"success\":true")
+    }
+
+    public func readFileOutcome(
+        service: LocalDevServiceType,
+        bundleID: String?,
+        path: String
+    ) -> AirLiftReadOutcome {
+        if service == .houseArrest, let bid = bundleID, !bid.isEmpty {
+            return readFileWithAirLift(bundleID: bid, path: path)
+        }
+        if let bytes = readFile(service: service, bundleID: bundleID, path: path) {
+            return AirLiftReadOutcome(success: true, data: bytes, error: nil, route: nil)
+        }
+        return AirLiftReadOutcome(success: false, data: nil, error: "Không đọc được tệp trên Bộ nhớ Media dùng chung", route: nil)
+    }
+
+    public func writeFileOutcome(
+        service: LocalDevServiceType,
+        bundleID: String?,
+        path: String,
+        data: Data
+    ) -> AirLiftWriteOutcome {
+        if service == .houseArrest, let bid = bundleID, !bid.isEmpty {
+            return writeFileWithAirLift(bundleID: bid, path: path, data: data)
+        }
+        guard isModuleEnabled else {
+            return AirLiftWriteOutcome(success: false, writtenBytes: 0, error: "LocalDev đang tắt", route: nil)
+        }
+        let keepAliveToken = BackgroundKeepAliveManager.shared.beginWorkToken()
+        defer { BackgroundKeepAliveManager.shared.endWorkToken(keepAliveToken) }
+        ensureCoreInitialized()
+        guard let fnWrite = LocalDevLib.shared.fnWriteFile else {
+            return AirLiftWriteOutcome(success: false, writtenBytes: 0, error: "LocalDev chưa sẵn sàng", route: nil)
+        }
+        let bytes = [UInt8](data)
+        guard let cStr = bytes.withUnsafeBufferPointer({ buf in
+            fnWrite(service.rawValue, bundleID, path, buf.baseAddress, buf.count)
+        }) else {
+            return AirLiftWriteOutcome(success: false, writtenBytes: 0, error: "Ghi tệp AFC thất bại", route: nil)
+        }
+        defer { LocalDevLib.shared.fnFreeString?(cStr) }
+        if let respData = String(cString: cStr).data(using: .utf8),
+           let resp = try? JSONDecoder().decode(FileserviceWriteResponse.self, from: respData) {
+            return AirLiftWriteOutcome(
+                success: resp.success,
+                writtenBytes: resp.written_bytes ?? (resp.success ? data.count : 0),
+                error: resp.error,
+                route: resp.route
+            )
+        }
+        let ok = String(cString: cStr).contains("\"success\":true")
+        return AirLiftWriteOutcome(success: ok, writtenBytes: ok ? data.count : 0, error: nil, route: nil)
+    }
+
+    public func createDirectory(
+        service: LocalDevServiceType,
+        bundleID: String?,
+        path: String
+    ) -> AirLiftWriteOutcome {
+        if service == .houseArrest, let bid = bundleID, !bid.isEmpty {
+            return createDirectoryWithAirLift(bundleID: bid, path: path)
+        }
+        guard isModuleEnabled else {
+            return AirLiftWriteOutcome(success: false, writtenBytes: 0, error: "LocalDev đang tắt", route: nil)
+        }
+        let keepAliveToken = BackgroundKeepAliveManager.shared.beginWorkToken()
+        defer { BackgroundKeepAliveManager.shared.endWorkToken(keepAliveToken) }
+        ensureCoreInitialized()
+        guard let fnMkdir = LocalDevLib.shared.fnMkdir,
+              let cStr = fnMkdir(service.rawValue, bundleID, path) else {
+            return AirLiftWriteOutcome(success: false, writtenBytes: 0, error: "Chưa hỗ trợ mkdir AFC Media", route: nil)
+        }
+        defer { LocalDevLib.shared.fnFreeString?(cStr) }
+        if let respData = String(cString: cStr).data(using: .utf8),
+           let resp = try? JSONDecoder().decode(FileserviceWriteResponse.self, from: respData) {
+            return AirLiftWriteOutcome(success: resp.success, writtenBytes: 0, error: resp.error, route: resp.route)
+        }
+        return AirLiftWriteOutcome(success: false, writtenBytes: 0, error: "Phản hồi mkdir không hợp lệ", route: nil)
+    }
+
+    public func removePath(
+        service: LocalDevServiceType,
+        bundleID: String?,
+        path: String
+    ) -> AirLiftWriteOutcome {
+        if service == .houseArrest, let bid = bundleID, !bid.isEmpty {
+            return removePathWithAirLift(bundleID: bid, path: path)
+        }
+        guard isModuleEnabled else {
+            return AirLiftWriteOutcome(success: false, writtenBytes: 0, error: "LocalDev đang tắt", route: nil)
+        }
+        let keepAliveToken = BackgroundKeepAliveManager.shared.beginWorkToken()
+        defer { BackgroundKeepAliveManager.shared.endWorkToken(keepAliveToken) }
+        ensureCoreInitialized()
+        guard let fnRemove = LocalDevLib.shared.fnRemovePath,
+              let cStr = fnRemove(service.rawValue, bundleID, path) else {
+            return AirLiftWriteOutcome(success: false, writtenBytes: 0, error: "Chưa hỗ trợ xóa tệp AFC Media", route: nil)
+        }
+        defer { LocalDevLib.shared.fnFreeString?(cStr) }
+        if let respData = String(cString: cStr).data(using: .utf8),
+           let resp = try? JSONDecoder().decode(FileserviceWriteResponse.self, from: respData) {
+            return AirLiftWriteOutcome(success: resp.success, writtenBytes: 0, error: resp.error, route: resp.route)
+        }
+        return AirLiftWriteOutcome(success: false, writtenBytes: 0, error: "Phản hồi remove không hợp lệ", route: nil)
     }
 
     public func extractBackupDomain(

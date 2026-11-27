@@ -46,6 +46,8 @@ LOCALDEV_CABI_SYMBOLS = [
     "localdev_list_dir",
     "localdev_read_file",
     "localdev_write_file",
+    "localdev_mkdir",
+    "localdev_remove_path",
     "localdev_fileservice_status",
     "localdev_fileservice_list",
     "localdev_fileservice_read",

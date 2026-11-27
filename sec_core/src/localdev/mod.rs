@@ -703,75 +703,24 @@ impl LocalDevManager {
         probe_capabilities(self.active_rsd.as_ref(), ctx.as_ref(), control_capacity)
     }
 
-    fn try_afc_container_fallback<T>(
-        &mut self,
-        ctx: &FileServiceTargetContext,
-        rel_path: &str,
-        op: impl Fn(AfcClient, &str) -> Result<T, String>,
-    ) -> ContainerOpenOutcome<T> {
-        let Some(ref raw_root) = ctx.data_container_url else {
-            return ContainerOpenOutcome::ContainerRejected(
-                "Không có DataContainerURL để thăm dò afc.shim.remote".to_string(),
-            );
-        };
+    fn resolve_local_container_root(&self, ctx: &FileServiceTargetContext) -> Option<PathBuf> {
+        let raw_root = ctx.data_container_url.as_deref()?;
         let container_root = container_path_from_url(raw_root);
-        if container_root.is_empty() {
-            return ContainerOpenOutcome::ContainerRejected("DataContainerURL rỗng".to_string());
+        let clean = container_root.trim().trim_end_matches('/');
+        if clean.is_empty() {
+            return None;
         }
-        let stripped_private = container_root
-            .strip_prefix("/private")
-            .unwrap_or(container_root.as_str())
-            .trim_end_matches('/');
-
-        let afc_rsd = obfstr!("com.apple.afc.shim.remote").to_string();
-        let afc2_svc = obfstr!("com.apple.afc2").to_string();
-        let afc_classic = obfstr!("com.apple.afc").to_string();
-
-        if let Some(ref sess) = self.active_rsd {
-            for svc in [afc_rsd.as_str(), afc2_svc.as_str(), afc_classic.as_str()] {
-                if let Ok(s) = sess.open_checked_in_service(&[svc]) {
-                    let mut afc = AfcClient::new(LockdownStream::RsdTunnel(s));
-                    let matched_root = [stripped_private, container_root.trim_end_matches('/')]
-                        .into_iter()
-                        .find(|cand| !cand.is_empty() && afc.get_file_info(cand).is_ok());
-
-                    if let Some(verified_root) = matched_root {
-                        // Container root check passed -> session is genuinely opened on this backend;
-                        // any failure inside `op` is a file-level AFC error, NEVER `sandbox_locked`!
-                        let backend_label = if svc == afc2_svc {
-                            "afc2".to_string()
-                        } else {
-                            "afc.shim.remote".to_string()
-                        };
-                        let mut sub = rel_path.trim().trim_start_matches('/').to_string();
-                        if sub == "Documents" || sub.starts_with("Documents/") {
-                            let probe_docs = format!("{}/Documents", verified_root);
-                            if afc.get_file_info(&probe_docs).is_err() {
-                                sub = sub
-                                    .strip_prefix("Documents")
-                                    .unwrap_or("")
-                                    .trim_start_matches('/')
-                                    .to_string();
-                            }
-                        }
-                        let full_target = if sub.is_empty() {
-                            verified_root.to_string()
-                        } else {
-                            format!("{}/{}", verified_root, sub)
-                        };
-                        return match op(afc, &full_target) {
-                            Ok(res) => ContainerOpenOutcome::SessionOpenedOpOk(res, backend_label),
-                            Err(afc_err) => {
-                                ContainerOpenOutcome::SessionOpenedOpErr(afc_err, backend_label)
-                            }
-                        };
-                    }
-                }
+        let stripped = clean.strip_prefix("/private").unwrap_or(clean);
+        for candidate in [clean, stripped] {
+            if candidate.is_empty() {
+                continue;
+            }
+            let p = PathBuf::from(candidate);
+            if std::fs::read_dir(&p).is_ok() {
+                return Some(p);
             }
         }
-        ContainerOpenOutcome::ContainerRejected(
-            "afc.shim.remote bị giới hạn Sandbox Media".to_string(),
-        )
+        None
     }
 
     fn record_airlift_route(
@@ -822,6 +771,11 @@ impl LocalDevManager {
         info
     }
 
+    /// Routes app container file operations strictly across:
+    /// 1) `com.apple.coredevice.fileservice.data` (`DataContainerURL` / `AppGroup`)
+    /// 2) `HouseArrest` (`VendContainer` -> `VendDocuments`)
+    /// 3) Local TrollStore / Jailbreak container path `/var/mobile/Containers/Data/Application/<UUID>` (when directly readable)
+    /// Never falls back to `com.apple.afc.shim.remote` (`/var/mobile/Media`) for an app bundle ID.
     fn execute_airlift_app_op<T>(
         &mut self,
         bundle_id: &str,
@@ -829,6 +783,7 @@ impl LocalDevManager {
         control_capacity: u64,
         fs_op: impl Fn(&mut CoreDeviceFileServiceClient, &FileServiceTargetContext, &str) -> Result<T, CoreDeviceFileServiceError>,
         afc_op: impl Fn(AfcClient, String, &str) -> Result<T, String>,
+        local_op: impl Fn(&std::path::Path, &str) -> Result<T, String>,
     ) -> Result<(T, AirLiftRouteInfo), String> {
         let cap = normalize_control_capacity(control_capacity);
         let ctx = self.resolve_target_context(bundle_id);
@@ -868,9 +823,8 @@ impl LocalDevManager {
             }
         }
 
-        // Step 2 (fallback=true): Downgrade sequentially -> HouseArrest (VendContainer -> VendDocuments) -> afc.shim.remote.
-        // Distinguish container-level refusal (`SANDBOX_LOCKED_APPSTORE`) from post-open AFC file errors
-        // (`ObjectNotFound`, `PermDenied`, `TooMuchData`, `InvalidArg`, etc.).
+        // Step 2 (fallback=true): Downgrade sequentially to HouseArrest (`VendContainer` -> `VendDocuments`).
+        // Distinguish container-level refusal (`SANDBOX_LOCKED_APPSTORE`) from post-open AFC file errors.
         let ha_outcome = self.try_house_arrest_only(bundle_id, |afc, mode| {
             let backend_label = format!("house_arrest.{}", mode);
             (afc_op(afc, mode, path), backend_label)
@@ -904,42 +858,41 @@ impl LocalDevManager {
                 Err(afc_err)
             }
             ContainerOpenOutcome::ContainerRejected(ha_err) => {
-                if is_rsd {
-                    match self.try_afc_container_fallback(&ctx, path, |afc, resolved_path| {
-                        afc_op(afc, "afc.shim.remote".to_string(), resolved_path)
-                    }) {
-                        ContainerOpenOutcome::SessionOpenedOpOk(val, backend_label) => {
+                // Step 3: Local `/var/mobile/Containers/Data/Application/<UUID>` ONLY on TrollStore / Jailbreak
+                if let Some(local_root) = self.resolve_local_container_root(&ctx) {
+                    let target = safe_join_local_container(&local_root, path)?;
+                    match local_op(&target, path) {
+                        Ok(val) => {
                             let route = self.record_airlift_route(
                                 true,
                                 true,
                                 Some(fs_reason),
-                                backend_label,
+                                "local_container_fs".to_string(),
                                 &ctx,
                                 path,
                                 cap,
-                                Some(fs_detail),
+                                Some(local_root.display().to_string()),
                             );
                             return Ok((val, route));
                         }
-                        ContainerOpenOutcome::SessionOpenedOpErr(afc_err, backend_label) => {
+                        Err(local_err) => {
                             self.record_airlift_route(
                                 true,
                                 true,
                                 Some(fs_reason),
-                                backend_label,
+                                "local_container_fs".to_string(),
                                 &ctx,
                                 path,
                                 cap,
-                                Some(afc_err.clone()),
+                                Some(local_err.clone()),
                             );
-                            return Err(afc_err);
+                            return Err(local_err);
                         }
-                        ContainerOpenOutcome::ContainerRejected(_) => {}
                     }
                 }
 
-                // Step 3: ONLY reached when opening HouseArrest (`VendContainer` & `VendDocuments`)
-                // AND opening `afc.shim.remote` container root both failed at container level.
+                // Step 4: Container rejected by CoreDevice FileService, HouseArrest, and local Sandbox FS.
+                // Strictly return SANDBOX_LOCKED_APPSTORE (never fall back to `com.apple.afc.shim.remote`).
                 let combined_err = format!(
                     "{} [patch.airlift attempt=true fallback=true reason={} | fileservice: {}]",
                     ha_err, fs_reason, fs_detail
@@ -1069,7 +1022,7 @@ impl LocalDevManager {
                 } else {
                     for (svc, mode) in [
                         (afc2_svc.as_str(), "afc2"),
-                        (afc_rsd.as_str(), "afc"),
+                        (afc_rsd.as_str(), "afc.shim.remote"),
                         (afc_classic.as_str(), "afc"),
                     ] {
                         if let Ok(s) = sess.open_checked_in_service(&[svc]) {
@@ -1154,15 +1107,8 @@ impl LocalDevManager {
                 let entries = items.iter().map(|i| i.name.clone()).collect();
                 Ok((entries, items, "coredevice.fileservice.data".to_string()))
             },
-            |mut afc, mode, p| {
-                if mode == "afc.shim.remote" {
-                    let entries = afc.list_dir(p)?;
-                    let items = build_afc_dir_items(&mut afc, p, &entries);
-                    Ok((entries, items, mode))
-                } else {
-                    HouseArrestClient::list_dir_detailed_with_afc(afc, mode, p)
-                }
-            },
+            |afc, mode, p| HouseArrestClient::list_dir_detailed_with_afc(afc, mode, p),
+            |local_target, _| list_local_dir_items(local_target),
         )?;
         Ok(((entries, items, mode), route))
     }
@@ -1195,12 +1141,9 @@ impl LocalDevManager {
             path,
             control_capacity,
             |client, ctx, p| client.fileservice_read(ctx, p),
-            |mut afc, mode, p| {
-                if mode == "afc.shim.remote" {
-                    afc.read_file_full(p)
-                } else {
-                    HouseArrestClient::read_file_with_afc(afc, &mode, p)
-                }
+            |afc, mode, p| HouseArrestClient::read_file_with_afc(afc, &mode, p),
+            |local_target, _| {
+                std::fs::read(local_target).map_err(|e| format!("LocalFS read failed: {}", e))
             },
         )
     }
@@ -1241,15 +1184,51 @@ impl LocalDevManager {
             path,
             control_capacity,
             |client, ctx, p| client.fileservice_write(ctx, p, data),
-            |mut afc, mode, p| {
-                if mode == "afc.shim.remote" {
-                    afc.write_file_full(p, data)
-                } else {
-                    HouseArrestClient::write_file_safe_with_afc(afc, &mode, p, data)
+            |afc, mode, p| HouseArrestClient::write_file_safe_with_afc(afc, &mode, p, data),
+            |local_target, _| {
+                if let Some(parent) = local_target.parent() {
+                    std::fs::create_dir_all(parent)
+                        .map_err(|e| format!("LocalFS mkdir parent failed: {}", e))?;
                 }
+                std::fs::write(local_target, data)
+                    .map_err(|e| format!("LocalFS write failed: {}", e))
             },
         )?;
         Ok((route, len))
+    }
+
+    pub fn make_dir(
+        &mut self,
+        service_type: i32,
+        bundle_id: &str,
+        path: &str,
+    ) -> Result<String, String> {
+        if service_type == ffi::SERVICE_TYPE_HOUSE_ARREST {
+            let route = self.airlift_mkdir(bundle_id, path, DEFAULT_CONTROL_CAPACITY)?;
+            return Ok(route.backend);
+        }
+        let path_owned = path.to_string();
+        self.with_afc_client(service_type, bundle_id, move |mut afc, mode| {
+            afc.make_dir_recursive(&path_owned)?;
+            Ok(mode)
+        })
+    }
+
+    pub fn remove_path(
+        &mut self,
+        service_type: i32,
+        bundle_id: &str,
+        path: &str,
+    ) -> Result<String, String> {
+        if service_type == ffi::SERVICE_TYPE_HOUSE_ARREST {
+            let route = self.airlift_remove(bundle_id, path, DEFAULT_CONTROL_CAPACITY)?;
+            return Ok(route.backend);
+        }
+        let path_owned = path.to_string();
+        self.with_afc_client(service_type, bundle_id, move |mut afc, mode| {
+            afc.remove_path_recursive(&path_owned)?;
+            Ok(mode)
+        })
     }
 
     pub fn airlift_mkdir(
@@ -1263,12 +1242,10 @@ impl LocalDevManager {
             path,
             control_capacity,
             |client, ctx, p| client.fileservice_mkdir(ctx, p),
-            |mut afc, mode, p| {
-                if mode == "afc.shim.remote" {
-                    afc.make_dir_recursive(p)
-                } else {
-                    HouseArrestClient::make_dir_with_afc(afc, &mode, p)
-                }
+            |afc, mode, p| HouseArrestClient::make_dir_with_afc(afc, &mode, p),
+            |local_target, _| {
+                std::fs::create_dir_all(local_target)
+                    .map_err(|e| format!("LocalFS mkdir failed: {}", e))
             },
         )?;
         Ok(route)
@@ -1285,12 +1262,14 @@ impl LocalDevManager {
             path,
             control_capacity,
             |client, ctx, p| client.fileservice_remove(ctx, p),
-            |mut afc, mode, p| {
-                if mode == "afc.shim.remote" {
-                    afc.remove_path(p)
+            |afc, mode, p| HouseArrestClient::remove_path_with_afc(afc, &mode, p),
+            |local_target, _| {
+                if local_target.is_dir() {
+                    std::fs::remove_dir_all(local_target)
                 } else {
-                    HouseArrestClient::remove_path_with_afc(afc, &mode, p)
+                    std::fs::remove_file(local_target)
                 }
+                .map_err(|e| format!("LocalFS remove failed: {}", e))
             },
         )?;
         Ok(route)
@@ -1378,6 +1357,51 @@ impl LocalDevManager {
             free_bytes,
         )
     }
+}
+
+fn safe_join_local_container(root: &std::path::Path, rel_path: &str) -> Result<PathBuf, String> {
+    let mut out = root.to_path_buf();
+    for seg in rel_path.trim().trim_start_matches('/').split('/') {
+        if seg.is_empty() || seg == "." {
+            continue;
+        }
+        if seg == ".." {
+            return Err("Đường dẫn LocalContainer không hợp lệ".to_string());
+        }
+        out.push(seg);
+    }
+    Ok(out)
+}
+
+fn list_local_dir_items(dir: &std::path::Path) -> Result<(Vec<String>, Vec<HouseArrestDirItem>, String), String> {
+    let rd = std::fs::read_dir(dir).map_err(|e| format!("LocalFS read_dir failed: {}", e))?;
+    let mut pairs: Vec<(String, HouseArrestDirItem)> = Vec::new();
+    for entry_res in rd {
+        let Ok(entry) = entry_res else { continue };
+        let name = entry.file_name().to_string_lossy().to_string();
+        if name == "." || name == ".." {
+            continue;
+        }
+        let meta = entry.metadata().ok();
+        let is_dir = meta.as_ref().map(|m| m.is_dir()).unwrap_or(false);
+        let size = if is_dir {
+            -1
+        } else {
+            meta.as_ref().map(|m| m.len() as i64).unwrap_or(0)
+        };
+        pairs.push((
+            name.clone(),
+            HouseArrestDirItem {
+                name,
+                is_dir,
+                size,
+            },
+        ));
+    }
+    pairs.sort_by(|a, b| a.0.cmp(&b.0));
+    let entries = pairs.iter().map(|(n, _)| n.clone()).collect();
+    let items = pairs.into_iter().map(|(_, i)| i).collect();
+    Ok((entries, items, "local_container_fs".to_string()))
 }
 
 fn build_afc_dir_items(afc: &mut AfcClient, dir_path: &str, entries: &[String]) -> Vec<HouseArrestDirItem> {

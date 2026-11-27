@@ -132,6 +132,7 @@ struct AirLiftDiscardedBackupSummary: Identifiable, Equatable {
 
 enum AirLiftPatchError: Error, LocalizedError {
     case localDevUnavailable(String)
+    case deviceFileOperationFailed(String)
     case sandboxLockedRequiresBackup(bundleID: String, detail: String)
     case settleCheckFailed(bundleID: String, relativePath: String, reason: String)
     case discardedBackupMissing(String)
@@ -140,6 +141,8 @@ enum AirLiftPatchError: Error, LocalizedError {
         switch self {
         case .localDevUnavailable(let detail):
             return "LocalDev / RSD chưa sẵn sàng: \(detail)"
+        case .deviceFileOperationFailed(let detail):
+            return "Lỗi đọc/ghi tệp trên thiết bị: \(detail)"
         case .sandboxLockedRequiresBackup(let bundleID, let detail):
             return "Ứng dụng '\(bundleID)' bị khóa Sandbox bởi iOS (CoreDevice FileService và HouseArrest đều bị từ chối: \(detail)). Hãy bật UIFileSharingEnabled bằng Công cụ IPA hoặc Trích xuất dữ liệu qua Backup (mobilebackup2)."
         case .settleCheckFailed(let bundleID, let relPath, let reason):
@@ -159,6 +162,13 @@ enum AirLiftPatchTransaction {
     private static let remoteReceiptMarkerFilename = "airlift_receipt.plist"
     private static let settleMaxAttempts = 3
     private static let settleRetryDelays: [TimeInterval] = [0.05, 0.12, 0.25]
+
+    private static func remoteOperationError(_ detail: String) -> AirLiftPatchError {
+        if LocalDevBridge.shared.currentStatusSnapshot.isLive {
+            return .deviceFileOperationFailed(detail)
+        }
+        return .localDevUnavailable(detail)
+    }
 
     private struct RemoteReceiptMarker: Codable {
         let schemaVersion: Int
@@ -351,7 +361,7 @@ enum AirLiftPatchTransaction {
                         throw AirLiftPatchError.sandboxLockedRequiresBackup(bundleID: dir.bundleID, detail: errStr)
                     }
                     if let backend = mkdirOutcome.route?.backend, backend != "sandbox_locked" {
-                        throw AirLiftPatchError.localDevUnavailable("[\(backend)] mkdir '\(remotePath)': \(errStr)")
+                        throw remoteOperationError("[\(backend)] mkdir '\(remotePath)': \(errStr)")
                     }
                     // Fallback probe only when container backend wasn't confirmed open
                     let probe = LocalDevBridge.shared.listDirectoryWithAirLift(bundleID: dir.bundleID, path: "/")
@@ -361,7 +371,7 @@ enum AirLiftPatchTransaction {
                             || probe.route?.backend == "sandbox_locked" {
                             throw AirLiftPatchError.sandboxLockedRequiresBackup(bundleID: dir.bundleID, detail: probeErr)
                         }
-                        throw AirLiftPatchError.localDevUnavailable(probeErr)
+                        throw remoteOperationError(probeErr)
                     }
                 } else {
                     createdDirRecords.append(
@@ -395,26 +405,16 @@ enum AirLiftPatchTransaction {
                         throw PatchPackageError.applyFailed
                     }
                     backupRel = rel
-                } else if readRes.isNotFoundError {
-                    // Target file does not yet exist on device: treat as new file, skip original backup, proceed to write
-                    originalExisted = false
                 } else if let readErr = readRes.error,
                           readErr.localizedCaseInsensitiveContains("SANDBOX_LOCKED")
                             || readRes.route?.backend == "sandbox_locked" {
                     throw AirLiftPatchError.sandboxLockedRequiresBackup(bundleID: desc.bundleID, detail: readErr)
-                } else if let backend = readRes.route?.backend, backend != "sandbox_locked" {
-                    let readErr = readRes.error ?? "AFC read error"
-                    throw AirLiftPatchError.localDevUnavailable("[\(backend)] read '\(remotePath)': \(readErr)")
                 } else {
-                    let rootProbe = LocalDevBridge.shared.listDirectoryWithAirLift(bundleID: desc.bundleID, path: "/")
-                    if !rootProbe.success {
-                        let probeErr = rootProbe.error ?? readRes.error ?? "Container không thể truy cập"
-                        if probeErr.localizedCaseInsensitiveContains("SANDBOX_LOCKED")
-                            || rootProbe.route?.backend == "sandbox_locked" {
-                            throw AirLiftPatchError.sandboxLockedRequiresBackup(bundleID: desc.bundleID, detail: probeErr)
-                        }
-                        throw AirLiftPatchError.localDevUnavailable(probeErr)
-                    }
+                    // Bỏ qua mọi lỗi đọc bản gốc (`ObjectNotFound`, `UnknownError (0x00000001)` trên `op 0x0d`, v.v.)
+                    // để không hủy giao dịch Apply; tiếp tục ghi tệp mới lên thiết bị.
+                    let skipDetail = readRes.error ?? "no original file"
+                    log("[backup-skip] Không có tệp gốc để sao lưu, tiếp tục ghi tệp mới (\(desc.bundleID)\(remotePath): \(skipDetail))")
+                    originalExisted = false
                 }
 
                 let routeInfo = readRes.route
@@ -468,9 +468,9 @@ enum AirLiftPatchTransaction {
                         throw AirLiftPatchError.sandboxLockedRequiresBackup(bundleID: desc.bundleID, detail: errMsg)
                     }
                     if let backend = writeRes.route?.backend {
-                        throw AirLiftPatchError.localDevUnavailable("[\(backend)] write '\(remotePath)': \(errMsg)")
+                        throw remoteOperationError("[\(backend)] write '\(remotePath)': \(errMsg)")
                     }
-                    throw AirLiftPatchError.localDevUnavailable(errMsg)
+                    throw remoteOperationError(errMsg)
                 }
 
                 writtenDescriptors.append((desc, entries[idx]))

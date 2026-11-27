@@ -257,6 +257,78 @@ pub unsafe extern "C" fn localdev_write_file(
     }
 }
 
+/// Sends a remove request for either `SERVICE_TYPE_DEVICE_AFC` (`/var/mobile/Media`) or `SERVICE_TYPE_HOUSE_ARREST`
+#[no_mangle]
+pub unsafe extern "C" fn localdev_mkdir(
+    service_type: i32,
+    bundle_id: *const c_char,
+    path: *const c_char,
+) -> *const c_char {
+    if path.is_null() {
+        return to_json_cstr(json!({
+            "success": false,
+            "error": "Thiếu đường dẫn thư mục"
+        }));
+    }
+    let path_str = CStr::from_ptr(path).to_str().unwrap_or("");
+    let b_id = if !bundle_id.is_null() {
+        CStr::from_ptr(bundle_id).to_str().unwrap_or("")
+    } else {
+        ""
+    };
+    let res = with_manager(|mgr| mgr.make_dir(service_type, b_id, path_str));
+    let route = with_manager(|mgr| mgr.last_airlift_route.clone());
+    match res {
+        Ok(mode) => to_json_cstr(json!({
+            "success": true,
+            "path": path_str,
+            "mode": mode,
+            "route": route
+        })),
+        Err(e) => to_json_cstr(json!({
+            "success": false,
+            "error": e,
+            "route": route
+        })),
+    }
+}
+
+/// Removes a file or recursive directory on either `SERVICE_TYPE_DEVICE_AFC` (`/var/mobile/Media`) or `SERVICE_TYPE_HOUSE_ARREST`
+#[no_mangle]
+pub unsafe extern "C" fn localdev_remove_path(
+    service_type: i32,
+    bundle_id: *const c_char,
+    path: *const c_char,
+) -> *const c_char {
+    if path.is_null() {
+        return to_json_cstr(json!({
+            "success": false,
+            "error": "Thiếu đường dẫn cần xóa"
+        }));
+    }
+    let path_str = CStr::from_ptr(path).to_str().unwrap_or("");
+    let b_id = if !bundle_id.is_null() {
+        CStr::from_ptr(bundle_id).to_str().unwrap_or("")
+    } else {
+        ""
+    };
+    let res = with_manager(|mgr| mgr.remove_path(service_type, b_id, path_str));
+    let route = with_manager(|mgr| mgr.last_airlift_route.clone());
+    match res {
+        Ok(mode) => to_json_cstr(json!({
+            "success": true,
+            "path": path_str,
+            "mode": mode,
+            "route": route
+        })),
+        Err(e) => to_json_cstr(json!({
+            "success": false,
+            "error": e,
+            "route": route
+        })),
+    }
+}
+
 /// Probes CoreDevice FileService (`controlcapacity` + `.data`) readiness over active RSD tunnel
 #[no_mangle]
 pub unsafe extern "C" fn localdev_fileservice_status(
