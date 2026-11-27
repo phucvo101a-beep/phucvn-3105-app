@@ -2156,6 +2156,7 @@ class SecuritySuiteTests(unittest.TestCase):
         self.assertIn("xpc.send_object(req_dict, false)", rsd)
         self.assertIn("self.root_id = self.root_id.wrapping_add(1).max(2);", rsd)
         self.assertIn("has_fd00_upgrade", mod)
+        self.assertIn("connect_service_event_handshake", rsd)
 
 def main():
     parser = argparse.ArgumentParser(description="Run 3105 5-Scenario Security Test Suite")

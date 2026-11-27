@@ -1419,7 +1419,7 @@ impl XpcMessage {
 }
 
 enum H2Frame {
-    Data { stream_id: u32, payload: Vec<u8> },
+    Data { stream_id: u32, end_stream: bool, payload: Vec<u8> },
     Headers,
     RstStream { stream_id: u32, error_code: u32 },
     Settings { stream_id: u32, flags: u8, initial_window: Option<u32> },
@@ -1444,7 +1444,7 @@ impl H2Frame {
         }
         let body = &buf[H2_FRAME_HEADER_LEN..total];
         let frame = match ftype {
-            0x00 => H2Frame::Data { stream_id, payload: body.to_vec() },
+            0x00 => H2Frame::Data { stream_id, end_stream: (flags & 0x01) != 0, payload: body.to_vec() },
             0x01 => H2Frame::Headers,
             0x03 => {
                 let error_code = if body.len() >= 4 {
@@ -1614,6 +1614,62 @@ impl<S: AsyncRead + AsyncWrite + Unpin + Send> RemoteXpcConn<S> {
         Ok(conn)
     }
 
+    /// Handshake for RemoteXPC `(event)` services (such as `untrusted.tunnelservice`),
+    /// which emit `ServiceVersion` immediately and reject a secondary empty root frame (`0x0201`).
+    pub async fn connect_service_event_handshake(mut inner: S) -> Result<Self, String> {
+        tokio::time::timeout(Duration::from_secs(5), inner.write_all(HTTP2_MAGIC))
+            .await
+            .map_err(|_| "HTTP/2 magic write timeout".to_string())?
+            .map_err(|e| format!("HTTP/2 magic write failed: {}", e))?;
+        inner.flush().await.map_err(|e| e.to_string())?;
+
+        let mut conn = Self {
+            inner,
+            recv_buf: Vec::new(),
+            cache: HashMap::new(),
+            partial_xpc: HashMap::new(),
+            conn_send_window: H2_DEFAULT_WINDOW,
+            stream_send_windows: HashMap::new(),
+            peer_initial_window: H2_DEFAULT_WINDOW,
+            root_id: 2,
+        };
+
+        conn.write_raw(&H2Frame::serialize_settings(&[(0x03, 100), (0x04, 1_048_576)], 0, 0))
+            .await?;
+        conn.write_raw(&H2Frame::serialize_window_update(0, 983_041))
+            .await?;
+        conn.open_stream(XPC_ROOT_CHANNEL).await?;
+        conn.send_channel(
+            XPC_ROOT_CHANNEL,
+            XpcMessage {
+                flags: 0x0000_0001,
+                message: Some(XpcValue::Dictionary(Vec::new())),
+            }
+            .encode(1),
+        )
+        .await?;
+
+        conn.open_stream(XPC_REPLY_CHANNEL).await?;
+        conn.send_channel(
+            XPC_REPLY_CHANNEL,
+            XpcMessage {
+                flags: 0x0040_0001, // InitHandshake | AlwaysSet
+                message: None,
+            }
+            .encode(1),
+        )
+        .await?;
+
+        for _ in 0..3 {
+            match tokio::time::timeout(Duration::from_millis(180), conn.pump()).await {
+                Ok(Ok(())) => {}
+                _ => break,
+            }
+        }
+
+        Ok(conn)
+    }
+
     async fn write_raw(&mut self, bytes: &[u8]) -> Result<(), String> {
         tokio::time::timeout(Duration::from_secs(5), self.inner.write_all(bytes))
             .await
@@ -1683,8 +1739,11 @@ impl<S: AsyncRead + AsyncWrite + Unpin + Send> RemoteXpcConn<S> {
                     ));
                 }
             }
-            H2Frame::Data { stream_id, payload } => {
+            H2Frame::Data { stream_id, end_stream, payload } => {
                 let len = payload.len() as u32;
+                if end_stream {
+                    eprintln!("localdev: RemoteXPC DATA END_STREAM on ch={} len={}", stream_id, len);
+                }
                 self.cache.entry(stream_id).or_default().push_back(payload);
                 if len > 0 {
                     let mut upd = H2Frame::serialize_window_update(0, len);
@@ -2659,7 +2718,7 @@ async fn establish_coredevice_proxy_tunnel(
         if let Some(rp) = rp_opt {
             let ut_attempt = async {
                 let s = outer.connect_raw_port(ut_info.port).await?;
-                let xpc = RemoteXpcConn::connect_and_handshake(s).await?;
+                let xpc = RemoteXpcConn::connect_service_event_handshake(s).await?;
                 let mut ctrl = RpPairingControlClient::from_remote_xpc(xpc).await?;
                 ctrl.consume_initial_service_version_on_ch1().await;
                 ctrl.attempt_pair_verify()
