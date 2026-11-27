@@ -2022,7 +2022,7 @@ class SecuritySuiteTests(unittest.TestCase):
         )
         # Verify recv_envelope actively sends handshake on SkipServiceVersion instead of pure passive wait
         rec_block = rsd_rs[rsd_rs.index("XpcRpFrame::SkipServiceVersion(ver)"):rsd_rs.index("Exceeded ServiceVersion metadata XPC frames")]
-        self.assertIn("self.send_plain(handshake_payload).await?", rec_block)
+        self.assertIn("skipping metadata frame without duplicate handshake", rec_block)
 
     def test_21_app_group_lockdown_strategy4_and_direct_known_path_mode(self):
         models_sw = (REPO_ROOT / "ThreeOneOSFive" / "helpers" / "PatchProjectModels.swift").read_text("utf-8")
@@ -2146,6 +2146,15 @@ class SecuritySuiteTests(unittest.TestCase):
         self.assertIn("static var shouldUseWorseQuery: Bool", container_sw)
         self.assertIn("static func ensureWorseQueryGrant", container_sw)
         self.assertIn("MCMContainerPathForIdentifier(2, bundleID, false, &mcmLookupError)", container_sw)
+
+
+
+    def test_23_rppairing_xpc_dictionary_envelope_and_proxy_checkin(self):
+        rsd_rs = (REPO_ROOT / "sec_core" / "src" / "localdev" / "rsd.rs").read_text("utf-8")
+        self.assertIn("fn json_to_xpc_rppairing_value", rsd_rs)
+        self.assertIn('("value".to_string(), xpc_inner)', rsd_rs)
+        self.assertIn("xpc.send_object(req_dict, true)", rsd_rs)
+        self.assertIn("drained before handshake", rsd_rs)
 
 
 def main():

@@ -490,6 +490,46 @@ fn decode_rppairing_xpc_frame(val: &XpcValue) -> Result<XpcRpFrame, RpProtocolEr
     )))
 }
 
+fn json_to_xpc_rppairing_value(val: &JsonValue, parent_key: Option<&str>) -> XpcValue {
+    match val {
+        JsonValue::Null => XpcValue::Null,
+        JsonValue::Bool(b) => XpcValue::Bool(*b),
+        JsonValue::Number(n) => {
+            if let Some(i) = n.as_i64() {
+                XpcValue::Int64(i)
+            } else if let Some(u) = n.as_u64() {
+                XpcValue::UInt64(u)
+            } else if let Some(f) = n.as_f64() {
+                XpcValue::Double(f)
+            } else {
+                XpcValue::Null
+            }
+        }
+        JsonValue::String(s) => {
+            if matches!(parent_key, Some("data" | "_0")) && s.len() >= 8 && (s.len() % 4 == 0) {
+                if let Ok(decoded) = B64.decode(s.as_bytes()) {
+                    if !decoded.is_empty() {
+                        return XpcValue::Data(decoded);
+                    }
+                }
+            }
+            XpcValue::String(s.clone())
+        }
+        JsonValue::Array(arr) => XpcValue::Array(
+            arr.iter()
+                .map(|item| json_to_xpc_rppairing_value(item, None))
+                .collect(),
+        ),
+        JsonValue::Object(map) => {
+            let mut entries = Vec::with_capacity(map.len());
+            for (k, v) in map {
+                entries.push((k.clone(), json_to_xpc_rppairing_value(v, Some(k.as_str()))));
+            }
+            XpcValue::Dictionary(entries)
+        }
+    }
+}
+
 impl RpPairingControlClient {
     fn derive_main_ciphers(key: &[u8]) -> Result<(ChaCha20Poly1305, ChaCha20Poly1305), String> {
         let hk_c = Hkdf::<Sha512>::new(None, key);
@@ -537,23 +577,26 @@ impl RpPairingControlClient {
         let RpControlTransport::RemoteXpc(ref mut xpc) = self.transport else {
             return;
         };
-        if let Ok(Ok((ch, xpc_val))) =
-            tokio::time::timeout(Duration::from_millis(850), xpc.recv_any()).await
-        {
+        for attempt in 0..3 {
+            let wait_ms = if attempt == 0 { 600 } else { 120 };
+            let Ok(Ok((ch, xpc_val))) =
+                tokio::time::timeout(Duration::from_millis(wait_ms), xpc.recv_any()).await
+            else {
+                break;
+            };
             match decode_rppairing_xpc_frame(&xpc_val) {
                 Ok(XpcRpFrame::SkipServiceVersion(ver)) => {
                     self.last_service_version = ver;
                     eprintln!(
-                        "localdev: untrusted.tunnelservice ch={} ServiceVersion={:?} — sending first RemotePairing handshake immediately",
+                        "localdev: untrusted.tunnelservice ch={} ServiceVersion={:?} drained before handshake",
                         ch, ver
                     );
                 }
                 Ok(XpcRpFrame::Payload(json_val)) => {
                     self.prefetched_envelope = Some(json_val);
+                    break;
                 }
-                Err(e) => {
-                    let _ = e;
-                }
+                Err(_) => break,
             }
         }
     }
@@ -596,14 +639,15 @@ impl RpPairingControlClient {
                 Ok(())
             }
             RpControlTransport::RemoteXpc(xpc) => {
+                let xpc_inner = json_to_xpc_rppairing_value(&envelope, None);
                 let req_dict = XpcValue::Dictionary(vec![
                     (
                         "mangledTypeName".to_string(),
                         XpcValue::String("RemotePairing.ControlChannelMessageEnvelope".to_string()),
                     ),
-                    ("value".to_string(), XpcValue::Data(payload_bytes.to_vec())),
+                    ("value".to_string(), xpc_inner),
                 ]);
-                tokio::time::timeout(Duration::from_secs(6), xpc.send_object(req_dict, false))
+                tokio::time::timeout(Duration::from_secs(6), xpc.send_object(req_dict, true))
                     .await
                     .map_err(|_| {
                         RpProtocolError::Transport(LockdownError::with_errno(
@@ -706,13 +750,9 @@ impl RpPairingControlClient {
                         XpcRpFrame::SkipServiceVersion(ver) => {
                             self.last_service_version = ver;
                             eprintln!(
-                                "localdev: untrusted.tunnelservice ServiceVersion={:?} on ch={} — actively sending RemotePairing handshake before reading next XPC packet",
+                                "localdev: untrusted.tunnelservice ServiceVersion={:?} on ch={} - skipping metadata frame without duplicate handshake",
                                 ver, ch
                             );
-                            // Actively send initial RemotePairing handshake on ch=1 right after receiving ServiceVersion
-                            if let Some(handshake_payload) = self.last_outbound_handshake.clone() {
-                                self.send_plain(handshake_payload).await?;
-                            }
                             continue;
                         }
                     }
@@ -2692,7 +2732,7 @@ async fn establish_coredevice_proxy_tunnel(
             let s = outer.connect_raw_port(proxy_info.port).await?;
             match CoreDeviceProxy::new(s).await {
                 Ok(proxy) => complete_coredevice_proxy_tunnel(proxy, uuid_seed, fallback_udid).await,
-                Err(first_err) if !proxy_info.uses_remote_xpc => {
+                Err(first_err) => {
                     let mut s2 = outer.connect_raw_port(proxy_info.port).await?;
                     if let Err(checkin_err) = async_rsd_checkin(&mut s2).await {
                         return Err(format!("{} | checkin fallback: {}", first_err, checkin_err));
