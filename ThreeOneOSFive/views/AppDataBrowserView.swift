@@ -242,6 +242,21 @@ struct AppDataBrowserView: View {
                 LocalDevStatusCard()
                     .padding(.bottom, 2)
 
+                VStack(alignment: .leading, spacing: 2) {
+                    Text("TRUYỀN TỆP WI-FI LAN (3105 AIRLIFT)")
+                        .font(.system(size: 10, weight: .heavy, design: .rounded))
+                        .tracking(1.25)
+                        .foregroundStyle(AppTheme.accentSoft)
+                    Text("Gửi nhanh .ipa, .3105, Pairing từ trình duyệt PC và tải file đã trích xuất về máy tính")
+                        .font(.system(size: 10, weight: .medium))
+                        .foregroundStyle(AppTheme.subduedText)
+                }
+                .padding(.horizontal, 3)
+                .padding(.top, 2)
+
+                AirliftServerCard()
+                    .padding(.bottom, 2)
+
                 appDataScannerSection
 
                 if !apps.isEmpty {

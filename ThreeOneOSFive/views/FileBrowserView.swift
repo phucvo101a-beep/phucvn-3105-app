@@ -9,6 +9,7 @@ struct FileBrowserView: View {
     @Environment(\.horizontalSizeClass) private var horizontalSizeClass
     @EnvironmentObject private var patchDraftCoordinator: PatchDraftCoordinator
     @EnvironmentObject private var fileOperationCoordinator: FileOperationCoordinator
+    @ObservedObject private var backupExtractor = BackupExtractorService.shared
     let containerPath: String
     let title: String
     let bundleID: String?
@@ -20,6 +21,7 @@ struct FileBrowserView: View {
     @FocusState private var isSearchFocused: Bool
     @State private var isLoadingEntries = true
     @State private var remoteErrorMessage: String?
+    @State private var createZipOnBackup = true
     @State private var hasGranted = false
     @State private var pendingReplacementRequest: FileReplacementRequest?
     @State private var replacementRequest: FileReplacementRequest?
@@ -614,9 +616,13 @@ struct FileBrowserView: View {
     }
 
     private var fileEmptyView: some View {
-        VStack(spacing: 10) {
+        VStack(spacing: 12) {
             if let remoteErr = remoteErrorMessage, !remoteErr.isEmpty {
                 let isSandboxLocked = remoteErr.localizedCaseInsensitiveContains("SANDBOX_LOCKED")
+                let targetBundleID = LocalDevVirtualPath.parse(currentPath)?.bundleID ?? bundleID ?? ""
+                let existingDir = targetBundleID.isEmpty ? nil : backupExtractor.existingExtractedDirectory(for: targetBundleID)
+                let isExtractingThis = backupExtractor.isRunning && backupExtractor.activeBundleID == targetBundleID
+
                 Image(systemName: isSandboxLocked ? "lock.shield.fill" : "exclamationmark.triangle.fill")
                     .font(.system(size: AppTheme.emptyIconSize, weight: .light))
                     .foregroundStyle(.orange)
@@ -626,13 +632,114 @@ struct FileBrowserView: View {
                     .multilineTextAlignment(.center)
                 Text(
                     isSandboxLocked
-                        ? "iOS chỉ cho phép HouseArrest đọc dữ liệu của app bật UIFileSharingEnabled hoặc app ký Developer. Game và app App Store thông thường vẫn hiển thị trong danh sách nhưng bị hệ điều hành khóa container."
+                        ? "iOS chỉ cho phép HouseArrest đọc dữ liệu của app bật UIFileSharingEnabled hoặc app ký Developer. Game và app App Store thông thường bị khóa container bởi cơ chế bảo mật Sandbox."
                         : remoteErr
                 )
                 .font(.caption)
                 .foregroundStyle(AppTheme.subduedText)
                 .multilineTextAlignment(.center)
                 .padding(.horizontal, 12)
+
+                if isSandboxLocked && !targetBundleID.isEmpty {
+                    VStack(spacing: 10) {
+                        if isExtractingThis {
+                            VStack(spacing: 6) {
+                                ProgressView()
+                                    .tint(AppTheme.accent)
+                                Text(backupExtractor.statusText)
+                                    .font(.caption.weight(.semibold))
+                                    .foregroundStyle(.white)
+                                    .multilineTextAlignment(.center)
+                                Text("\(backupExtractor.filesReceived) tệp · \(ByteCountFormatter.string(fromByteCount: Int64(backupExtractor.bytesReceived), countStyle: .file))")
+                                    .font(.system(size: 11, design: .monospaced))
+                                    .foregroundStyle(AppTheme.accentSoft)
+                                Button("Hủy trích xuất") {
+                                    backupExtractor.cancel()
+                                }
+                                .font(.caption.weight(.bold))
+                                .foregroundStyle(.white)
+                                .padding(.horizontal, 14)
+                                .padding(.vertical, 7)
+                                .background(Color.red.opacity(0.35), in: Capsule())
+                            }
+                            .padding(12)
+                            .frame(maxWidth: 360)
+                            .background(AppTheme.consoleBackground, in: RoundedRectangle(cornerRadius: 14, style: .continuous))
+                        } else {
+                            Toggle("Đóng gói thêm file .zip trong Documents", isOn: $createZipOnBackup)
+                                .font(.caption.weight(.medium))
+                                .foregroundStyle(AppTheme.subduedText)
+                                .tint(AppTheme.accent)
+                                .frame(maxWidth: 320)
+
+                            Button {
+                                backupExtractor.startExtraction(bundleID: targetBundleID, createZip: createZipOnBackup)
+                            } label: {
+                                HStack(spacing: 7) {
+                                    Image(systemName: "externaldrive.badge.timemachine")
+                                        .font(.system(size: 13, weight: .bold))
+                                    Text("Trích xuất dữ liệu qua Backup (mobilebackup2)")
+                                        .font(.system(size: 12.5, weight: .bold, design: .rounded))
+                                }
+                                .foregroundStyle(.black)
+                                .padding(.horizontal, 16)
+                                .padding(.vertical, 11)
+                                .background(AppTheme.accent, in: Capsule())
+                            }
+                            .buttonStyle(AppPressableStyle())
+                            .disabled(backupExtractor.isRunning)
+                        }
+
+                        if let errMsg = backupExtractor.errorMessage,
+                           backupExtractor.activeBundleID == targetBundleID {
+                            Text(errMsg)
+                                .font(.caption)
+                                .foregroundStyle(.orange)
+                                .multilineTextAlignment(.center)
+                                .padding(.horizontal, 12)
+                        }
+
+                        if let completed = backupExtractor.lastResult,
+                           completed.bundleID == targetBundleID {
+                            VStack(spacing: 6) {
+                                Text(completed.warningMessage ?? "Đã trích xuất \(completed.extractedFileCount) tệp (\(ByteCountFormatter.string(fromByteCount: completed.totalBytes, countStyle: .file)))")
+                                    .font(.caption.weight(.semibold))
+                                    .foregroundStyle(completed.extractedFileCount > 0 ? AppTheme.success : .orange)
+                                    .multilineTextAlignment(.center)
+                                if let zipURL = completed.zipArchiveURL {
+                                    ShareLink(item: zipURL) {
+                                        Label("Chia sẻ / Tải \(zipURL.lastPathComponent)", systemImage: "square.and.arrow.up")
+                                            .font(.caption.weight(.bold))
+                                            .foregroundStyle(.black)
+                                            .padding(.horizontal, 13)
+                                            .padding(.vertical, 7)
+                                            .background(AppTheme.success, in: Capsule())
+                                    }
+                                }
+                            }
+                        }
+
+                        if let openDir = existingDir {
+                            Button {
+                                remoteErrorMessage = nil
+                                currentPath = openDir.path
+                                load()
+                            } label: {
+                                HStack(spacing: 6) {
+                                    Image(systemName: "folder.fill")
+                                    Text("Mở thư mục Backup đã trích xuất")
+                                }
+                                .font(.caption.weight(.bold))
+                                .foregroundStyle(.white)
+                                .padding(.horizontal, 14)
+                                .padding(.vertical, 8)
+                                .background(Color.white.opacity(0.12), in: Capsule())
+                            }
+                            .buttonStyle(AppPressableStyle())
+                        }
+                    }
+                    .padding(.top, 4)
+                }
             } else {
                 Image(systemName: "folder")
                     .font(.system(size: AppTheme.emptyIconSize, weight: .light))

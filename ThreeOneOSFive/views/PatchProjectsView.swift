@@ -21,6 +21,7 @@ struct PatchProjectsView: View {
     @State private var showImporter = false
     @State private var showWallpaperImporter = false
     @State private var showCleaner = false
+    @State private var showIpaPatcher = false
     @StateObject private var proxyManager = ProxyManager.shared
     @ObservedObject private var keyAuth = KeyAuthManager.shared
     @State private var selectedModCategory: ProxyModCategory = .aim
@@ -144,6 +145,16 @@ struct PatchProjectsView: View {
                             .listRowBackground(AppTheme.consoleBackground)
                             .listRowSeparator(.hidden)
                             .listRowInsets(EdgeInsets(top: 6, leading: 18, bottom: 6, trailing: 18))
+
+                        ipaFileSharingRow
+                            .listRowBackground(AppTheme.consoleBackground)
+                            .listRowSeparator(.hidden)
+                            .listRowInsets(EdgeInsets(top: 6, leading: 18, bottom: 6, trailing: 18))
+
+                        AirliftServerCard()
+                            .listRowBackground(Color.clear)
+                            .listRowSeparator(.hidden)
+                            .listRowInsets(EdgeInsets(top: 6, leading: 18, bottom: 6, trailing: 18))
                     }
 
                     Section("PROXY") {
@@ -263,6 +274,9 @@ struct PatchProjectsView: View {
             }
             .sheet(isPresented: $showCleaner) {
                 CleanerView()
+            }
+            .sheet(isPresented: $showIpaPatcher) {
+                IpaFileSharingToolView()
             }
             .sheet(isPresented: $showProxyManager) {
                 ProxyManagerView()
@@ -387,6 +401,31 @@ struct PatchProjectsView: View {
                         .font(.body.weight(.semibold))
                         .foregroundStyle(.primary)
                     Text(language.text("repository.cleaner_subtitle"))
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
+                Spacer()
+                Image(systemName: "chevron.right")
+                    .font(.caption.weight(.semibold))
+                    .foregroundStyle(.tertiary)
+                    .accessibilityHidden(true)
+            }
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+    }
+
+    private var ipaFileSharingRow: some View {
+        Button {
+            showIpaPatcher = true
+        } label: {
+            HStack(spacing: 12) {
+                AppRowIcon(systemName: "doc.badge.gearshape.fill", tint: AppTheme.accentSoft)
+                VStack(alignment: .leading, spacing: 3) {
+                    Text("Mở khóa File Sharing cho IPA (Chuẩn bị ký chứng chỉ)")
+                        .font(.body.weight(.semibold))
+                        .foregroundStyle(.primary)
+                    Text("Bật UIFileSharingEnabled & LSSupportsOpeningDocumentsInPlace trong Info.plist trước khi ký")
                         .font(.caption)
                         .foregroundStyle(.secondary)
                 }
