@@ -116,6 +116,12 @@ impl Default for LocalDevManager {
     }
 }
 
+enum ContainerOpenOutcome<T> {
+    SessionOpenedOpOk(T, String),
+    SessionOpenedOpErr(String, String),
+    ContainerRejected(String),
+}
+
 impl LocalDevManager {
     pub fn new() -> Self {
         Self {
@@ -702,23 +708,20 @@ impl LocalDevManager {
         ctx: &FileServiceTargetContext,
         rel_path: &str,
         op: impl Fn(AfcClient, &str) -> Result<T, String>,
-    ) -> Result<T, String> {
+    ) -> ContainerOpenOutcome<T> {
         let Some(ref raw_root) = ctx.data_container_url else {
-            return Err("Không có DataContainerURL để thăm dò afc.shim.remote".to_string());
+            return ContainerOpenOutcome::ContainerRejected(
+                "Không có DataContainerURL để thăm dò afc.shim.remote".to_string(),
+            );
         };
         let container_root = container_path_from_url(raw_root);
         if container_root.is_empty() {
-            return Err("DataContainerURL rỗng".to_string());
+            return ContainerOpenOutcome::ContainerRejected("DataContainerURL rỗng".to_string());
         }
         let stripped_private = container_root
             .strip_prefix("/private")
-            .unwrap_or(container_root.as_str());
-        let sub = rel_path.trim().trim_start_matches('/');
-        let full_target = if sub.is_empty() {
-            stripped_private.to_string()
-        } else {
-            format!("{}/{}", stripped_private.trim_end_matches('/'), sub)
-        };
+            .unwrap_or(container_root.as_str())
+            .trim_end_matches('/');
 
         let afc_rsd = obfstr!("com.apple.afc.shim.remote").to_string();
         let afc2_svc = obfstr!("com.apple.afc2").to_string();
@@ -728,16 +731,47 @@ impl LocalDevManager {
             for svc in [afc_rsd.as_str(), afc2_svc.as_str(), afc_classic.as_str()] {
                 if let Ok(s) = sess.open_checked_in_service(&[svc]) {
                     let mut afc = AfcClient::new(LockdownStream::RsdTunnel(s));
-                    // Verify AFC is NOT merely returning /var/mobile/Media; container root must actually exist
-                    if afc.get_file_info(stripped_private).is_ok() {
-                        if let Ok(res) = op(afc, &full_target) {
-                            return Ok(res);
+                    let matched_root = [stripped_private, container_root.trim_end_matches('/')]
+                        .into_iter()
+                        .find(|cand| !cand.is_empty() && afc.get_file_info(cand).is_ok());
+
+                    if let Some(verified_root) = matched_root {
+                        // Container root check passed -> session is genuinely opened on this backend;
+                        // any failure inside `op` is a file-level AFC error, NEVER `sandbox_locked`!
+                        let backend_label = if svc == afc2_svc {
+                            "afc2".to_string()
+                        } else {
+                            "afc.shim.remote".to_string()
+                        };
+                        let mut sub = rel_path.trim().trim_start_matches('/').to_string();
+                        if sub == "Documents" || sub.starts_with("Documents/") {
+                            let probe_docs = format!("{}/Documents", verified_root);
+                            if afc.get_file_info(&probe_docs).is_err() {
+                                sub = sub
+                                    .strip_prefix("Documents")
+                                    .unwrap_or("")
+                                    .trim_start_matches('/')
+                                    .to_string();
+                            }
                         }
+                        let full_target = if sub.is_empty() {
+                            verified_root.to_string()
+                        } else {
+                            format!("{}/{}", verified_root, sub)
+                        };
+                        return match op(afc, &full_target) {
+                            Ok(res) => ContainerOpenOutcome::SessionOpenedOpOk(res, backend_label),
+                            Err(afc_err) => {
+                                ContainerOpenOutcome::SessionOpenedOpErr(afc_err, backend_label)
+                            }
+                        };
                     }
                 }
             }
         }
-        Err("afc.shim.remote bị giới hạn Sandbox Media".to_string())
+        ContainerOpenOutcome::ContainerRejected(
+            "afc.shim.remote bị giới hạn Sandbox Media".to_string(),
+        )
     }
 
     fn record_airlift_route(
@@ -775,13 +809,14 @@ impl LocalDevManager {
             detail,
         };
         eprintln!(
-            "patch.airlift attempt={} fallback={} reason={} backend={} bundle={} path={}",
+            "patch.airlift attempt={} fallback={} reason={} backend={} bundle={} path={} detail={}",
             info.attempt,
             info.fallback,
             info.reason.as_deref().unwrap_or("none"),
             info.backend,
             info.bundle_id,
-            info.path
+            info.path,
+            info.detail.as_deref().unwrap_or("ok")
         );
         self.last_airlift_route = Some(info.clone());
         info
@@ -833,19 +868,21 @@ impl LocalDevManager {
             }
         }
 
-        // Step 2 (fallback=true): Downgrade sequentially -> HouseArrest (VendContainer -> VendDocuments) -> afc.shim.remote
-        let ha_res = self.try_house_arrest_only(bundle_id, |afc, mode| {
-            let val = afc_op(afc, mode.clone(), path)?;
-            Ok((val, mode))
+        // Step 2 (fallback=true): Downgrade sequentially -> HouseArrest (VendContainer -> VendDocuments) -> afc.shim.remote.
+        // Distinguish container-level refusal (`SANDBOX_LOCKED_APPSTORE`) from post-open AFC file errors
+        // (`ObjectNotFound`, `PermDenied`, `TooMuchData`, `InvalidArg`, etc.).
+        let ha_outcome = self.try_house_arrest_only(bundle_id, |afc, mode| {
+            let backend_label = format!("house_arrest.{}", mode);
+            (afc_op(afc, mode, path), backend_label)
         });
 
-        match ha_res {
-            Ok((val, mode)) => {
+        match ha_outcome {
+            ContainerOpenOutcome::SessionOpenedOpOk(val, backend_label) => {
                 let route = self.record_airlift_route(
                     true,
                     true,
                     Some(fs_reason),
-                    format!("house_arrest.{}", mode),
+                    backend_label,
                     &ctx,
                     path,
                     cap,
@@ -853,26 +890,56 @@ impl LocalDevManager {
                 );
                 Ok((val, route))
             }
-            Err(ha_err) => {
+            ContainerOpenOutcome::SessionOpenedOpErr(afc_err, backend_label) => {
+                self.record_airlift_route(
+                    true,
+                    true,
+                    Some(fs_reason),
+                    backend_label,
+                    &ctx,
+                    path,
+                    cap,
+                    Some(afc_err.clone()),
+                );
+                Err(afc_err)
+            }
+            ContainerOpenOutcome::ContainerRejected(ha_err) => {
                 if is_rsd {
-                    if let Ok(val) = self.try_afc_container_fallback(&ctx, path, |afc, resolved_path| {
+                    match self.try_afc_container_fallback(&ctx, path, |afc, resolved_path| {
                         afc_op(afc, "afc.shim.remote".to_string(), resolved_path)
                     }) {
-                        let route = self.record_airlift_route(
-                            true,
-                            true,
-                            Some(fs_reason),
-                            "afc.shim.remote".to_string(),
-                            &ctx,
-                            path,
-                            cap,
-                            Some(fs_detail),
-                        );
-                        return Ok((val, route));
+                        ContainerOpenOutcome::SessionOpenedOpOk(val, backend_label) => {
+                            let route = self.record_airlift_route(
+                                true,
+                                true,
+                                Some(fs_reason),
+                                backend_label,
+                                &ctx,
+                                path,
+                                cap,
+                                Some(fs_detail),
+                            );
+                            return Ok((val, route));
+                        }
+                        ContainerOpenOutcome::SessionOpenedOpErr(afc_err, backend_label) => {
+                            self.record_airlift_route(
+                                true,
+                                true,
+                                Some(fs_reason),
+                                backend_label,
+                                &ctx,
+                                path,
+                                cap,
+                                Some(afc_err.clone()),
+                            );
+                            return Err(afc_err);
+                        }
+                        ContainerOpenOutcome::ContainerRejected(_) => {}
                     }
                 }
 
-                // Step 3: Both CoreDevice FileService AND HouseArrest (+ afc.shim.remote) failed -> SandboxLocked
+                // Step 3: ONLY reached when opening HouseArrest (`VendContainer` & `VendDocuments`)
+                // AND opening `afc.shim.remote` container root both failed at container level.
                 let combined_err = format!(
                     "{} [patch.airlift attempt=true fallback=true reason={} | fileservice: {}]",
                     ha_err, fs_reason, fs_detail
@@ -895,9 +962,12 @@ impl LocalDevManager {
     fn try_house_arrest_only<T>(
         &mut self,
         bundle_id: &str,
-        op: impl Fn(AfcClient, String) -> Result<T, String>,
-    ) -> Result<T, String> {
-        let is_rsd = self.ensure_backend()?;
+        op: impl Fn(AfcClient, String) -> (Result<T, String>, String),
+    ) -> ContainerOpenOutcome<T> {
+        let is_rsd = match self.ensure_backend() {
+            Ok(v) => v,
+            Err(e) => return ContainerOpenOutcome::ContainerRejected(e),
+        };
         let ha_rsd = obfstr!("com.apple.mobile.house_arrest.shim.remote").to_string();
         let ha_classic = obfstr!("com.apple.mobile.house_arrest").to_string();
 
@@ -912,39 +982,65 @@ impl LocalDevManager {
                 )
             };
 
-            let sess = self
-                .active_rsd
-                .as_ref()
-                .ok_or_else(|| "RSD session unavailable".to_string())?;
-            let first = open_pair(sess).and_then(|(afc, mode)| op(afc, mode));
-            match first {
-                Ok(v) => return Ok(v),
-                Err(err) if err.contains(ERR_SANDBOX_LOCKED_APPSTORE) => return Err(err),
+            let opened = {
+                let Some(ref sess) = self.active_rsd else {
+                    return ContainerOpenOutcome::ContainerRejected(
+                        "RSD session unavailable".to_string(),
+                    );
+                };
+                open_pair(sess)
+            };
+
+            match opened {
+                Ok((afc, mode)) => {
+                    let (res, backend) = op(afc, mode);
+                    return match res {
+                        Ok(v) => ContainerOpenOutcome::SessionOpenedOpOk(v, backend),
+                        Err(e) => ContainerOpenOutcome::SessionOpenedOpErr(e, backend),
+                    };
+                }
+                Err(err) if err.contains(ERR_SANDBOX_LOCKED_APPSTORE) => {
+                    return ContainerOpenOutcome::ContainerRejected(err);
+                }
                 Err(err) => {
                     if self.reconnect_rsd_once().is_ok() {
                         if let Some(ref new_sess) = self.active_rsd {
                             if let Ok((afc, mode)) = open_pair(new_sess) {
-                                return op(afc, mode);
+                                let (res, backend) = op(afc, mode);
+                                return match res {
+                                    Ok(v) => ContainerOpenOutcome::SessionOpenedOpOk(v, backend),
+                                    Err(e) => ContainerOpenOutcome::SessionOpenedOpErr(e, backend),
+                                };
                             }
                         }
                     }
-                    return Err(err);
+                    return ContainerOpenOutcome::ContainerRejected(err);
                 }
             }
         }
 
-        let lockdown_pairing = self
+        let Some(lockdown_pairing) = self
             .active_pairing
             .as_ref()
             .and_then(|p| p.lockdown.as_ref())
-            .ok_or_else(|| "Chưa có pairing file".to_string())?;
-        let (afc, mode) = HouseArrestClient::connect_app_container(
+        else {
+            return ContainerOpenOutcome::ContainerRejected("Chưa có pairing file".to_string());
+        };
+        match HouseArrestClient::connect_app_container(
             &self.host,
             self.port,
             lockdown_pairing,
             bundle_id,
-        )?;
-        op(afc, mode)
+        ) {
+            Ok((afc, mode)) => {
+                let (res, backend) = op(afc, mode);
+                match res {
+                    Ok(v) => ContainerOpenOutcome::SessionOpenedOpOk(v, backend),
+                    Err(e) => ContainerOpenOutcome::SessionOpenedOpErr(e, backend),
+                }
+            }
+            Err(err) => ContainerOpenOutcome::ContainerRejected(err),
+        }
     }
 
     fn with_afc_client<T>(
@@ -1169,7 +1265,7 @@ impl LocalDevManager {
             |client, ctx, p| client.fileservice_mkdir(ctx, p),
             |mut afc, mode, p| {
                 if mode == "afc.shim.remote" {
-                    afc.make_dir(p)
+                    afc.make_dir_recursive(p)
                 } else {
                     HouseArrestClient::make_dir_with_afc(afc, &mode, p)
                 }

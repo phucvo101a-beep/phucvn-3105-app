@@ -30,6 +30,45 @@ pub const AFC_FOPEN_RDAPPEND: u64 = 0x00000006;
 
 pub const AFC_CHUNK_SIZE: usize = 128 * 1024; // 128 KB buffer
 
+/// Maps Apple AFC status code (`0x01`..`0x17`) to canonical diagnostic name
+pub fn afc_status_name(status: u64) -> &'static str {
+    match status {
+        0 => "Success",
+        1 => "UnknownError",
+        2 => "OpHeaderInvalid",
+        3 => "NoResources",
+        4 => "ReadError",
+        5 => "WriteError",
+        6 => "UnknownPacketType",
+        7 => "InvalidArg",
+        8 => "ObjectNotFound",
+        9 => "ObjectIsDir",
+        10 => "PermDenied",
+        11 => "ServiceNotConnected",
+        12 => "OpTimeout",
+        13 => "TooMuchData",
+        14 => "EndOfData",
+        15 => "OpNotSupported",
+        16 => "ObjectExists",
+        17 => "ObjectBusy",
+        18 => "NoSpaceLeft",
+        19 => "OpWouldBlock",
+        20 => "IoError",
+        21 => "OpInterrupted",
+        22 => "OpInProgress",
+        23 => "InternalError",
+        _ => "UnknownStatus",
+    }
+}
+
+pub fn is_afc_not_found(err: &str) -> bool {
+    err.contains("ObjectNotFound") || err.contains("0x00000008")
+}
+
+pub fn is_afc_already_exists(err: &str) -> bool {
+    err.contains("ObjectExists") || err.contains("0x00000010")
+}
+
 pub struct AfcClient {
     stream: LockdownStream,
     packet_seq: u64,
@@ -115,7 +154,12 @@ impl AfcClient {
                 resp_payload[4], resp_payload[5], resp_payload[6], resp_payload[7],
             ]);
             if status != 0 {
-                return Err(format!("AFC returned error status: 0x{:08x}", status));
+                return Err(format!(
+                    "AFC {} (0x{:08x}) on op 0x{:02x}",
+                    afc_status_name(status),
+                    status,
+                    op
+                ));
             }
         }
 
@@ -236,21 +280,56 @@ impl AfcClient {
         for dir in &parts[..parts.len() - 1] {
             acc.push('/');
             acc.push_str(dir);
-            let _ = self.make_dir(&acc);
+            if let Err(e) = self.make_dir(&acc) {
+                if !is_afc_already_exists(&e) {
+                    // Continue creating deeper components or let final file_open report concrete error
+                }
+            }
         }
     }
 
-    /// Writes an entire file in chunks
+    /// Ensures parent directories exist then creates `path` idempotently (ignoring `ObjectExists` and `"/"`).
+    pub fn make_dir_recursive(&mut self, path: &str) -> Result<(), String> {
+        let trimmed = path.trim().trim_start_matches('/');
+        if trimmed.is_empty() {
+            return Ok(());
+        }
+        let mut acc = String::new();
+        for dir in trimmed.split('/').filter(|s| !s.is_empty()) {
+            acc.push('/');
+            acc.push_str(dir);
+            if let Err(e) = self.make_dir(&acc) {
+                if !is_afc_already_exists(&e) {
+                    return Err(e);
+                }
+            }
+        }
+        Ok(())
+    }
+
+    /// Writes an entire file safely over AFC: creates parents, removes old locked file (`remove_path`,
+    /// ignoring `ObjectNotFound`), opens with `AFC_FOPEN_WRONLY`, and streams in 128 KB chunks (`AFC_CHUNK_SIZE`)
+    /// so `TooMuchData` cannot trigger over RSD/afc.shim.remote.
     pub fn write_file_full(&mut self, path: &str, data: &[u8]) -> Result<(), String> {
         self.ensure_parent_dirs(path);
-        let handle = self.file_open(path, AFC_FOPEN_WRONLY)?;
 
-        for chunk in data.chunks(AFC_CHUNK_SIZE) {
-            self.dispatch(AFC_OP_WRITE_FILE, &handle.to_le_bytes(), chunk)?;
+        if let Err(err) = self.remove_path(path) {
+            if !is_afc_not_found(&err) {
+                eprintln!("afc: remove_path '{}' before WrOnly -> {}", path, err);
+            }
         }
 
-        self.file_close(handle)?;
-        Ok(())
+        let handle = self.file_open(path, AFC_FOPEN_WRONLY)?;
+        let mut write_res: Result<(), String> = Ok(());
+        for chunk in data.chunks(AFC_CHUNK_SIZE) {
+            if let Err(err) = self.dispatch(AFC_OP_WRITE_FILE, &handle.to_le_bytes(), chunk) {
+                write_res = Err(err);
+                break;
+            }
+        }
+        let close_res = self.file_close(handle);
+        write_res?;
+        close_res
     }
 
     /// Creates a directory

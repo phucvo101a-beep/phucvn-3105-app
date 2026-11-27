@@ -1662,6 +1662,60 @@ class SecuritySuiteTests(unittest.TestCase):
         pbx = (REPO_ROOT / "ThreeOneOSFive.xcodeproj" / "project.pbxproj").read_text("utf-8")
         self.assertIn("AirLiftPatchTransaction.swift", pbx)
 
+    # -----------------------------------------------------------------------
+    # SCENARIO 15: AFC Error Separation, VendDocuments Normalization & 128KB Chunks
+    # -----------------------------------------------------------------------
+    def test_15_afc_error_separation_vend_documents_and_128kb_chunks(self):
+        afc_rs = (REPO_ROOT / "sec_core" / "src" / "localdev" / "afc_client.rs").read_text("utf-8")
+        for sym in (
+            "pub const AFC_CHUNK_SIZE: usize = 128 * 1024;",
+            "pub fn afc_status_name",
+            "\"ObjectNotFound\"",
+            "\"PermDenied\"",
+            "\"TooMuchData\"",
+            "\"InvalidArg\"",
+            "\"ObjectExists\"",
+            "pub fn is_afc_not_found",
+            "pub fn make_dir_recursive",
+            "self.remove_path(path)",
+            "AFC_FOPEN_WRONLY",
+            "data.chunks(AFC_CHUNK_SIZE)",
+        ):
+            self.assertIn(sym, afc_rs)
+
+        ha_rs = (REPO_ROOT / "sec_core" / "src" / "localdev" / "house_arrest.rs").read_text("utf-8")
+        for sym in (
+            "pub fn root_is_direct_documents",
+            "contentcache",
+            "pub fn normalize_house_arrest_path",
+            "direct_documents_root",
+            "make_dir_recursive",
+        ):
+            self.assertIn(sym, ha_rs)
+
+        mod_rs = (REPO_ROOT / "sec_core" / "src" / "localdev" / "mod.rs").read_text("utf-8")
+        for sym in (
+            "enum ContainerOpenOutcome",
+            "SessionOpenedOpOk",
+            "SessionOpenedOpErr",
+            "ContainerRejected",
+            "ContainerOpenOutcome::SessionOpenedOpErr(afc_err, backend_label)",
+        ):
+            self.assertIn(sym, mod_rs)
+
+        ld_swift = (REPO_ROOT / "ThreeOneOSFive" / "helpers" / "LocalDevBridge.swift").read_text("utf-8")
+        self.assertIn("var isNotFoundError: Bool", ld_swift)
+        self.assertIn("0x00000008", ld_swift)
+
+        airlift_tx = (REPO_ROOT / "ThreeOneOSFive" / "helpers" / "AirLiftPatchTransaction.swift").read_text("utf-8")
+        for sym in (
+            "else if readRes.isNotFoundError",
+            "readRes.route?.backend == \"sandbox_locked\"",
+            "mkdirOutcome.route?.backend == \"sandbox_locked\"",
+            "writeRes.route?.backend == \"sandbox_locked\"",
+        ):
+            self.assertIn(sym, airlift_tx)
+
 
 def main():
     parser = argparse.ArgumentParser(description="Run 3105 5-Scenario Security Test Suite")

@@ -662,6 +662,12 @@ public struct AirLiftReadOutcome {
     public let data: Data?
     public let error: String?
     public let route: AirLiftRouteInfo?
+
+    public var isNotFoundError: Bool {
+        guard !success, route?.backend != "sandbox_locked" else { return false }
+        let msg = (error ?? route?.detail ?? "").lowercased()
+        return msg.contains("objectnotfound") || msg.contains("0x00000008")
+    }
 }
 
 public struct AirLiftWriteOutcome {

@@ -346,14 +346,19 @@ enum AirLiftPatchTransaction {
                 )
                 if !mkdirOutcome.success {
                     let errStr = mkdirOutcome.error ?? "mkdir failed"
-                    if errStr.localizedCaseInsensitiveContains("SANDBOX_LOCKED") {
+                    if errStr.localizedCaseInsensitiveContains("SANDBOX_LOCKED")
+                        || mkdirOutcome.route?.backend == "sandbox_locked" {
                         throw AirLiftPatchError.sandboxLockedRequiresBackup(bundleID: dir.bundleID, detail: errStr)
                     }
-                    // Directory may already exist; verify accessibility by listing container root
+                    if let backend = mkdirOutcome.route?.backend, backend != "sandbox_locked" {
+                        throw AirLiftPatchError.localDevUnavailable("[\(backend)] mkdir '\(remotePath)': \(errStr)")
+                    }
+                    // Fallback probe only when container backend wasn't confirmed open
                     let probe = LocalDevBridge.shared.listDirectoryWithAirLift(bundleID: dir.bundleID, path: "/")
                     if !probe.success {
                         let probeErr = probe.error ?? errStr
-                        if probeErr.localizedCaseInsensitiveContains("SANDBOX_LOCKED") {
+                        if probeErr.localizedCaseInsensitiveContains("SANDBOX_LOCKED")
+                            || probe.route?.backend == "sandbox_locked" {
                             throw AirLiftPatchError.sandboxLockedRequiresBackup(bundleID: dir.bundleID, detail: probeErr)
                         }
                         throw AirLiftPatchError.localDevUnavailable(probeErr)
@@ -365,7 +370,8 @@ enum AirLiftPatchTransaction {
                 }
             }
 
-            // 2. Snapshot original device files into `.DiscardedPatchBackups-<timestamp>` BEFORE overwriting
+            // 2. Snapshot original device files into `.DiscardedPatchBackups-<timestamp>` BEFORE overwriting.
+            // If target file does not exist (`ObjectNotFound` / `0x00000008`), treat as new file and skip original backup.
             for desc in descriptors {
                 let remotePath = "/" + desc.relativePath
                 let readRes = LocalDevBridge.shared.readFileWithAirLift(bundleID: desc.bundleID, path: remotePath)
@@ -389,15 +395,22 @@ enum AirLiftPatchTransaction {
                         throw PatchPackageError.applyFailed
                     }
                     backupRel = rel
+                } else if readRes.isNotFoundError {
+                    // Target file does not yet exist on device: treat as new file, skip original backup, proceed to write
+                    originalExisted = false
                 } else if let readErr = readRes.error,
-                          readErr.localizedCaseInsensitiveContains("SANDBOX_LOCKED") {
+                          readErr.localizedCaseInsensitiveContains("SANDBOX_LOCKED")
+                            || readRes.route?.backend == "sandbox_locked" {
                     throw AirLiftPatchError.sandboxLockedRequiresBackup(bundleID: desc.bundleID, detail: readErr)
+                } else if let backend = readRes.route?.backend, backend != "sandbox_locked" {
+                    let readErr = readRes.error ?? "AFC read error"
+                    throw AirLiftPatchError.localDevUnavailable("[\(backend)] read '\(remotePath)': \(readErr)")
                 } else {
-                    // Verify container isn't sandbox-locked before assuming file merely didn't exist yet
                     let rootProbe = LocalDevBridge.shared.listDirectoryWithAirLift(bundleID: desc.bundleID, path: "/")
                     if !rootProbe.success {
                         let probeErr = rootProbe.error ?? readRes.error ?? "Container không thể truy cập"
-                        if probeErr.localizedCaseInsensitiveContains("SANDBOX_LOCKED") {
+                        if probeErr.localizedCaseInsensitiveContains("SANDBOX_LOCKED")
+                            || rootProbe.route?.backend == "sandbox_locked" {
                             throw AirLiftPatchError.sandboxLockedRequiresBackup(bundleID: desc.bundleID, detail: probeErr)
                         }
                         throw AirLiftPatchError.localDevUnavailable(probeErr)
@@ -450,8 +463,12 @@ enum AirLiftPatchTransaction {
                 )
                 guard writeRes.success else {
                     let errMsg = writeRes.error ?? "Ghi tệp qua AirLift thất bại"
-                    if errMsg.localizedCaseInsensitiveContains("SANDBOX_LOCKED") {
+                    if errMsg.localizedCaseInsensitiveContains("SANDBOX_LOCKED")
+                        || writeRes.route?.backend == "sandbox_locked" {
                         throw AirLiftPatchError.sandboxLockedRequiresBackup(bundleID: desc.bundleID, detail: errMsg)
+                    }
+                    if let backend = writeRes.route?.backend {
+                        throw AirLiftPatchError.localDevUnavailable("[\(backend)] write '\(remotePath)': \(errMsg)")
                     }
                     throw AirLiftPatchError.localDevUnavailable(errMsg)
                 }

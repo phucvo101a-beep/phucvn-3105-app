@@ -93,7 +93,8 @@ impl HouseArrestClient {
         path: &str,
     ) -> Result<Vec<String>, String> {
         let (mut afc, mode) = Self::connect_app_container(ip, port, pairing, bundle_id)?;
-        let effective_path = normalize_house_arrest_path(&mode, path);
+        let direct_docs = mode == "VendDocuments" && root_is_direct_documents(&mut afc);
+        let effective_path = normalize_house_arrest_path(&mode, path, direct_docs);
         afc.list_dir(&effective_path)
     }
 
@@ -103,7 +104,8 @@ impl HouseArrestClient {
         mode: String,
         path: &str,
     ) -> Result<(Vec<String>, Vec<HouseArrestDirItem>, String), String> {
-        let effective_path = normalize_house_arrest_path(&mode, path);
+        let direct_docs = mode == "VendDocuments" && root_is_direct_documents(&mut afc);
+        let effective_path = normalize_house_arrest_path(&mode, path, direct_docs);
         let entries = afc.list_dir(&effective_path)?;
         let mut items = Vec::with_capacity(entries.len());
         let prefix = effective_path.trim_end_matches('/');
@@ -146,7 +148,8 @@ impl HouseArrestClient {
 
     /// Reads file bytes from an already-started HouseArrest `(AfcClient, mode)` session.
     pub fn read_file_with_afc(mut afc: AfcClient, mode: &str, path: &str) -> Result<Vec<u8>, String> {
-        let effective_path = normalize_house_arrest_path(mode, path);
+        let direct_docs = mode == "VendDocuments" && root_is_direct_documents(&mut afc);
+        let effective_path = normalize_house_arrest_path(mode, path, direct_docs);
         afc.read_file_full(&effective_path)
     }
 
@@ -164,24 +167,27 @@ impl HouseArrestClient {
 
     /// Creates directory inside an already-started HouseArrest `(AfcClient, mode)` session.
     pub fn make_dir_with_afc(mut afc: AfcClient, mode: &str, path: &str) -> Result<(), String> {
-        let effective_path = normalize_house_arrest_path(mode, path);
-        afc.make_dir(&effective_path)
+        let direct_docs = mode == "VendDocuments" && root_is_direct_documents(&mut afc);
+        let effective_path = normalize_house_arrest_path(mode, path, direct_docs);
+        afc.make_dir_recursive(&effective_path)
     }
 
     /// Removes a path inside an already-started HouseArrest `(AfcClient, mode)` session.
     pub fn remove_path_with_afc(mut afc: AfcClient, mode: &str, path: &str) -> Result<(), String> {
-        let effective_path = normalize_house_arrest_path(mode, path);
+        let direct_docs = mode == "VendDocuments" && root_is_direct_documents(&mut afc);
+        let effective_path = normalize_house_arrest_path(mode, path, direct_docs);
         afc.remove_path(&effective_path)
     }
 
-    /// Writes file bytes into an already-started HouseArrest `(AfcClient, mode)` session with `.bak` backup.
+    /// Writes file bytes into an already-started HouseArrest `(AfcClient, mode)` session in 128 KB chunks.
     pub fn write_file_safe_with_afc(
         mut afc: AfcClient,
         mode: &str,
         path: &str,
         data: &[u8],
     ) -> Result<(), String> {
-        let effective_path = normalize_house_arrest_path(mode, path);
+        let direct_docs = mode == "VendDocuments" && root_is_direct_documents(&mut afc);
+        let effective_path = normalize_house_arrest_path(mode, path, direct_docs);
 
         // Safety backup: if file already exists, create `<path>.bak` before overwriting
         if let Ok(existing_bytes) = afc.read_file_full(&effective_path) {
@@ -189,7 +195,7 @@ impl HouseArrestClient {
             let _ = afc.write_file_full(&backup_path, &existing_bytes);
         }
 
-        // Write new file bytes in 128KB chunks
+        // Removes old attribute-locked target if present, opens WrOnly, and streams 128KB chunks
         afc.write_file_full(&effective_path, data)
     }
 
@@ -207,13 +213,58 @@ impl HouseArrestClient {
     }
 }
 
-fn normalize_house_arrest_path(mode: &str, path: &str) -> String {
+/// Inspects `/` on an active `VendDocuments` AFC session to detect whether the daemon already mounted
+/// the inner `Documents` directory at `/` (no container-level `Documents` folder or user files like
+/// `contentcache` already live at `/`).
+pub fn root_is_direct_documents(afc: &mut AfcClient) -> bool {
+    let Ok(entries) = afc.list_dir("/") else {
+        return false;
+    };
+    let has_documents = entries.iter().any(|e| e == "Documents");
+    let has_container_siblings = entries
+        .iter()
+        .any(|e| matches!(e.as_str(), "Library" | "tmp" | "SystemData" | "StoreKit"));
+    let has_direct_user_content = entries.iter().any(|e| {
+        let lower = e.to_ascii_lowercase();
+        lower == "contentcache"
+            || (e != "Documents"
+                && e != "Library"
+                && e != "tmp"
+                && e != ".com.apple.mobile_container_manager.metadata.plist")
+    });
+    !has_documents || (!has_container_siblings && has_direct_user_content)
+}
+
+pub fn normalize_house_arrest_path(
+    mode: &str,
+    path: &str,
+    direct_documents_root: bool,
+) -> String {
     let clean = path.trim();
     if mode != "VendDocuments" {
-        return if clean.is_empty() { "/".to_string() } else { clean.to_string() };
+        return if clean.is_empty() {
+            "/".to_string()
+        } else if clean.starts_with('/') {
+            clean.to_string()
+        } else {
+            format!("/{}", clean)
+        };
     }
     let trimmed = clean.trim_start_matches('/');
-    if trimmed.is_empty() || trimmed == "Documents" {
+    if direct_documents_root {
+        if trimmed.is_empty() || trimmed == "Documents" {
+            "/".to_string()
+        } else if let Some(rest) = trimmed.strip_prefix("Documents/") {
+            let sub = rest.trim_start_matches('/');
+            if sub.is_empty() {
+                "/".to_string()
+            } else {
+                format!("/{}", sub)
+            }
+        } else {
+            format!("/{}", trimmed)
+        }
+    } else if trimmed.is_empty() || trimmed == "Documents" {
         "/Documents".to_string()
     } else if trimmed.starts_with("Documents/") {
         format!("/{}", trimmed)
