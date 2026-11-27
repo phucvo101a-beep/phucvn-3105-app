@@ -182,7 +182,8 @@ impl LocalDevManager {
         self.local_network_state = local_network_state;
     }
 
-    /// Ordered non-loopback `utun` hosts (`10.7.0.1` / `dstaddr` / peer -> IPv6 -> `127.0.0.1` last) paired with `target_port`.
+    /// Ordered candidates prioritizing IPv6 ULA (`fd00::/8`, e.g. `utun5` `fd2b:...::2`/`::1`)
+    /// ahead of `10.7.0.1` (`utun4`), with `127.0.0.1` strictly last.
     pub fn effective_candidates_for_port(&self, target_port: u16) -> Vec<TunnelCandidate> {
         let mut ordered: Vec<TunnelCandidate> = Vec::new();
         let mut push_host = |host: &str, port: u16, iface: Option<String>, source: Option<String>| {
@@ -200,20 +201,47 @@ impl LocalDevManager {
             }
         };
 
-        if self.active_iface.is_some() && self.host != "127.0.0.1" {
+        // Pass 1a: Strict IPv6 ULA (`fd00::/8`, Trusted CDTunnel) + derived `::2` & `::1` peers FIRST
+        for c in &self.candidates {
+            if tunnel::is_strict_ipv6_ula_fd00(&c.host) {
+                for ula_host in tunnel::derive_ula_peer_candidates(&c.host) {
+                    push_host(&ula_host, target_port, c.iface.clone(), c.source.clone());
+                }
+            }
+        }
+        if tunnel::is_strict_ipv6_ula_fd00(&self.host) {
+            for ula_host in tunnel::derive_ula_peer_candidates(&self.host) {
+                push_host(&ula_host, target_port, self.active_iface.clone(), Some("configured-ula".to_string()));
+            }
+        }
+
+        // Pass 1b: Other `fc00::/7` ULA candidates
+        for c in &self.candidates {
+            if tunnel::is_ipv6_ula(&c.host) && !tunnel::is_strict_ipv6_ula_fd00(&c.host) {
+                push_host(&c.host, target_port, c.iface.clone(), c.source.clone());
+            }
+        }
+
+        // Pass 2: Active non-loopback non-ULA interface (if already selected) + remaining `utun` candidates
+        if self.active_iface.is_some()
+            && self.host != "127.0.0.1"
+            && !tunnel::is_ipv6_ula(&self.host)
+        {
             if let Some(c) = self.candidates.iter().find(|c| c.host == self.host) {
                 push_host(&c.host, target_port, c.iface.clone(), c.source.clone());
             }
         }
 
-        // First pass: non-loopback `utun` addresses
         for c in &self.candidates {
-            if c.host != "127.0.0.1" {
+            if c.host != "127.0.0.1" && !tunnel::is_ipv6_ula(&c.host) {
                 push_host(&c.host, target_port, c.iface.clone(), c.source.clone());
             }
         }
 
-        if self.host != "127.0.0.1" && !self.host.trim().is_empty() {
+        if self.host != "127.0.0.1"
+            && !self.host.trim().is_empty()
+            && !tunnel::is_ipv6_ula(&self.host)
+        {
             push_host(&self.host, target_port, self.active_iface.clone(), Some("configured-host".to_string()));
         }
 
@@ -339,9 +367,17 @@ impl LocalDevManager {
             }
         };
 
-        // Reuse active verified RSD tunnel if healthy
+        // Reuse active verified RSD tunnel if healthy — unless we only had an untrusted session
+        // and a direct fd00::/8 IPv6 ULA Trusted CDTunnel interface just became available.
+        let has_fd00_candidate = self
+            .candidates
+            .iter()
+            .any(|c| tunnel::is_strict_ipv6_ula_fd00(&c.host));
         if let Some(ref sess) = self.active_rsd {
-            if sess.verify_alive().is_ok() {
+            let should_upgrade_to_ula = has_fd00_candidate
+                && !sess.is_trusted_tunnel()
+                && !tunnel::is_strict_ipv6_ula_fd00(&sess.endpoint_host);
+            if !should_upgrade_to_ula && sess.verify_alive().is_ok() {
                 let iface_label = sess.endpoint_iface_label();
                 self.host = sess.endpoint_host.clone();
                 self.port = sess.endpoint_port;
@@ -379,8 +415,17 @@ impl LocalDevManager {
             }
         }
 
-        // Priority #1: Probe RemotePairing / RSD port (`tunnel_port` or `49152`) across active `utun` hosts
         let rp_port = pairing.tunnel_port.unwrap_or(DEFAULT_REMOTE_PAIRING_PORT);
+
+        // Priority #0: Direct connection to Trusted CDTunnel IPv6 ULA (`fd00::/8`, e.g. utun5 `fd2b:...::2`/`::1`)
+        // across ports `49152`, `58783`, and mDNS (`_remotepairing._tcp` / `_remoted._tcp`) ahead of `10.7.0.1:49152`.
+        if has_fd00_candidate {
+            if let Some(ula_session) = self.probe_and_connect_ipv6_ula(&pairing, rp_port) {
+                return Ok(self.activate_rsd_session(ula_session, &pairing.udid));
+            }
+        }
+
+        // Priority #1: Probe RemotePairing / RSD port (`tunnel_port` or `49152`) across active `utun` hosts
         let rp_candidates = self.effective_candidates_for_port(rp_port);
         let mut rp_attempts: Vec<EndpointAttempt> = Vec::new();
         let mut open_rp_endpoints: Vec<TunnelCandidate> = Vec::new();
@@ -629,6 +674,104 @@ impl LocalDevManager {
             return Ok(false);
         }
         Err(report.message)
+    }
+
+    fn probe_and_connect_ipv6_ula(
+        &self,
+        pairing: &UnifiedPairing,
+        rp_port: u16,
+    ) -> Option<RsdTunnelSession> {
+        let mut ula_pairs: Vec<(String, u16, Option<String>)> = Vec::new();
+        let mut push_pair = |host: String, port: u16, iface: Option<String>| {
+            if port > 0 && !ula_pairs.iter().any(|(h, p, _)| h == &host && *p == port) {
+                ula_pairs.push((host, port, iface));
+            }
+        };
+
+        let mut ula_ports: Vec<u16> = Vec::new();
+        for p in [49152u16, 58783u16, rp_port] {
+            if p > 0 && !ula_ports.contains(&p) {
+                ula_ports.push(p);
+            }
+        }
+        for c in &self.candidates {
+            if tunnel::is_strict_ipv6_ula_fd00(&c.host) && c.port > 0 && !ula_ports.contains(&c.port) {
+                ula_ports.push(c.port);
+            }
+        }
+
+        // First try exact candidate host:port pairs (e.g. mDNS-resolved ports on IPv6 ULA)
+        for c in &self.candidates {
+            if tunnel::is_strict_ipv6_ula_fd00(&c.host) {
+                for derived_host in tunnel::derive_ula_peer_candidates(&c.host) {
+                    push_pair(derived_host, c.port, c.iface.clone());
+                }
+            }
+        }
+        // Then try standard RSD/RP ports (49152, 58783, mdns ports) across all derived ::2 / ::1 ULA hosts
+        for port in &ula_ports {
+            for c in &self.candidates {
+                if tunnel::is_strict_ipv6_ula_fd00(&c.host) {
+                    for derived_host in tunnel::derive_ula_peer_candidates(&c.host) {
+                        push_pair(derived_host, *port, c.iface.clone());
+                    }
+                }
+            }
+        }
+
+        let mut fallback_session: Option<RsdTunnelSession> = None;
+        for (host, port, iface) in ula_pairs {
+            if tunnel::probe_tcp_open(&host, port, Duration::from_millis(650)).is_err() {
+                continue;
+            }
+            eprintln!(
+                "localdev: IPv6 ULA endpoint OPEN at [{}]:{} ({})",
+                host,
+                port,
+                iface.as_deref().unwrap_or("utun")
+            );
+            if let Ok(sess) = RsdTunnelSession::connect_direct_rsd_with_options(
+                &host,
+                port,
+                iface.clone(),
+                pairing.remote.as_ref(),
+                pairing.lockdown.as_ref(),
+            ) {
+                if sess.is_trusted_tunnel() {
+                    if let Some(old_fb) = fallback_session.take() {
+                        old_fb.close();
+                    }
+                    return Some(sess);
+                }
+                if fallback_session.is_none() {
+                    fallback_session = Some(sess);
+                } else {
+                    sess.close();
+                }
+            }
+            if let Some(ref rp_file) = pairing.remote {
+                if let Ok(sess) = RsdTunnelSession::connect_remote_pairing_with_options(
+                    &host,
+                    port,
+                    iface.clone(),
+                    rp_file,
+                    pairing.lockdown.as_ref(),
+                ) {
+                    if sess.is_trusted_tunnel() {
+                        if let Some(old_fb) = fallback_session.take() {
+                            old_fb.close();
+                        }
+                        return Some(sess);
+                    }
+                    if fallback_session.is_none() {
+                        fallback_session = Some(sess);
+                    } else {
+                        sess.close();
+                    }
+                }
+            }
+        }
+        fallback_session
     }
 
     fn reconnect_rsd_once(&mut self) -> Result<(), String> {

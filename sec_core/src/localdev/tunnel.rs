@@ -552,6 +552,56 @@ pub(crate) fn format_endpoint_label(ip: &str, port: u16) -> String {
     }
 }
 
+pub(crate) fn is_strict_ipv6_ula_fd00(host: &str) -> bool {
+    let bare = host.trim().split('%').next().unwrap_or("").trim();
+    bare.parse::<Ipv6Addr>()
+        .map(|v6| v6.octets()[0] == 0xFD)
+        .unwrap_or(false)
+}
+
+pub(crate) fn is_ipv6_ula(host: &str) -> bool {
+    let bare = host.trim().split('%').next().unwrap_or("").trim();
+    bare.parse::<Ipv6Addr>()
+        .map(|v6| (v6.octets()[0] & 0xFE) == 0xFC)
+        .unwrap_or(false)
+}
+
+/// Derives both `::2` peer and `::1` host IPv6 ULA addresses from a given `fd00::/8` (`utun`)
+/// address, preserving the normalized interface prefix before falling back to `10.7.0.1`.
+pub(crate) fn derive_ula_peer_candidates(host: &str) -> Vec<String> {
+    let trimmed = host.trim();
+    let bare = trimmed.split('%').next().unwrap_or("").trim();
+    let Ok(v6) = bare.parse::<Ipv6Addr>() else {
+        return Vec::new();
+    };
+    let oct = v6.octets();
+    if (oct[0] & 0xFE) != 0xFC {
+        return Vec::new();
+    }
+    let mut out = Vec::with_capacity(3);
+    let mut push_unique = |cand: String| {
+        if !cand.is_empty() && !out.iter().any(|x| x == &cand) {
+            out.push(cand);
+        }
+    };
+
+    let mut peer2 = oct;
+    peer2[14] = 0;
+    peer2[15] = 2;
+    push_unique(Ipv6Addr::from(peer2).to_string());
+
+    let mut peer1 = oct;
+    peer1[14] = 0;
+    peer1[15] = 1;
+    push_unique(Ipv6Addr::from(peer1).to_string());
+
+    push_unique(v6.to_string());
+    if trimmed != bare {
+        push_unique(trimmed.to_string());
+    }
+    out
+}
+
 fn resolve_socket_addr(ip: &str, port: u16, stage: LockdownStage) -> Result<SocketAddr, LockdownError> {
     if let Some((addr_part, zone)) = ip.split_once('%') {
         let v6: Ipv6Addr = addr_part.parse().map_err(|e| {

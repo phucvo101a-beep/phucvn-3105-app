@@ -896,6 +896,8 @@ public final class LocalDevBridge: ObservableObject {
     private var activeProbeListener: NWListener?
     private var activeProbeBrowsers: [NWBrowser] = []
     private var activeProbeConnections: [NWConnection] = []
+    private var activeMdnsResolveConns: [NWConnection] = []
+    private var discoveredMdnsEndpoints: [LocalDevTunnelEndpoint] = []
     private var foregroundObserver: NSObjectProtocol?
     private var lastLoggedStatusKey: String = ""
 
@@ -1111,15 +1113,27 @@ public final class LocalDevBridge: ObservableObject {
         return isULA || isLinkLocal
     }
 
-    /// Scans active `utun` interfaces via `getifaddrs()` (`IFF_UP | IFF_RUNNING`, IPv4 + IPv6 `fd...`/`fe80::%utunX` + `ifa_dstaddr`)
-    /// and orders tunnel endpoints: `utun` IPv4 `dstaddr` -> `utun` peer / `10.7.0.1` & `10.7.0.0` -> `utun` IPv6 -> `127.0.0.1` fallback.
+    /// Scans active `utun` interfaces via `getifaddrs()` (`IFF_UP | IFF_RUNNING`, IPv6 ULA `fd00::/8` + IPv4 + `fe80::%utunX`)
+    /// and orders endpoints prioritizing Trusted CDTunnel IPv6 ULA (`fd00::/8`, deriving `::2` & `::1` across `49152`/`58783`/mDNS ports) ahead of `10.7.0.1`.
     @discardableResult
     public func detectTunnelEndpoints(port: UInt16 = LocalDevBridge.defaultRemotePairingPort) -> [LocalDevTunnelEndpoint] {
+        var ulaIpv6Endpoints: [LocalDevTunnelEndpoint] = []
         var dstEndpoints: [LocalDevTunnelEndpoint] = []
         var gatewayEndpoints: [LocalDevTunnelEndpoint] = []
-        var ipv6Endpoints: [LocalDevTunnelEndpoint] = []
+        var linkLocalIpv6Endpoints: [LocalDevTunnelEndpoint] = []
         var preferred107Iface: String? = nil
         var utunSummaries: [String] = []
+
+        probeLock.lock()
+        let mdnsSnapshot = self.discoveredMdnsEndpoints
+        probeLock.unlock()
+
+        var ulaPorts: [UInt16] = []
+        for p in [UInt16(49152), UInt16(58783), port] + mdnsSnapshot.map(\.port) {
+            if p > 0 && !ulaPorts.contains(p) {
+                ulaPorts.append(p)
+            }
+        }
 
         var ifaddrPtr: UnsafeMutablePointer<ifaddrs>?
         if Darwin.getifaddrs(&ifaddrPtr) == 0, let firstAddr = ifaddrPtr {
@@ -1139,41 +1153,67 @@ public final class LocalDevBridge: ObservableObject {
                 if let sa = ifa.ifa_addr, sa.pointee.sa_family == sa_family_t(AF_INET6) {
                     if let localV6 = Self.extractIPv6Bytes(from: sa), Self.isTunnelOrPrivateIPv6(localV6) {
                         let isULA = (localV6[0] & 0xFE) == 0xFC
-                        if let localV6Str = Self.formatIPv6(localV6, ifaceScope: name) {
+                        let scopeArg: String? = isULA ? nil : name
+                        if let localV6Str = Self.formatIPv6(localV6, ifaceScope: scopeArg) {
                             utunSummaries.append("\(name)(v6:\(localV6Str))")
                         }
-                        if (flags & IFF_POINTOPOINT) != 0,
-                           let dstV6 = Self.extractIPv6Bytes(from: ifa.ifa_dstaddr),
-                           Self.isTunnelOrPrivateIPv6(dstV6),
-                           dstV6 != localV6,
-                           let dstV6Str = Self.formatIPv6(dstV6, ifaceScope: name) {
-                            ipv6Endpoints.append(LocalDevTunnelEndpoint(
-                                host: dstV6Str,
-                                port: port,
-                                iface: name,
-                                source: isULA ? "utun-v6-ula-dst" : "utun-v6-ll-dst"
-                            ))
-                        }
-                        if isULA && (localV6[14] != 0 || localV6[15] != 1) {
-                            var peerV6 = localV6
-                            peerV6[14] = 0
-                            peerV6[15] = 1
-                            if let peerV6Str = Self.formatIPv6(peerV6, ifaceScope: name) {
-                                ipv6Endpoints.append(LocalDevTunnelEndpoint(
-                                    host: peerV6Str,
+
+                        if isULA {
+                            // Derive both ::2 peer (remote CDTunnel daemon) and ::1 local address, plus ifa_dstaddr
+                            var hostEntries: [(String, String)] = []
+                            var peer2 = localV6
+                            peer2[14] = 0
+                            peer2[15] = 2
+                            if let s2 = Self.formatIPv6(peer2, ifaceScope: nil) {
+                                hostEntries.append((s2, "utun-v6-ula-peer2"))
+                            }
+                            var peer1 = localV6
+                            peer1[14] = 0
+                            peer1[15] = 1
+                            if let s1 = Self.formatIPv6(peer1, ifaceScope: nil) {
+                                hostEntries.append((s1, "utun-v6-ula-peer1"))
+                            }
+                            if (flags & IFF_POINTOPOINT) != 0,
+                               let dstV6 = Self.extractIPv6Bytes(from: ifa.ifa_dstaddr),
+                               Self.isTunnelOrPrivateIPv6(dstV6),
+                               let dstV6Str = Self.formatIPv6(dstV6, ifaceScope: nil) {
+                                hostEntries.append((dstV6Str, "utun-v6-ula-dst"))
+                            }
+                            if let localV6Str = Self.formatIPv6(localV6, ifaceScope: nil) {
+                                hostEntries.append((localV6Str, "utun-v6-ula"))
+                            }
+
+                            for ulaPort in ulaPorts {
+                                for (ulaHost, ulaSource) in hostEntries {
+                                    ulaIpv6Endpoints.append(LocalDevTunnelEndpoint(
+                                        host: ulaHost,
+                                        port: ulaPort,
+                                        iface: name,
+                                        source: ulaSource
+                                    ))
+                                }
+                            }
+                        } else {
+                            if (flags & IFF_POINTOPOINT) != 0,
+                               let dstV6 = Self.extractIPv6Bytes(from: ifa.ifa_dstaddr),
+                               Self.isTunnelOrPrivateIPv6(dstV6),
+                               dstV6 != localV6,
+                               let dstV6Str = Self.formatIPv6(dstV6, ifaceScope: name) {
+                                linkLocalIpv6Endpoints.append(LocalDevTunnelEndpoint(
+                                    host: dstV6Str,
                                     port: port,
                                     iface: name,
-                                    source: "utun-v6-ula-peer"
+                                    source: "utun-v6-ll-dst"
                                 ))
                             }
-                        }
-                        if let localV6Str = Self.formatIPv6(localV6, ifaceScope: name) {
-                            ipv6Endpoints.append(LocalDevTunnelEndpoint(
-                                host: localV6Str,
-                                port: port,
-                                iface: name,
-                                source: isULA ? "utun-v6-ula" : "utun-v6-ll"
-                            ))
+                            if let localV6Str = Self.formatIPv6(localV6, ifaceScope: name) {
+                                linkLocalIpv6Endpoints.append(LocalDevTunnelEndpoint(
+                                    host: localV6Str,
+                                    port: port,
+                                    iface: name,
+                                    source: "utun-v6-ll"
+                                ))
+                            }
                         }
                     }
                     continue
@@ -1239,17 +1279,22 @@ public final class LocalDevBridge: ObservableObject {
             }
         }
 
-        // Prioritize LocalDevVPN 10.7.x endpoints ahead of non-10.7 system `utun` interfaces
+        // Prioritize strict fd00::/8 IPv6 ULA first, then LocalDevVPN 10.7.x endpoints, then link-local/loopback
+        ulaIpv6Endpoints.sort {
+            ($0.host.lowercased().hasPrefix("fd") ? 0 : 1) < ($1.host.lowercased().hasPrefix("fd") ? 0 : 1)
+        }
         dstEndpoints.sort { ($0.host.hasPrefix("10.7.") ? 0 : 1) < ($1.host.hasPrefix("10.7.") ? 0 : 1) }
         gatewayEndpoints.sort { ($0.host.hasPrefix("10.7.") ? 0 : 1) < ($1.host.hasPrefix("10.7.") ? 0 : 1) }
-        ipv6Endpoints.sort { ($0.host.hasPrefix("fd") ? 0 : 1) < ($1.host.hasPrefix("fd") ? 0 : 1) }
 
         var rawOrdered: [LocalDevTunnelEndpoint] = []
+        rawOrdered.append(contentsOf: mdnsSnapshot.filter { $0.host.lowercased().hasPrefix("fd") })
+        rawOrdered.append(contentsOf: ulaIpv6Endpoints)
         rawOrdered.append(contentsOf: dstEndpoints)
         rawOrdered.append(contentsOf: gatewayEndpoints)
         rawOrdered.append(LocalDevTunnelEndpoint(host: "10.7.0.1", port: port, iface: preferred107Iface, source: "standard-localdev"))
         rawOrdered.append(LocalDevTunnelEndpoint(host: "10.7.0.0", port: port, iface: preferred107Iface, source: "standard-localdev"))
-        rawOrdered.append(contentsOf: ipv6Endpoints)
+        rawOrdered.append(contentsOf: mdnsSnapshot.filter { !$0.host.lowercased().hasPrefix("fd") })
+        rawOrdered.append(contentsOf: linkLocalIpv6Endpoints)
         rawOrdered.append(LocalDevTunnelEndpoint(host: "127.0.0.1", port: port, iface: "lo0", source: "loopback-fallback"))
 
         var deduplicated: [LocalDevTunnelEndpoint] = []
@@ -1412,10 +1457,11 @@ public final class LocalDevBridge: ObservableObject {
                 self.activeProbeListener = listener
             }
 
-            // 3. Browse all declared NSBonjourServices to confirm Local Network permission & trigger NECP
+            // 3. Browse all declared NSBonjourServices to confirm Local Network permission & discover `_remotepairing._tcp` / `_remoted._tcp` endpoints
             let bonjourTypes = [
                 "_apple-mobdev2._tcp",
                 "_remotepairing._tcp",
+                "_remoted._tcp",
                 "_lockdown._tcp",
                 "_localdev._tcp"
             ]
@@ -1436,7 +1482,7 @@ public final class LocalDevBridge: ObservableObject {
                             self.lastLocalNetworkState = 1
                             self.probeLock.unlock()
                         }
-                        if serviceType == "_apple-mobdev2._tcp" || serviceType == "_remotepairing._tcp" {
+                        if serviceType == "_apple-mobdev2._tcp" || serviceType == "_remotepairing._tcp" || serviceType == "_remoted._tcp" {
                             log("localdev: NWBrowser(\(serviceType)) ready")
                         }
                         if !openTcpProbe && !denied {
@@ -1459,7 +1505,61 @@ public final class LocalDevBridge: ObservableObject {
                         break
                     }
                 }
-                browser.browseResultsChangedHandler = { _, _ in }
+                browser.browseResultsChangedHandler = { results, _ in
+                    guard serviceType == "_remotepairing._tcp" || serviceType == "_remoted._tcp" else { return }
+                    for result in results.prefix(4) {
+                        let resParams = NWParameters.tcp
+                        resParams.includePeerToPeer = true
+                        let resConn = NWConnection(to: result.endpoint, using: resParams)
+                        resConn.stateUpdateHandler = { rState in
+                            switch rState {
+                            case .ready:
+                                if let remote = resConn.currentPath?.remoteEndpoint,
+                                   case .hostPort(host: let nwHost, port: let nwPort) = remote {
+                                    let resolvedPort = nwPort.rawValue
+                                    var resolvedHost: String? = nil
+                                    var resolvedIface: String? = nil
+                                    switch nwHost {
+                                    case .ipv6(let v6):
+                                        resolvedHost = Self.formatIPv6(Array(v6.rawValue), ifaceScope: nil)
+                                        resolvedIface = v6.interface?.name
+                                    case .ipv4(let v4):
+                                        resolvedHost = Array(v4.rawValue).map(String.init).joined(separator: ".")
+                                        resolvedIface = v4.interface?.name
+                                    case .name(let hName, let nwIface):
+                                        resolvedHost = hName
+                                        resolvedIface = nwIface?.name
+                                    @unknown default:
+                                        break
+                                    }
+                                    if let h = resolvedHost, !h.isEmpty, resolvedPort > 0 {
+                                        let ep = LocalDevTunnelEndpoint(
+                                            host: h,
+                                            port: resolvedPort,
+                                            iface: resolvedIface,
+                                            source: "mdns-\(serviceType)"
+                                        )
+                                        self.probeLock.lock()
+                                        if !self.discoveredMdnsEndpoints.contains(where: { $0.host == ep.host && $0.port == ep.port }) {
+                                            self.discoveredMdnsEndpoints.append(ep)
+                                            log("localdev: mDNS(\(serviceType)) -> \(ep.host):\(ep.port)[\(ep.iface ?? "-")]")
+                                        }
+                                        self.probeLock.unlock()
+                                    }
+                                }
+                                resConn.cancel()
+                            case .failed, .cancelled:
+                                resConn.cancel()
+                            default:
+                                break
+                            }
+                        }
+                        self.probeLock.lock()
+                        self.activeMdnsResolveConns.append(resConn)
+                        self.probeLock.unlock()
+                        resConn.start(queue: self.networkProbeQueue)
+                    }
+                }
                 browser.start(queue: self.networkProbeQueue)
                 browsers.append(browser)
             }
@@ -1564,6 +1664,11 @@ public final class LocalDevBridge: ObservableObject {
         activeProbeBrowsers.removeAll()
         activeProbeConnections.forEach { $0.cancel() }
         activeProbeConnections.removeAll()
+        probeLock.lock()
+        let mdnsConns = activeMdnsResolveConns
+        activeMdnsResolveConns.removeAll()
+        probeLock.unlock()
+        mdnsConns.forEach { $0.cancel() }
     }
 
     public func requestLocalNetworkPermission() {
@@ -1793,7 +1898,9 @@ public final class LocalDevBridge: ObservableObject {
             timeoutMs: 1500
         )
         ensureCoreInitialized()
-        syncCandidatesToCore(candidates)
+        // Re-scan getifaddrs + mDNS immediately after prewarm/LocalDevVPN wake-up so utun5 IPv6 ULA is prioritized
+        let refreshedCandidates = precomputedCandidates ?? detectTunnelEndpoints(port: preferredPort)
+        syncCandidatesToCore(refreshedCandidates)
         guard let fnStatus = LocalDevLib.shared.fnStatus,
               let cStr = fnStatus() else {
             DispatchQueue.main.async { self.isCheckingStatus = false }

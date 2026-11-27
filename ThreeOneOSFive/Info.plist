@@ -109,6 +109,7 @@
     <array>
         <string>_apple-mobdev2._tcp</string>
         <string>_remotepairing._tcp</string>
+        <string>_remoted._tcp</string>
         <string>_lockdown._tcp</string>
         <string>_localdev._tcp</string>
         <string>_3105airlift._tcp</string>

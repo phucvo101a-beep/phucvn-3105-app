@@ -1955,6 +1955,74 @@ class SecuritySuiteTests(unittest.TestCase):
         non_comment = "\n".join(l for l in rsd_rs.splitlines() if not l.lstrip().startswith("//"))
         self.assertNotIn("bplist00", non_comment)
 
+    def test_20_ipv6_ula_priority_and_service_version_active_handshake(self):
+        ld_swift = (REPO_ROOT / "ThreeOneOSFive" / "helpers" / "LocalDevBridge.swift").read_text("utf-8")
+        # IPv6 ULA fd00::/8 prioritized ahead of 10.7.0.1 & derives both ::2 and ::1
+        for sym in (
+            "ulaIpv6Endpoints",
+            "utun-v6-ula-peer2",
+            "utun-v6-ula-peer1",
+            '"_remoted._tcp"',
+            "discoveredMdnsEndpoints",
+            "peer2[15] = 2",
+            "peer1[15] = 1",
+        ):
+            self.assertIn(sym, ld_swift)
+        det_start = ld_swift.index("rawOrdered.append(contentsOf: ulaIpv6Endpoints)")
+        v4_idx = ld_swift.index('host: "10.7.0.1"')
+        # Check within detectTunnelEndpoints rawOrdered assembly
+        raw_section = ld_swift[ld_swift.index("var rawOrdered: [LocalDevTunnelEndpoint] = []"):]
+        self.assertLess(
+            raw_section.index("ulaIpv6Endpoints"),
+            raw_section.index('host: "10.7.0.1"'),
+        )
+        self.assertGreater(det_start, 0)
+        self.assertGreater(v4_idx, 0)
+
+        info_plist = (REPO_ROOT / "ThreeOneOSFive" / "Info.plist").read_text("utf-8")
+        self.assertIn("<string>_remoted._tcp</string>", info_plist)
+
+        tunnel_rs = (REPO_ROOT / "sec_core" / "src" / "localdev" / "tunnel.rs").read_text("utf-8")
+        for sym in (
+            "pub(crate) fn is_strict_ipv6_ula_fd00",
+            "pub(crate) fn is_ipv6_ula",
+            "pub(crate) fn derive_ula_peer_candidates",
+        ):
+            self.assertIn(sym, tunnel_rs)
+
+        mod_rs = (REPO_ROOT / "sec_core" / "src" / "localdev" / "mod.rs").read_text("utf-8")
+        for sym in (
+            "is_strict_ipv6_ula_fd00",
+            "derive_ula_peer_candidates",
+            "probe_and_connect_ipv6_ula",
+            "49152u16, 58783u16",
+            "sess.is_trusted_tunnel()",
+        ):
+            self.assertIn(sym, mod_rs)
+        cand_fn = mod_rs[mod_rs.index("pub fn effective_candidates_for_port"):mod_rs.index("pub fn effective_candidates(")]
+        self.assertLess(cand_fn.index("is_strict_ipv6_ula_fd00"), cand_fn.index('"10.7.0.1"'))
+
+        rsd_rs = (REPO_ROOT / "sec_core" / "src" / "localdev" / "rsd.rs").read_text("utf-8")
+        for sym in (
+            "consume_initial_service_version_on_ch1",
+            "last_outbound_handshake",
+            "prefetched_envelope",
+            "pub fn is_trusted_tunnel(&self) -> bool",
+            "services.len() > 64",
+            "RemoteXPC RST_STREAM (stream={}, code={})",
+        ):
+            self.assertIn(sym, rsd_rs)
+        # Verify consume_initial_service_version_on_ch1 runs before attempt_pair_verify in Strategy 1
+        ut_start = rsd_rs.index("let mut ctrl = RpPairingControlClient::from_remote_xpc(xpc).await?;")
+        ut_block = rsd_rs[ut_start:ut_start + 450]
+        self.assertLess(
+            ut_block.index("consume_initial_service_version_on_ch1"),
+            ut_block.index("attempt_pair_verify"),
+        )
+        # Verify recv_envelope actively sends handshake on SkipServiceVersion instead of pure passive wait
+        rec_block = rsd_rs[rsd_rs.index("XpcRpFrame::SkipServiceVersion(ver)"):rsd_rs.index("Exceeded ServiceVersion metadata XPC frames")]
+        self.assertIn("self.send_plain(handshake_payload).await?", rec_block)
+
 
 def main():
     parser = argparse.ArgumentParser(description="Run 3105 5-Scenario Security Test Suite")

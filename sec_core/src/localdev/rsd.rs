@@ -408,6 +408,9 @@ pub struct RpPairingControlClient {
     server_cipher: ChaCha20Poly1305,
     peer_udid: Option<String>,
     peer_name: Option<String>,
+    prefetched_envelope: Option<JsonValue>,
+    last_service_version: Option<i64>,
+    last_outbound_handshake: Option<JsonValue>,
 }
 
 enum XpcRpFrame {
@@ -524,7 +527,35 @@ impl RpPairingControlClient {
             server_cipher: sc,
             peer_udid: None,
             peer_name: None,
+            prefetched_envelope: None,
+            last_service_version: None,
+            last_outbound_handshake: None,
         })
+    }
+
+    async fn consume_initial_service_version_on_ch1(&mut self) {
+        let RpControlTransport::RemoteXpc(ref mut xpc) = self.transport else {
+            return;
+        };
+        if let Ok(Ok((ch, xpc_val))) =
+            tokio::time::timeout(Duration::from_millis(850), xpc.recv_any()).await
+        {
+            match decode_rppairing_xpc_frame(&xpc_val) {
+                Ok(XpcRpFrame::SkipServiceVersion(ver)) => {
+                    self.last_service_version = ver;
+                    eprintln!(
+                        "localdev: untrusted.tunnelservice ch={} ServiceVersion={:?} — sending first RemotePairing handshake immediately",
+                        ch, ver
+                    );
+                }
+                Ok(XpcRpFrame::Payload(json_val)) => {
+                    self.prefetched_envelope = Some(json_val);
+                }
+                Err(e) => {
+                    let _ = e;
+                }
+            }
+        }
     }
 
     async fn send_frame(&mut self, envelope: JsonValue) -> Result<(), RpProtocolError> {
@@ -599,6 +630,9 @@ impl RpPairingControlClient {
     }
 
     async fn recv_envelope(&mut self) -> Result<JsonValue, RpProtocolError> {
+        if let Some(early) = self.prefetched_envelope.take() {
+            return Ok(early);
+        }
         match &mut self.transport {
             RpControlTransport::TcpRPPairing(stream) => {
                 let mut magic = vec![0u8; RPPAIRING_MAGIC.len()];
@@ -645,27 +679,40 @@ impl RpPairingControlClient {
                 serde_json::from_slice(&body)
                     .map_err(|e| RpProtocolError::Protocol(format!("Invalid RPPairing JSON: {}", e)))
             }
-            RpControlTransport::RemoteXpc(xpc) => {
+            RpControlTransport::RemoteXpc(_) => {
                 const MAX_SERVICE_VERSION_FRAMES: usize = 8;
                 for _ in 0..=MAX_SERVICE_VERSION_FRAMES {
-                    let (ch, xpc_val) = tokio::time::timeout(Duration::from_secs(6), xpc.recv_any())
-                        .await
-                        .map_err(|_| {
-                            RpProtocolError::Transport(LockdownError::with_errno(
-                                LockdownErrorKind::Timeout,
-                                LockdownStage::Protocol,
-                                Some(60),
-                                "Timeout waiting for RemotePairing XPC response",
-                            ))
-                        })?
-                        .map_err(RpProtocolError::Protocol)?;
+                    let (ch, xpc_val) = {
+                        let RpControlTransport::RemoteXpc(ref mut xpc) = self.transport else {
+                            unreachable!();
+                        };
+                        tokio::time::timeout(Duration::from_secs(6), xpc.recv_any())
+                            .await
+                            .map_err(|_| {
+                                RpProtocolError::Transport(LockdownError::with_errno(
+                                    LockdownErrorKind::Timeout,
+                                    LockdownStage::Protocol,
+                                    Some(60),
+                                    "Timeout waiting for RemotePairing XPC response",
+                                ))
+                            })?
+                            .map_err(RpProtocolError::Protocol)?
+                    };
                     match decode_rppairing_xpc_frame(&xpc_val)? {
-                        XpcRpFrame::Payload(json_val) => return Ok(json_val),
+                        XpcRpFrame::Payload(json_val) => {
+                            self.last_outbound_handshake = None;
+                            return Ok(json_val);
+                        }
                         XpcRpFrame::SkipServiceVersion(ver) => {
+                            self.last_service_version = ver;
                             eprintln!(
-                                "localdev: untrusted.tunnelservice ServiceVersion={:?} on ch={} — skipping and reading next XPC packet",
+                                "localdev: untrusted.tunnelservice ServiceVersion={:?} on ch={} — actively sending RemotePairing handshake before reading next XPC packet",
                                 ver, ch
                             );
+                            // Actively send initial RemotePairing handshake on ch=1 right after receiving ServiceVersion
+                            if let Some(handshake_payload) = self.last_outbound_handshake.clone() {
+                                self.send_plain(handshake_payload).await?;
+                            }
                             continue;
                         }
                     }
@@ -692,7 +739,7 @@ impl RpPairingControlClient {
     }
 
     async fn attempt_pair_verify(&mut self) -> Result<(), RpProtocolError> {
-        self.send_plain(json!({
+        let handshake_plain = json!({
             "request": {
                 "_0": {
                     "handshake": {
@@ -703,8 +750,9 @@ impl RpPairingControlClient {
                     }
                 }
             }
-        }))
-        .await?;
+        });
+        self.last_outbound_handshake = Some(handshake_plain.clone());
+        self.send_plain(handshake_plain).await?;
 
         let resp = self.recv_plain_inner().await?;
         let handshake = resp
@@ -1334,7 +1382,7 @@ impl XpcMessage {
 enum H2Frame {
     Data { stream_id: u32, payload: Vec<u8> },
     Headers,
-    RstStream,
+    RstStream { stream_id: u32, error_code: u32 },
     Settings { stream_id: u32, flags: u8, initial_window: Option<u32> },
     Ping { opaque: [u8; 8], ack: bool },
     GoAway(String),
@@ -1359,7 +1407,14 @@ impl H2Frame {
         let frame = match ftype {
             0x00 => H2Frame::Data { stream_id, payload: body.to_vec() },
             0x01 => H2Frame::Headers,
-            0x03 => H2Frame::RstStream,
+            0x03 => {
+                let error_code = if body.len() >= 4 {
+                    u32::from_be_bytes([body[0], body[1], body[2], body[3]])
+                } else {
+                    0
+                };
+                H2Frame::RstStream { stream_id, error_code }
+            }
             0x04 => {
                 let mut init_win = None;
                 let mut i = 0;
@@ -1568,8 +1623,18 @@ impl<S: AsyncRead + AsyncWrite + Unpin + Send> RemoteXpcConn<S> {
             H2Frame::GoAway(msg) => {
                 return Err(format!("RemoteXPC GOAWAY: {}", msg));
             }
-            H2Frame::RstStream => {
-                return Err("RemoteXPC RST_STREAM".to_string());
+            H2Frame::RstStream { stream_id, error_code } => {
+                if stream_id != XPC_ROOT_CHANNEL && error_code == 0 {
+                    eprintln!(
+                        "localdev: RemoteXPC RST_STREAM(NO_ERROR) on secondary stream={}, keeping ch=1",
+                        stream_id
+                    );
+                } else {
+                    return Err(format!(
+                        "RemoteXPC RST_STREAM (stream={}, code={})",
+                        stream_id, error_code
+                    ));
+                }
             }
             H2Frame::Data { stream_id, payload } => {
                 let len = payload.len() as u32;
@@ -2305,9 +2370,11 @@ pub struct RsdTunnelSession {
 }
 
 fn has_trusted_fileservice_pair(services: &HashMap<String, RsdServiceInfo>) -> bool {
-    (services.contains_key(SERVICE_FILESERVICE_CTRL_CAP)
-        || services.contains_key(SERVICE_FILESERVICE_CTRL))
-        && services.contains_key(SERVICE_FILESERVICE_DATA_SVC)
+    services.len() > 64
+        || services.contains_key(SERVICE_FILESERVICE_DATA_SVC)
+        || ((services.contains_key(SERVICE_FILESERVICE_CTRL_CAP)
+            || services.contains_key(SERVICE_FILESERVICE_CTRL))
+            && services.contains_key(SERVICE_FILESERVICE_DATA_SVC))
 }
 
 async fn async_send_plist<S: AsyncWrite + Unpin>(
@@ -2449,6 +2516,7 @@ async fn establish_coredevice_proxy_tunnel(
                 let s = outer.connect_raw_port(ut_info.port).await?;
                 let xpc = RemoteXpcConn::connect_and_handshake(s).await?;
                 let mut ctrl = RpPairingControlClient::from_remote_xpc(xpc).await?;
+                ctrl.consume_initial_service_version_on_ch1().await;
                 ctrl.attempt_pair_verify()
                     .await
                     .map_err(|e| e.into_lockdown_error(LockdownStage::Protocol).to_string())?;
@@ -3024,6 +3092,12 @@ impl RsdTunnelSession {
 
     pub fn has_trusted_service(&self, name: &str) -> bool {
         self.trusted_services.contains_key(name)
+    }
+
+    pub fn is_trusted_tunnel(&self) -> bool {
+        self.coredevice_proxy_active
+            || self.services.len() > 64
+            || self.services.contains_key(SERVICE_FILESERVICE_DATA_SVC)
     }
 
     pub async fn connect_service_async(
