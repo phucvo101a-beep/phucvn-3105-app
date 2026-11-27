@@ -1,4 +1,4 @@
-#!/usr/bin/env python3
+﻿#!/usr/bin/env python3
 """
 Comprehensive 5-Scenario Zero-Trust Security Verification Suite for PHUCVN 3105.
 Runs natively on Python 3.12 stdlib AND optionally cross-tests live compiled
@@ -2149,13 +2149,13 @@ class SecuritySuiteTests(unittest.TestCase):
 
 
 
-    def test_23_rppairing_xpc_dictionary_envelope_and_proxy_checkin(self):
-        rsd_rs = (REPO_ROOT / "sec_core" / "src" / "localdev" / "rsd.rs").read_text("utf-8")
-        self.assertIn("fn json_to_xpc_rppairing_value", rsd_rs)
-        self.assertIn('("value".to_string(), xpc_inner)', rsd_rs)
-        self.assertIn("xpc.send_object(req_dict, true)", rsd_rs)
-        self.assertIn("drained before handshake", rsd_rs)
-
+    def test_23_rppairing_xpc_data_envelope_and_ula_upgrade(self):
+        rsd = (Path(__file__).resolve().parents[1] / "sec_core" / "src" / "localdev" / "rsd.rs").read_text(encoding="utf-8")
+        mod = (Path(__file__).resolve().parents[1] / "sec_core" / "src" / "localdev" / "mod.rs").read_text(encoding="utf-8")
+        self.assertIn('("value".to_string(), XpcValue::Data(payload_bytes.to_vec()))', rsd)
+        self.assertIn("xpc.send_object(req_dict, false)", rsd)
+        self.assertIn("self.root_id = self.root_id.wrapping_add(1).max(2);", rsd)
+        self.assertIn("has_fd00_upgrade", mod)
 
 def main():
     parser = argparse.ArgumentParser(description="Run 3105 5-Scenario Security Test Suite")
@@ -2171,3 +2171,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+

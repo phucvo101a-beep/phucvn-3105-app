@@ -639,15 +639,14 @@ impl RpPairingControlClient {
                 Ok(())
             }
             RpControlTransport::RemoteXpc(xpc) => {
-                let xpc_inner = json_to_xpc_rppairing_value(&envelope, None);
                 let req_dict = XpcValue::Dictionary(vec![
                     (
                         "mangledTypeName".to_string(),
                         XpcValue::String("RemotePairing.ControlChannelMessageEnvelope".to_string()),
                     ),
-                    ("value".to_string(), xpc_inner),
+                    ("value".to_string(), XpcValue::Data(payload_bytes.to_vec())),
                 ]);
-                tokio::time::timeout(Duration::from_secs(6), xpc.send_object(req_dict, true))
+                tokio::time::timeout(Duration::from_secs(6), xpc.send_object(req_dict, false))
                     .await
                     .map_err(|_| {
                         RpProtocolError::Transport(LockdownError::with_errno(
@@ -1564,7 +1563,7 @@ impl<S: AsyncRead + AsyncWrite + Unpin + Send> RemoteXpcConn<S> {
             conn_send_window: H2_DEFAULT_WINDOW,
             stream_send_windows: HashMap::new(),
             peer_initial_window: H2_DEFAULT_WINDOW,
-            root_id: 1,
+            root_id: 2,
         };
 
         // Standard RemoteXPC HTTP/2 setup sequence
@@ -1579,7 +1578,7 @@ impl<S: AsyncRead + AsyncWrite + Unpin + Send> RemoteXpcConn<S> {
                 flags: 0x0000_0001,
                 message: Some(XpcValue::Dictionary(Vec::new())),
             }
-            .encode(conn.root_id),
+            .encode(1),
         )
         .await?;
 
@@ -1590,7 +1589,7 @@ impl<S: AsyncRead + AsyncWrite + Unpin + Send> RemoteXpcConn<S> {
                 flags: 0x0040_0001, // InitHandshake | AlwaysSet
                 message: None,
             }
-            .encode(conn.root_id),
+            .encode(1),
         )
         .await?;
 
@@ -1600,9 +1599,17 @@ impl<S: AsyncRead + AsyncWrite + Unpin + Send> RemoteXpcConn<S> {
                 flags: 0x0000_0201,
                 message: None,
             }
-            .encode(conn.root_id),
+            .encode(1),
         )
         .await?;
+
+        // Drain initial server SETTINGS / HEADERS frames so peer window & SETTINGS ACK settle
+        for _ in 0..3 {
+            match tokio::time::timeout(Duration::from_millis(180), conn.pump()).await {
+                Ok(Ok(())) => {}
+                _ => break,
+            }
+        }
 
         Ok(conn)
     }
@@ -1717,7 +1724,9 @@ impl<S: AsyncRead + AsyncWrite + Unpin + Send> RemoteXpcConn<S> {
         if expect_reply {
             flags |= 0x0001_0000; // WantingReply
         }
-        let encoded = XpcMessage { flags, message: Some(obj) }.encode(self.root_id);
+        let msg_id = self.root_id;
+        self.root_id = self.root_id.wrapping_add(1).max(2);
+        let encoded = XpcMessage { flags, message: Some(obj) }.encode(msg_id);
         self.send_channel(XPC_ROOT_CHANNEL, encoded).await
     }
 

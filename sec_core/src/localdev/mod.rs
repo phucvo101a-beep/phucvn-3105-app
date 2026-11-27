@@ -685,7 +685,14 @@ impl LocalDevManager {
     }
 
     fn ensure_backend(&mut self) -> Result<bool, String> {
-        if self.active_rsd.is_some() {
+        let has_fd00_upgrade = self
+            .candidates
+            .iter()
+            .any(|c| tunnel::is_strict_ipv6_ula_fd00(&c.host))
+            && self.active_rsd.as_ref().is_some_and(|s| {
+                !s.is_trusted_tunnel() && !tunnel::is_strict_ipv6_ula_fd00(&s.endpoint_host)
+            });
+        if self.active_rsd.is_some() && !has_fd00_upgrade {
             return Ok(true);
         }
         let report = self.check_status_report()?;
