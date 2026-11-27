@@ -27,7 +27,7 @@ final class BackupExtractorService: ObservableObject {
 
     private init() {}
 
-    static func extractsRootURL(fileManager: FileManager = .default) throws -> URL {
+    nonisolated static func extractsRootURL(fileManager: FileManager = .default) throws -> URL {
         let documents = try PatchWorkspaceService.documentsRootURL(fileManager: fileManager)
         let dir = documents.appendingPathComponent("BackupExtracts", isDirectory: true)
         try fileManager.createDirectory(at: dir, withIntermediateDirectories: true)
@@ -134,8 +134,8 @@ final class BackupExtractorService: ObservableObject {
             )
 
             switch mb2Result {
-            case .failure(let msg):
-                return .failure(makeError(msg))
+            case .failure(let err):
+                return .failure(makeError(err.message))
             case .success(let report):
                 let udidDir = URL(fileURLWithPath: report.staging_udid_dir, isDirectory: true)
                 let manifestURL = report.manifest_db_path.map { URL(fileURLWithPath: $0) }

@@ -488,7 +488,7 @@ final class AirliftLanServer: ObservableObject {
         let boundaryMarker = Data("--\(boundary)".utf8)
         let headerSep = Data("\r\n\r\n".utf8)
         guard let bStart = headChunk.range(of: boundaryMarker),
-              let hEnd = headChunk.range(of: headerSep, range: bStart.upperBound..<headChunk.endIndex),
+              let hEnd = headChunk.range(of: headerSep, options: [], in: bStart.upperBound..<headChunk.endIndex),
               let partHeaderStr = String(data: headChunk[bStart.upperBound..<hEnd.lowerBound], encoding: .utf8) else {
             sendTextResponse(connection: connection, status: "400 Bad Request", body: "Malformed multipart part")
             return

@@ -606,6 +606,18 @@ public struct LocalDevMb2Report: Codable {
     public let bytes_received: UInt64
 }
 
+public struct LocalDevBackupError: Error, LocalizedError, Sendable {
+    public let message: String
+
+    public init(_ message: String) {
+        self.message = message
+    }
+
+    public var errorDescription: String? {
+        message
+    }
+}
+
 private struct Mb2ExtractResponse: Codable {
     let success: Bool
     let error: String?
@@ -2100,27 +2112,27 @@ public final class LocalDevBridge: ObservableObject {
         bundleID: String,
         stagingDirectory: URL,
         freeBytes: UInt64
-    ) -> Result<LocalDevMb2Report, String> {
+    ) -> Result<LocalDevMb2Report, LocalDevBackupError> {
         guard isModuleEnabled else {
-            return .failure("LocalDev đang tắt — hãy bật LocalDevVPN & Pairing để dùng mobilebackup2.")
+            return .failure(LocalDevBackupError("LocalDev đang tắt — hãy bật LocalDevVPN & Pairing để dùng mobilebackup2."))
         }
         let keepAliveToken = BackgroundKeepAliveManager.shared.beginWorkToken()
         defer { BackgroundKeepAliveManager.shared.endWorkToken(keepAliveToken) }
         ensureCoreInitialized()
         guard let fnExtract = LocalDevLib.shared.fnMb2ExtractApp,
               let cStr = fnExtract(bundleID, stagingDirectory.path, freeBytes) else {
-            return .failure("Chức năng mobilebackup2 chưa sẵn sàng trong libsec_core.")
+            return .failure(LocalDevBackupError("Chức năng mobilebackup2 chưa sẵn sàng trong libsec_core."))
         }
         defer { LocalDevLib.shared.fnFreeString?(cStr) }
         let jsonStr = String(cString: cStr)
         guard let data = jsonStr.data(using: .utf8),
               let resp = try? JSONDecoder().decode(Mb2ExtractResponse.self, from: data) else {
-            return .failure("Phản hồi mobilebackup2 không hợp lệ")
+            return .failure(LocalDevBackupError("Phản hồi mobilebackup2 không hợp lệ"))
         }
         if resp.success, let report = resp.report {
             return .success(report)
         }
-        return .failure(resp.error ?? "Trích xuất mobilebackup2 thất bại")
+        return .failure(LocalDevBackupError(resp.error ?? "Trích xuất mobilebackup2 thất bại"))
     }
 
     public func currentBackupProgress() -> LocalDevMb2Progress? {
