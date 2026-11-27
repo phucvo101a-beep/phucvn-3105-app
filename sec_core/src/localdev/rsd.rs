@@ -410,15 +410,77 @@ pub struct RpPairingControlClient {
     peer_name: Option<String>,
 }
 
-fn extract_rppairing_xpc_payload(val: &XpcValue) -> Result<Vec<u8>, RpProtocolError> {
-    if let Some(raw) = val.dict_get_ci(&["value", "_0"]) {
-        if let Some(bytes) = raw.as_data() {
-            return Ok(bytes.to_vec());
-        }
-        if let Some(s) = raw.as_str() {
-            return Ok(s.as_bytes().to_vec());
+enum XpcRpFrame {
+    Payload(JsonValue),
+    SkipServiceVersion(Option<i64>),
+}
+
+fn xpc_value_to_json(val: &XpcValue) -> JsonValue {
+    match val {
+        XpcValue::Null => JsonValue::Null,
+        XpcValue::Bool(b) => JsonValue::Bool(*b),
+        XpcValue::Double(d) => serde_json::Number::from_f64(*d)
+            .map(JsonValue::Number)
+            .unwrap_or(JsonValue::Null),
+        XpcValue::Int64(i) => json!(*i),
+        XpcValue::UInt64(u) => json!(*u),
+        XpcValue::DateNanos(ns) => json!(*ns),
+        XpcValue::String(s) => JsonValue::String(s.clone()),
+        XpcValue::Data(bytes) => JsonValue::String(B64.encode(bytes)),
+        XpcValue::Uuid(bytes) => JsonValue::String(format_uuid_hyphenated(bytes)),
+        XpcValue::Array(items) => JsonValue::Array(items.iter().map(xpc_value_to_json).collect()),
+        XpcValue::Dictionary(entries) => {
+            let mut map = serde_json::Map::with_capacity(entries.len());
+            for (k, v) in entries {
+                map.insert(k.clone(), xpc_value_to_json(v));
+            }
+            JsonValue::Object(map)
         }
     }
+}
+
+fn decode_rppairing_xpc_frame(val: &XpcValue) -> Result<XpcRpFrame, RpProtocolError> {
+    if let Some(raw) = val.dict_get_ci(&["value", "_0"]) {
+        if let Some(bytes) = raw.as_data() {
+            let parsed = serde_json::from_slice::<JsonValue>(bytes).map_err(|e| {
+                RpProtocolError::Protocol(format!("Invalid RemotePairing XPC JSON: {}", e))
+            })?;
+            return Ok(XpcRpFrame::Payload(parsed));
+        }
+        if let Some(s) = raw.as_str() {
+            let parsed = serde_json::from_slice::<JsonValue>(s.as_bytes()).map_err(|e| {
+                RpProtocolError::Protocol(format!("Invalid RemotePairing XPC string JSON: {}", e))
+            })?;
+            return Ok(XpcRpFrame::Payload(parsed));
+        }
+        return Ok(XpcRpFrame::Payload(xpc_value_to_json(raw)));
+    }
+
+    // Fallback when XPC dictionary carries RemotePairing event/envelope fields directly without `"value"`
+    if val
+        .dict_get_ci(&[
+            "message",
+            "event",
+            "request",
+            "response",
+            "plain",
+            "streamEncrypted",
+            "originatedBy",
+            "sequenceNumber",
+            "pairingData",
+            "handshake",
+            "createListener",
+        ])
+        .is_some()
+    {
+        return Ok(XpcRpFrame::Payload(xpc_value_to_json(val)));
+    }
+
+    if let Some(ver_val) = val.dict_get_ci(&["ServiceVersion", "serviceVersion"]) {
+        let ver = ver_val.as_i64();
+        return Ok(XpcRpFrame::SkipServiceVersion(ver));
+    }
+
     Err(RpProtocolError::Protocol(format!(
         "Missing RemotePairing XPC 'value' field (keys: [{}])",
         val.summarize_dict_keys()
@@ -584,20 +646,34 @@ impl RpPairingControlClient {
                     .map_err(|e| RpProtocolError::Protocol(format!("Invalid RPPairing JSON: {}", e)))
             }
             RpControlTransport::RemoteXpc(xpc) => {
-                let (_, xpc_val) = tokio::time::timeout(Duration::from_secs(6), xpc.recv_any())
-                    .await
-                    .map_err(|_| {
-                        RpProtocolError::Transport(LockdownError::with_errno(
-                            LockdownErrorKind::Timeout,
-                            LockdownStage::Protocol,
-                            Some(60),
-                            "Timeout waiting for RemotePairing XPC response",
-                        ))
-                    })?
-                    .map_err(RpProtocolError::Protocol)?;
-                let body = extract_rppairing_xpc_payload(&xpc_val)?;
-                serde_json::from_slice(&body)
-                    .map_err(|e| RpProtocolError::Protocol(format!("Invalid RemotePairing XPC JSON: {}", e)))
+                const MAX_SERVICE_VERSION_FRAMES: usize = 8;
+                for _ in 0..=MAX_SERVICE_VERSION_FRAMES {
+                    let (ch, xpc_val) = tokio::time::timeout(Duration::from_secs(6), xpc.recv_any())
+                        .await
+                        .map_err(|_| {
+                            RpProtocolError::Transport(LockdownError::with_errno(
+                                LockdownErrorKind::Timeout,
+                                LockdownStage::Protocol,
+                                Some(60),
+                                "Timeout waiting for RemotePairing XPC response",
+                            ))
+                        })?
+                        .map_err(RpProtocolError::Protocol)?;
+                    match decode_rppairing_xpc_frame(&xpc_val)? {
+                        XpcRpFrame::Payload(json_val) => return Ok(json_val),
+                        XpcRpFrame::SkipServiceVersion(ver) => {
+                            eprintln!(
+                                "localdev: untrusted.tunnelservice ServiceVersion={:?} on ch={} — skipping and reading next XPC packet",
+                                ver, ch
+                            );
+                            continue;
+                        }
+                    }
+                }
+                Err(RpProtocolError::Protocol(
+                    "Exceeded ServiceVersion metadata XPC frames without RemotePairing payload"
+                        .to_string(),
+                ))
             }
         }
     }
@@ -1811,6 +1887,8 @@ impl AsyncWrite for RsdAsyncStream {
 
 pub const SERVICE_COREDEVICE_PROXY: &str = "com.apple.internal.devicecompute.CoreDeviceProxy";
 pub const SERVICE_UNTRUSTED_TUNNEL: &str = "com.apple.internal.dt.coredevice.untrusted.tunnelservice";
+pub const SERVICE_UNTRUSTED_TUNNEL_EVENT: &str =
+    "com.apple.internal.dt.coredevice.untrusted.tunnelserviceevent";
 pub const SERVICE_STREAMING_ZIP_CONDUIT_SHIM: &str = "com.apple.streaming_zip_conduit.shim.remote";
 pub const SERVICE_STREAMING_ZIP_CONDUIT: &str = "com.apple.streaming_zip_conduit";
 const SERVICE_LOCKDOWN_REMOTE_TRUSTED: &str = "com.apple.mobile.lockdown.remote.trusted";
@@ -2355,64 +2433,17 @@ async fn establish_coredevice_proxy_tunnel(
 > {
     let mut attempt_errors: Vec<String> = Vec::new();
 
-    // Strategy 1: Direct `com.apple.internal.devicecompute.CoreDeviceProxy` in RsdHandshake #1
-    if let Some(proxy_info) = services1.get(SERVICE_COREDEVICE_PROXY) {
-        let direct_attempt = async {
-            let s = outer.connect_raw_port(proxy_info.port).await?;
-            match CoreDeviceProxy::new(s).await {
-                Ok(proxy) => complete_coredevice_proxy_tunnel(proxy, uuid_seed, fallback_udid).await,
-                Err(first_err) if !proxy_info.uses_remote_xpc => {
-                    let mut s2 = outer.connect_raw_port(proxy_info.port).await?;
-                    if let Err(checkin_err) = async_rsd_checkin(&mut s2).await {
-                        return Err(format!("{} | checkin fallback: {}", first_err, checkin_err));
-                    }
-                    let proxy2 = CoreDeviceProxy::new(s2).await?;
-                    complete_coredevice_proxy_tunnel(proxy2, uuid_seed, fallback_udid).await
-                }
-                Err(first_err) => Err(first_err),
-            }
-        }
-        .await;
-
-        match direct_attempt {
-            Ok((handle, rsd2)) => return Ok((handle, rsd2, None)),
-            Err(e) => attempt_errors.push(format!("CoreDeviceProxy(port {}): {}", proxy_info.port, e)),
-        }
-    }
-
-    // Strategy 2: `com.apple.mobile.lockdown.remote.trusted` / `.untrusted` -> StartService(CoreDeviceProxy)
-    if let Some(ld_info) = services1
-        .get(SERVICE_LOCKDOWN_REMOTE_TRUSTED)
-        .or_else(|| services1.get(SERVICE_LOCKDOWN_REMOTE_UNTRUSTED))
+    // Strategy 1 (Priority over utun / LocalDevVPN): `com.apple.internal.dt.coredevice.untrusted.tunnelservice(event)`
+    // using credentials (`identifier`, `alt_irk`, `private_key`, `public_key`) from pairingFile.plist before CoreDeviceProxy.
+    if let Some((ut_name, ut_info)) = services1
+        .get(SERVICE_UNTRUSTED_TUNNEL_EVENT)
+        .map(|i| (SERVICE_UNTRUSTED_TUNNEL_EVENT, i))
+        .or_else(|| {
+            services1
+                .get(SERVICE_UNTRUSTED_TUNNEL)
+                .map(|i| (SERVICE_UNTRUSTED_TUNNEL, i))
+        })
     {
-        let ld_attempt = async {
-            let mut s = outer.connect_raw_port(ld_info.port).await?;
-            async_rsd_checkin(&mut s).await?;
-            let (svc_port, enable_ssl) =
-                async_start_service_over_lockdown_stream(s, SERVICE_COREDEVICE_PROXY).await?;
-            let svc_stream = outer.connect_raw_port(svc_port).await?;
-            if enable_ssl {
-                let pairing = lockdown_opt.ok_or_else(|| {
-                    "lockdown.remote StartService(CoreDeviceProxy) yêu cầu EnableServiceSSL nhưng thiếu X.509 PairingFile".to_string()
-                })?;
-                let tls = AsyncTlsStream::handshake(svc_stream, pairing).await?;
-                let proxy = CoreDeviceProxy::new(tls).await?;
-                complete_coredevice_proxy_tunnel(proxy, uuid_seed, fallback_udid).await
-            } else {
-                let proxy = CoreDeviceProxy::new(svc_stream).await?;
-                complete_coredevice_proxy_tunnel(proxy, uuid_seed, fallback_udid).await
-            }
-        }
-        .await;
-
-        match ld_attempt {
-            Ok((handle, rsd2)) => return Ok((handle, rsd2, None)),
-            Err(e) => attempt_errors.push(format!("lockdown.remote: {}", e)),
-        }
-    }
-
-    // Strategy 3: `com.apple.internal.dt.coredevice.untrusted.tunnelservice` + pairingFile credentials
-    if let Some(ut_info) = services1.get(SERVICE_UNTRUSTED_TUNNEL) {
         if let Some(rp) = rp_opt {
             let ut_attempt = async {
                 let s = outer.connect_raw_port(ut_info.port).await?;
@@ -2428,7 +2459,22 @@ async fn establish_coredevice_proxy_tunnel(
                     .create_tcp_listener()
                     .await
                     .map_err(|e| e.into_lockdown_error(LockdownStage::StartService).to_string())?;
-                let tun_stream = outer.connect_raw_port(listener_port).await?;
+                let tun_stream = match outer.connect_raw_port(listener_port).await {
+                    Ok(ts) => ts,
+                    Err(outer_err) if endpoint_host != "127.0.0.1" => {
+                        let direct = connect_async_transport(
+                            endpoint_host.to_string(),
+                            listener_port,
+                            Duration::from_millis(2500),
+                            LockdownStage::StartService,
+                            false,
+                        )
+                        .await
+                        .map_err(|e| format!("{} | direct {}:{}: {}", outer_err, endpoint_host, listener_port, e))?;
+                        RsdAsyncStream::Direct(direct)
+                    }
+                    Err(outer_err) => return Err(outer_err),
+                };
                 let (tls_stream, tun_info) =
                     connect_cd_tunnel(tun_stream, &ctrl.encryption_key).await?;
                 let client_ip: IpAddr = tun_info
@@ -2466,12 +2512,69 @@ async fn establish_coredevice_proxy_tunnel(
 
             match ut_attempt {
                 Ok((handle, rsd2, ctrl)) => return Ok((handle, rsd2, Some(ctrl))),
-                Err(e) => attempt_errors.push(format!("untrusted.tunnelservice: {}", e)),
+                Err(e) => attempt_errors.push(format!("{}: {}", ut_name, e)),
             }
         } else {
-            attempt_errors.push(
-                "untrusted.tunnelservice có mặt nhưng thiếu RemotePairing credentials (identifier/alt_irk/private_key/public_key)".to_string(),
-            );
+            attempt_errors.push(format!(
+                "{} có mặt nhưng thiếu RemotePairing credentials (identifier/alt_irk/private_key/public_key)",
+                ut_name
+            ));
+        }
+    }
+
+    // Strategy 2 (Fallback): `com.apple.internal.devicecompute.CoreDeviceProxy` in RsdHandshake #1
+    if let Some(proxy_info) = services1.get(SERVICE_COREDEVICE_PROXY) {
+        let direct_attempt = async {
+            let s = outer.connect_raw_port(proxy_info.port).await?;
+            match CoreDeviceProxy::new(s).await {
+                Ok(proxy) => complete_coredevice_proxy_tunnel(proxy, uuid_seed, fallback_udid).await,
+                Err(first_err) if !proxy_info.uses_remote_xpc => {
+                    let mut s2 = outer.connect_raw_port(proxy_info.port).await?;
+                    if let Err(checkin_err) = async_rsd_checkin(&mut s2).await {
+                        return Err(format!("{} | checkin fallback: {}", first_err, checkin_err));
+                    }
+                    let proxy2 = CoreDeviceProxy::new(s2).await?;
+                    complete_coredevice_proxy_tunnel(proxy2, uuid_seed, fallback_udid).await
+                }
+                Err(first_err) => Err(first_err),
+            }
+        }
+        .await;
+
+        match direct_attempt {
+            Ok((handle, rsd2)) => return Ok((handle, rsd2, None)),
+            Err(e) => attempt_errors.push(format!("CoreDeviceProxy(port {}): {}", proxy_info.port, e)),
+        }
+    }
+
+    // Strategy 3: `com.apple.mobile.lockdown.remote.trusted` / `.untrusted` -> StartService(CoreDeviceProxy)
+    if let Some(ld_info) = services1
+        .get(SERVICE_LOCKDOWN_REMOTE_TRUSTED)
+        .or_else(|| services1.get(SERVICE_LOCKDOWN_REMOTE_UNTRUSTED))
+    {
+        let ld_attempt = async {
+            let mut s = outer.connect_raw_port(ld_info.port).await?;
+            async_rsd_checkin(&mut s).await?;
+            let (svc_port, enable_ssl) =
+                async_start_service_over_lockdown_stream(s, SERVICE_COREDEVICE_PROXY).await?;
+            let svc_stream = outer.connect_raw_port(svc_port).await?;
+            if enable_ssl {
+                let pairing = lockdown_opt.ok_or_else(|| {
+                    "lockdown.remote StartService(CoreDeviceProxy) yêu cầu EnableServiceSSL nhưng thiếu X.509 PairingFile".to_string()
+                })?;
+                let tls = AsyncTlsStream::handshake(svc_stream, pairing).await?;
+                let proxy = CoreDeviceProxy::new(tls).await?;
+                complete_coredevice_proxy_tunnel(proxy, uuid_seed, fallback_udid).await
+            } else {
+                let proxy = CoreDeviceProxy::new(svc_stream).await?;
+                complete_coredevice_proxy_tunnel(proxy, uuid_seed, fallback_udid).await
+            }
+        }
+        .await;
+
+        match ld_attempt {
+            Ok((handle, rsd2)) => return Ok((handle, rsd2, None)),
+            Err(e) => attempt_errors.push(format!("lockdown.remote: {}", e)),
         }
     }
 

@@ -1914,6 +1914,47 @@ class SecuritySuiteTests(unittest.TestCase):
         ):
             self.assertIn(sym, ld_swift)
 
+    def test_19_untrusted_tunnelservice_service_version_skip_and_priority(self):
+        rsd_rs = (REPO_ROOT / "sec_core" / "src" / "localdev" / "rsd.rs").read_text("utf-8")
+        for sym in (
+            'pub const SERVICE_UNTRUSTED_TUNNEL: &str = "com.apple.internal.dt.coredevice.untrusted.tunnelservice"',
+            'pub const SERVICE_UNTRUSTED_TUNNEL_EVENT: &str =',
+            '"com.apple.internal.dt.coredevice.untrusted.tunnelserviceevent"',
+            "enum XpcRpFrame",
+            "SkipServiceVersion(Option<i64>)",
+            "fn xpc_value_to_json",
+            "fn decode_rppairing_xpc_frame",
+            "XpcRpFrame::SkipServiceVersion",
+            '"ServiceVersion"',
+            "continue;",
+        ):
+            self.assertIn(sym, rsd_rs)
+
+        # Verify decode_rppairing_xpc_frame handles direct RemotePairing dict fields when "value" is omitted
+        dec_start = rsd_rs.index("fn decode_rppairing_xpc_frame")
+        dec_end = rsd_rs.index("impl RpPairingControlClient", dec_start)
+        dec_block = rsd_rs[dec_start:dec_end]
+        for key in ("message", "event", "pairingData", "handshake", "createListener"):
+            self.assertIn(f'"{key}"', dec_block)
+        self.assertLess(
+            dec_block.index('"ServiceVersion"'),
+            dec_block.index("Missing RemotePairing XPC 'value' field"),
+        )
+
+        # Verify untrusted.tunnelservice(event) runs strictly before CoreDeviceProxy inside establish_coredevice_proxy_tunnel
+        est_start = rsd_rs.index("async fn establish_coredevice_proxy_tunnel")
+        est_end = rsd_rs.index("impl RsdTunnelSession", est_start)
+        est_block = rsd_rs[est_start:est_end]
+        self.assertLess(
+            est_block.index("services1\n        .get(SERVICE_UNTRUSTED_TUNNEL_EVENT)"),
+            est_block.index("services1.get(SERVICE_COREDEVICE_PROXY)"),
+        )
+        self.assertIn("perform_rsd_handshake(rsd_stream", est_block)
+
+        # Verify no forbidden raw binary plist literal introduced
+        non_comment = "\n".join(l for l in rsd_rs.splitlines() if not l.lstrip().startswith("//"))
+        self.assertNotIn("bplist00", non_comment)
+
 
 def main():
     parser = argparse.ArgumentParser(description="Run 3105 5-Scenario Security Test Suite")
