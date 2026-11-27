@@ -259,12 +259,12 @@ fn dict_has_pairing_markers(dict: &HashMap<String, PlistValue>) -> bool {
 }
 
 fn collect_candidate_dicts<'a>(root_dict: &'a HashMap<String, PlistValue>) -> Vec<&'a HashMap<String, PlistValue>> {
-    let mut result = Vec::new();
-    let mut queue = VecDeque::new();
+    let mut result: Vec<&'a HashMap<String, PlistValue>> = Vec::new();
+    let mut queue: VecDeque<(&'a HashMap<String, PlistValue>, usize)> = VecDeque::new();
     queue.push_back((root_dict, 0usize));
 
     while let Some((cur, depth)) = queue.pop_front() {
-        if result.iter().any(|existing| std::ptr::eq(*existing, cur)) {
+        if result.iter().any(|&existing| std::ptr::eq(existing, cur)) {
             continue;
         }
         result.push(cur);
