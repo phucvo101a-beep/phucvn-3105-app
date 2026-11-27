@@ -1431,6 +1431,63 @@ class SecuritySuiteTests(unittest.TestCase):
         app_swift = (REPO_ROOT / "ThreeOneOSFive" / "App.swift").read_text(encoding="utf-8")
         self.assertIn('ext == "json"', app_swift)
 
+    # -----------------------------------------------------------------------
+    # SCENARIO 12: Full User Apps & Games Scan, Access Badges & Quick Filter
+    # -----------------------------------------------------------------------
+    def test_12_full_user_apps_games_scan_and_filter(self):
+        apps_rs = (REPO_ROOT / "sec_core" / "src" / "localdev" / "apps.rs").read_text(encoding="utf-8")
+        for sym in (
+            "fn user_app_client_options()",
+            "LSSupportsOpeningDocumentsInPlace",
+            "CFBundleExecutable",
+            "ApplicationType",
+            "pub fn lookup_user_apps_over_stream",
+            "LookupResult",
+            "fn plist_truthy",
+            "SandboxLocked",
+            "DocumentsOnly",
+            "FullContainer",
+        ):
+            self.assertIn(sym, apps_rs)
+
+        rsd_rs = (REPO_ROOT / "sec_core" / "src" / "localdev" / "rsd.rs").read_text(encoding="utf-8")
+        for sym in (
+            "lookup_user_apps_over_stream",
+            "SandboxLocked",
+            "isAppClip",
+            "fileSharingEnabled",
+        ):
+            self.assertIn(sym, rsd_rs)
+
+        ld_swift = (REPO_ROOT / "ThreeOneOSFive" / "helpers" / "LocalDevBridge.swift").read_text(encoding="utf-8")
+        for sym in (
+            "isSandboxLocked",
+            "isAccessible",
+            "accessBadgeIcon",
+            "Toàn quyền Container",
+            "Chỉ Documents",
+            "Bị khóa Sandbox",
+            "default: return .orange",
+        ):
+            self.assertIn(sym, ld_swift)
+
+        browser_swift = (REPO_ROOT / "ThreeOneOSFive" / "views" / "AppDataBrowserView.swift").read_text(encoding="utf-8")
+        for sym in (
+            "enum AppAccessFilter",
+            "appAccessFilterBar",
+            "accessBadgeInfo",
+            "localDevAppByBundleID",
+            "queryMatchedApps",
+            "Sandbox nội bộ",
+            ".onChange(of: localDevBridge.currentStatus.isLive)",
+            "finishWithApps([])",
+        ):
+            self.assertIn(sym, browser_swift)
+
+        file_browser_swift = (REPO_ROOT / "ThreeOneOSFive" / "views" / "FileBrowserView.swift").read_text(encoding="utf-8")
+        self.assertIn("remoteErrorMessage", file_browser_swift)
+        self.assertIn("SANDBOX_LOCKED", file_browser_swift)
+
 
 def main():
     parser = argparse.ArgumentParser(description="Run 3105 5-Scenario Security Test Suite")

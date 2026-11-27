@@ -6,7 +6,7 @@ use super::pairing::PairingFile;
 use super::plist_util::PlistValue;
 use super::tunnel::{read_plist, send_plist, LockdownClient, LockdownStream};
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct LocalDevAppInfo {
@@ -70,38 +70,26 @@ impl AppScanner {
         Ok((discovered_apps, connected_host, connected_port))
     }
 
-    /// Streams installed user apps over any started `installation_proxy` stream (Lockdown or RSD).
+    /// Streams all installed `User` apps & games over any started `installation_proxy` stream (Lockdown or RSD),
+    /// retaining `FullContainer`, `DocumentsOnly`, and `SandboxLocked` items alike.
     pub fn scan_user_apps_over_stream(mut sock: LockdownStream) -> Result<Vec<LocalDevAppInfo>, String> {
-        sock.set_timeouts(12, 10);
+        sock.set_timeouts(25, 10);
 
-        // Send Browse request
         let mut req = HashMap::new();
         req.insert("Command".to_string(), PlistValue::String("Browse".to_string()));
-
-        let mut client_options = HashMap::new();
-        client_options.insert("ApplicationType".to_string(), PlistValue::String("User".to_string()));
-
-        let return_attrs = vec![
-            PlistValue::String("CFBundleIdentifier".to_string()),
-            PlistValue::String("CFBundleDisplayName".to_string()),
-            PlistValue::String("CFBundleName".to_string()),
-            PlistValue::String("CFBundleShortVersionString".to_string()),
-            PlistValue::String("CFBundleVersion".to_string()),
-            PlistValue::String("UIFileSharingEnabled".to_string()),
-            PlistValue::String("Entitlements".to_string()),
-            PlistValue::String("Path".to_string()),
-            PlistValue::String("Container".to_string()),
-        ];
-        client_options.insert("ReturnAttributes".to_string(), PlistValue::Array(return_attrs));
-
-        req.insert("ClientOptions".to_string(), PlistValue::Dictionary(client_options));
+        req.insert("ClientOptions".to_string(), PlistValue::Dictionary(user_app_client_options()));
         send_plist(&mut sock, &req)?;
 
         let mut discovered_apps = Vec::new();
+        let mut seen_bundles = HashSet::new();
 
         // Stream responses until Status == "Complete"
         loop {
-            let resp = read_plist(&mut sock)?;
+            let resp = match read_plist(&mut sock) {
+                Ok(r) => r,
+                Err(_) if !discovered_apps.is_empty() => break,
+                Err(e) => return Err(e),
+            };
             if let Some(err) = resp.get_string("Error") {
                 return Err(format!("installation_proxy error: {}", err));
             }
@@ -110,62 +98,165 @@ impl AppScanner {
             if let Some(PlistValue::Array(list)) = resp.get("CurrentList") {
                 for item in list {
                     if let Some(app_dict) = item.as_dict() {
-                        if let Some(app) = parse_app_record(app_dict) {
-                            discovered_apps.push(app);
+                        if let Some(app) = parse_app_record(None, app_dict) {
+                            if seen_bundles.insert(app.bundle_id.clone()) {
+                                discovered_apps.push(app);
+                            }
                         }
                     }
                 }
             }
 
-            if status == "Complete" {
+            if let Some(lookup_map) = resp.get("LookupResult").and_then(|v| v.as_dict()) {
+                for (bid, item) in lookup_map {
+                    if let Some(app_dict) = item.as_dict() {
+                        if let Some(app) = parse_app_record(Some(bid), app_dict) {
+                            if seen_bundles.insert(app.bundle_id.clone()) {
+                                discovered_apps.push(app);
+                            }
+                        }
+                    }
+                }
+            }
+
+            if status.eq_ignore_ascii_case("Complete") {
                 break;
             }
         }
 
-        // Sort apps alphabetically by display name
+        // Sort apps & games alphabetically by display name
+        discovered_apps.sort_by(|a, b| a.display_name.to_lowercase().cmp(&b.display_name.to_lowercase()));
+        Ok(discovered_apps)
+    }
+
+    /// Single-shot `Lookup` fallback for firmwares/proxies that prefer `Lookup` over `Browse`.
+    pub fn lookup_user_apps_over_stream(mut sock: LockdownStream) -> Result<Vec<LocalDevAppInfo>, String> {
+        sock.set_timeouts(25, 10);
+
+        let mut req = HashMap::new();
+        req.insert("Command".to_string(), PlistValue::String("Lookup".to_string()));
+        req.insert("ClientOptions".to_string(), PlistValue::Dictionary(user_app_client_options()));
+        send_plist(&mut sock, &req)?;
+
+        let resp = read_plist(&mut sock)?;
+        if let Some(err) = resp.get_string("Error") {
+            return Err(format!("installation_proxy lookup error: {}", err));
+        }
+
+        let mut discovered_apps = Vec::new();
+        let mut seen_bundles = HashSet::new();
+
+        if let Some(lookup_map) = resp.get("LookupResult").and_then(|v| v.as_dict()) {
+            for (bid, item) in lookup_map {
+                if let Some(app_dict) = item.as_dict() {
+                    if let Some(app) = parse_app_record(Some(bid), app_dict) {
+                        if seen_bundles.insert(app.bundle_id.clone()) {
+                            discovered_apps.push(app);
+                        }
+                    }
+                }
+            }
+        }
+        if let Some(PlistValue::Array(list)) = resp.get("CurrentList") {
+            for item in list {
+                if let Some(app_dict) = item.as_dict() {
+                    if let Some(app) = parse_app_record(None, app_dict) {
+                        if seen_bundles.insert(app.bundle_id.clone()) {
+                            discovered_apps.push(app);
+                        }
+                    }
+                }
+            }
+        }
+
         discovered_apps.sort_by(|a, b| a.display_name.to_lowercase().cmp(&b.display_name.to_lowercase()));
         Ok(discovered_apps)
     }
 }
 
-fn parse_app_record(dict: &HashMap<String, PlistValue>) -> Option<LocalDevAppInfo> {
-    let bundle_id = dict.get("CFBundleIdentifier")?.as_str()?.to_string();
+fn user_app_client_options() -> HashMap<String, PlistValue> {
+    let mut client_options = HashMap::new();
+    client_options.insert("ApplicationType".to_string(), PlistValue::String("User".to_string()));
 
-    let display_name = dict.get("CFBundleDisplayName")
+    let return_attrs = vec![
+        PlistValue::String("CFBundleIdentifier".to_string()),
+        PlistValue::String("CFBundleDisplayName".to_string()),
+        PlistValue::String("CFBundleName".to_string()),
+        PlistValue::String("CFBundleExecutable".to_string()),
+        PlistValue::String("CFBundleShortVersionString".to_string()),
+        PlistValue::String("CFBundleVersion".to_string()),
+        PlistValue::String("ApplicationType".to_string()),
+        PlistValue::String("UIFileSharingEnabled".to_string()),
+        PlistValue::String("LSSupportsOpeningDocumentsInPlace".to_string()),
+        PlistValue::String("Entitlements".to_string()),
+        PlistValue::String("Path".to_string()),
+        PlistValue::String("Container".to_string()),
+    ];
+    client_options.insert("ReturnAttributes".to_string(), PlistValue::Array(return_attrs));
+    client_options
+}
+
+fn plist_truthy(val: Option<&PlistValue>) -> bool {
+    match val {
+        Some(PlistValue::Boolean(b)) => *b,
+        Some(PlistValue::Integer(n)) => *n != 0,
+        Some(PlistValue::String(s)) => {
+            let clean = s.trim();
+            clean.eq_ignore_ascii_case("true")
+                || clean.eq_ignore_ascii_case("yes")
+                || clean == "1"
+        }
+        _ => false,
+    }
+}
+
+fn non_empty_str<'a>(dict: &'a HashMap<String, PlistValue>, key: &str) -> Option<&'a str> {
+    dict.get(key)
         .and_then(|v| v.as_str())
-        .or_else(|| dict.get("CFBundleName").and_then(|v| v.as_str()))
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+}
+
+fn parse_app_record(fallback_bundle_id: Option<&str>, dict: &HashMap<String, PlistValue>) -> Option<LocalDevAppInfo> {
+    let bundle_id = non_empty_str(dict, "CFBundleIdentifier")
+        .or_else(|| fallback_bundle_id.map(str::trim).filter(|s| !s.is_empty()))?
+        .to_string();
+
+    if let Some(app_type) = non_empty_str(dict, "ApplicationType") {
+        if !app_type.eq_ignore_ascii_case("User") {
+            return None;
+        }
+    }
+
+    let display_name = non_empty_str(dict, "CFBundleDisplayName")
+        .or_else(|| non_empty_str(dict, "CFBundleName"))
+        .or_else(|| non_empty_str(dict, "CFBundleExecutable"))
         .unwrap_or(&bundle_id)
         .to_string();
 
-    let version = dict.get("CFBundleShortVersionString")
-        .and_then(|v| v.as_str())
-        .or_else(|| dict.get("CFBundleVersion").and_then(|v| v.as_str()))
+    let version = non_empty_str(dict, "CFBundleShortVersionString")
+        .or_else(|| non_empty_str(dict, "CFBundleVersion"))
         .unwrap_or("1.0")
         .to_string();
 
-    let file_sharing_enabled = dict.get("UIFileSharingEnabled")
-        .and_then(|v| v.as_bool())
-        .unwrap_or(false);
+    let ui_file_sharing = plist_truthy(dict.get("UIFileSharingEnabled"));
+    let open_in_place = plist_truthy(dict.get("LSSupportsOpeningDocumentsInPlace"));
+    let file_sharing_enabled = ui_file_sharing || open_in_place;
 
-    let container_path = dict.get("Container")
-        .and_then(|v| v.as_str())
-        .map(|s| s.to_string());
-
-    let bundle_path = dict.get("Path")
-        .and_then(|v| v.as_str())
-        .map(|s| s.to_string());
+    let container_path = non_empty_str(dict, "Container").map(|s| s.to_string());
+    let bundle_path = non_empty_str(dict, "Path").map(|s| s.to_string());
 
     // Check entitlements for get-task-allow (developer signed)
-    let is_developer_signed = dict.get("Entitlements")
-        .and_then(|e| e.as_dict())
-        .and_then(|ent| ent.get("get-task-allow"))
-        .and_then(|v| v.as_bool())
-        .unwrap_or(false);
+    let is_developer_signed = plist_truthy(
+        dict.get("Entitlements")
+            .and_then(|e| e.as_dict())
+            .and_then(|ent| ent.get("get-task-allow")),
+    );
 
-    // Categorize access level:
+    // Categorize access level without hiding locked App Store apps/games:
     // 1. Sideloaded / Dev apps with get-task-allow -> FullContainer
-    // 2. Apps with UIFileSharingEnabled -> DocumentsOnly
-    // 3. Locked App Store apps -> SandboxLocked
+    // 2. Apps with UIFileSharingEnabled or LSSupportsOpeningDocumentsInPlace -> DocumentsOnly
+    // 3. Locked App Store apps & games -> SandboxLocked (retained in list)
     let access_type = if is_developer_signed {
         "FullContainer".to_string()
     } else if file_sharing_enabled {

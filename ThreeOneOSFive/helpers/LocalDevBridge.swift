@@ -531,7 +531,7 @@ public struct LocalDevApp: Codable, Identifiable {
         switch access_type {
         case "FullContainer": return .green
         case "DocumentsOnly": return .blue
-        default: return .secondary
+        default: return .orange
         }
     }
 
@@ -541,6 +541,22 @@ public struct LocalDevApp: Codable, Identifiable {
         case "DocumentsOnly": return "Chỉ Documents"
         default: return "Bị khóa Sandbox"
         }
+    }
+
+    public var accessBadgeIcon: String {
+        switch access_type {
+        case "FullContainer": return "lock.open.fill"
+        case "DocumentsOnly": return "doc.text.fill"
+        default: return "lock.fill"
+        }
+    }
+
+    public var isSandboxLocked: Bool {
+        access_type != "FullContainer" && access_type != "DocumentsOnly"
+    }
+
+    public var isAccessible: Bool {
+        !isSandboxLocked
     }
 }
 

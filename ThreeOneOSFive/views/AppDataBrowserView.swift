@@ -10,6 +10,7 @@ struct AppDataBrowserView: View {
     @State private var apps: [InstalledApp] = []
     @ObservedObject private var localDevBridge = LocalDevBridge.shared
     @State private var appSearchText = ""
+    @State private var accessFilter: AppAccessFilter = .all
     @FocusState private var isAppSearchFocused: Bool
     @State private var isLoading = false
     @State private var isResolving = false
@@ -36,19 +37,60 @@ struct AppDataBrowserView: View {
         self.onOpenLogs = onOpenLogs
     }
 
-    private var filteredApps: [InstalledApp] {
+    private typealias AppAccessBadge = (title: String, icon: String, color: Color, isSandboxLocked: Bool)
+
+    private var localDevAppByBundleID: [String: LocalDevApp] {
+        var map: [String: LocalDevApp] = [:]
+        map.reserveCapacity(localDevBridge.installedApps.count)
+        for item in localDevBridge.installedApps where map[item.bundle_id] == nil {
+            map[item.bundle_id] = item
+        }
+        return map
+    }
+
+    private func accessBadgeInfo(for app: InstalledApp, devLookup: [String: LocalDevApp]) -> AppAccessBadge {
+        if let devApp = devLookup[app.bundleID] {
+            return (devApp.accessBadgeTitle, devApp.accessBadgeIcon, devApp.accessBadgeColor, devApp.isSandboxLocked)
+        }
+        if ContainerStore.isWithinOwnSandbox(app.containerPath) {
+            return ("Sandbox nội bộ", "checkmark.shield.fill", AppTheme.success, false)
+        }
+        if ContainerStore.hasPrivilegedContainerAccess() {
+            return ("Toàn quyền Container", "lock.open.fill", .green, false)
+        }
+        return ("Bị khóa Sandbox", "lock.fill", .orange, true)
+    }
+
+    private var queryMatchedApps: [InstalledApp] {
         let query = appSearchText.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !query.isEmpty else { return apps }
+        let devLookup = localDevAppByBundleID
 
         return apps.filter { app in
-            app.displayName.localizedStandardContains(query)
+            if app.displayName.localizedStandardContains(query)
                 || app.bundleID.localizedStandardContains(query)
-                || app.version.localizedStandardContains(query)
+                || app.version.localizedStandardContains(query) {
+                return true
+            }
+            return accessBadgeInfo(for: app, devLookup: devLookup).title.localizedStandardContains(query)
+        }
+    }
+
+    private var filteredApps: [InstalledApp] {
+        let matched = queryMatchedApps
+        let devLookup = localDevAppByBundleID
+        switch accessFilter {
+        case .all:
+            return matched
+        case .accessible:
+            return matched.filter { !accessBadgeInfo(for: $0, devLookup: devLookup).isSandboxLocked }
+        case .sandboxLocked:
+            return matched.filter { accessBadgeInfo(for: $0, devLookup: devLookup).isSandboxLocked }
         }
     }
 
     private var hasAppSearchQuery: Bool {
-        !appSearchText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+        !appSearchText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || accessFilter != .all
     }
 
     private var overlayState: AppBrowserOverlayState {
@@ -98,6 +140,16 @@ struct AppDataBrowserView: View {
                         workspaceURL = try? PatchWorkspaceService.documentsRootURL()
                         patchesURL = try? PatchWorkspaceService.patchesRootURL()
                     }
+                    if !hasLoaded && (!localDevBridge.installedApps.isEmpty || localDevBridge.currentStatus.isLive) {
+                        hasLoaded = true
+                        reload()
+                    }
+                }
+                .onChange(of: localDevBridge.currentStatus.isLive) { isLive in
+                    if isLive && !isLoading && !isResolving && apps.count <= 1 {
+                        hasLoaded = true
+                        reload()
+                    }
                 }
                 .navigationDestination(for: FileBrowserDestination.self) { destination in
                     if destination.startPath == destination.containerPath {
@@ -134,7 +186,8 @@ struct AppDataBrowserView: View {
     }
 
     private var appList: some View {
-        ScrollView(showsIndicators: false) {
+        let devLookup = localDevAppByBundleID
+        return ScrollView(showsIndicators: false) {
             LazyVStack(alignment: .leading, spacing: 13) {
                 browserHero
                     .padding(.top, 9)
@@ -189,17 +242,18 @@ struct AppDataBrowserView: View {
                 LocalDevStatusCard()
                     .padding(.bottom, 2)
 
-                if !apps.isEmpty {
-                    appSearchField
-                        .padding(.bottom, 2)
-                }
-
                 appDataScannerSection
 
                 if !apps.isEmpty {
+                    appSearchField
+                        .padding(.top, 2)
+
+                    appAccessFilterBar
+                        .padding(.bottom, 2)
+
                     HStack(alignment: .lastTextBaseline) {
                         VStack(alignment: .leading, spacing: 3) {
-                            Text(hasAppSearchQuery ? "KẾT QUẢ TÌM KIẾM" : "ỨNG DỤNG ĐÃ PHÁT HIỆN")
+                            Text(hasAppSearchQuery ? "KẾT QUẢ TÌM KIẾM & LỌC" : "ỨNG DỤNG & GAME ĐÃ PHÁT HIỆN")
                                 .font(.system(size: 10, weight: .heavy, design: .rounded))
                                 .tracking(1.25)
                                 .foregroundStyle(AppTheme.accentSoft)
@@ -212,13 +266,13 @@ struct AppDataBrowserView: View {
                         Spacer()
                     }
                     .padding(.horizontal, 3)
-                    .padding(.top, 6)
+                    .padding(.top, 4)
 
                     if filteredApps.isEmpty {
                         appSearchEmptyState
                     } else {
                         ForEach(filteredApps) { app in
-                            appNavigationRow(app)
+                            appNavigationRow(app, badge: accessBadgeInfo(for: app, devLookup: devLookup))
                         }
                     }
                 }
@@ -509,6 +563,61 @@ struct AppDataBrowserView: View {
         }
     }
 
+    private var appAccessFilterBar: some View {
+        let devLookup = localDevAppByBundleID
+        let matched = queryMatchedApps
+        let accessibleCount = matched.filter { !accessBadgeInfo(for: $0, devLookup: devLookup).isSandboxLocked }.count
+        let lockedCount = matched.count - accessibleCount
+
+        return ScrollView(.horizontal, showsIndicators: false) {
+            HStack(spacing: 8) {
+                accessFilterChip(.all, title: "Tất cả", count: matched.count, tint: AppTheme.accent)
+                accessFilterChip(.accessible, title: "Mở được", count: accessibleCount, tint: AppTheme.success)
+                accessFilterChip(.sandboxLocked, title: "Khóa Sandbox", count: lockedCount, tint: .orange)
+            }
+            .padding(.horizontal, 2)
+        }
+    }
+
+    private func accessFilterChip(
+        _ filter: AppAccessFilter,
+        title: String,
+        count: Int,
+        tint: Color
+    ) -> some View {
+        let isSelected = accessFilter == filter
+        return Button {
+            withAnimation(interfaceAnimation) {
+                accessFilter = filter
+            }
+        } label: {
+            HStack(spacing: 5) {
+                Text(title)
+                    .font(.system(size: 11, weight: .bold, design: .rounded))
+                Text("\(count)")
+                    .font(.system(size: 10, weight: .heavy, design: .monospaced))
+                    .monospacedDigit()
+                    .padding(.horizontal, 5)
+                    .padding(.vertical, 1.5)
+                    .background(
+                        (isSelected ? Color.black.opacity(0.18) : Color.white.opacity(0.10)),
+                        in: Capsule()
+                    )
+            }
+            .foregroundStyle(isSelected ? Color.black : Color.white.opacity(0.88))
+            .padding(.horizontal, 11)
+            .padding(.vertical, 6)
+            .background(
+                isSelected ? tint : AppTheme.elevatedBackground.opacity(0.88),
+                in: Capsule()
+            )
+            .overlay {
+                Capsule().strokeBorder(isSelected ? tint : Color.white.opacity(0.12), lineWidth: 1)
+            }
+        }
+        .buttonStyle(AppPressableStyle())
+    }
+
     private var sandboxScopeNoticeCard: some View {
         HStack(alignment: .top, spacing: 11) {
             Image(systemName: "checkmark.shield.fill")
@@ -522,7 +631,7 @@ struct AppDataBrowserView: View {
                     .foregroundStyle(.white)
                 Text(
                     localDevBridge.currentStatus.isLive
-                        ? "LocalDev đã kết nối: có thể duyệt app hỗ trợ File Sharing hoặc dev-signed."
+                        ? "LocalDev đã kết nối: hiển thị toàn bộ ứng dụng & game User kèm nhãn quyền truy cập (Toàn quyền / Chỉ Documents / Bị khóa Sandbox)."
                         : "iOS non-JB chặn app đọc trực tiếp container app khác (đây là cơ chế bảo mật Sandbox, không phải lỗi phiên bản iOS). Hãy dùng Documents, 3105-Diagnostics qua USB hoặc bật LocalDev."
                 )
                 .font(.system(size: 10, weight: .medium))
@@ -547,7 +656,7 @@ struct AppDataBrowserView: View {
                     Text(
                         !localDevBridge.isModuleEnabled
                             ? "LocalDev đang tắt — đang duyệt an toàn trong Hộp cát (Sandbox) của app"
-                            : (apps.isEmpty ? "Chỉ quét khi bạn cần mở thư mục Data riêng của app khác" : "Đã phát hiện \(apps.count) vùng dữ liệu ứng dụng")
+                            : (apps.isEmpty ? "Quét toàn bộ ứng dụng & game User đã cài trên thiết bị" : "Đã phát hiện \(apps.count) ứng dụng & game trên thiết bị")
                     )
                         .font(.system(size: 10, weight: .medium))
                         .foregroundStyle(AppTheme.subduedText)
@@ -582,7 +691,7 @@ struct AppDataBrowserView: View {
                     } else {
                         Image(systemName: apps.isEmpty ? "arrow.triangle.2.circlepath" : "arrow.clockwise")
                             .font(.system(size: 12, weight: .bold))
-                        Text(apps.isEmpty ? "Bắt đầu quét kho ứng dụng" : "Quét lại danh sách ứng dụng")
+                        Text(apps.isEmpty ? "Quét toàn bộ ứng dụng & game" : "Quét lại ứng dụng & game")
                             .font(.system(size: 12, weight: .bold))
                     }
                 }
@@ -641,7 +750,7 @@ struct AppDataBrowserView: View {
     }
 
     @ViewBuilder
-    private func appNavigationRow(_ app: InstalledApp) -> some View {
+    private func appNavigationRow(_ app: InstalledApp, badge: AppAccessBadge) -> some View {
         let destination = FileBrowserDestination(
             containerPath: app.containerPath,
             startPath: app.containerPath,
@@ -650,13 +759,13 @@ struct AppDataBrowserView: View {
         )
 
         if app.containerPath.isEmpty {
-            appCard(app, isAvailable: false)
+            appCard(app, isAvailable: false, badge: badge)
                 .accessibilityHint("Không tìm thấy đường dẫn dữ liệu của ứng dụng này")
         } else {
             Button {
                 pushDestination(destination)
             } label: {
-                appCard(app, isAvailable: true)
+                appCard(app, isAvailable: true, badge: badge)
                     .frame(maxWidth: .infinity, alignment: .leading)
                     .contentShape(RoundedRectangle(cornerRadius: 21, style: .continuous))
             }
@@ -669,8 +778,11 @@ struct AppDataBrowserView: View {
         }
     }
 
-    private func appCard(_ app: InstalledApp, isAvailable: Bool) -> some View {
-        HStack(spacing: 13) {
+    private func appCard(_ app: InstalledApp, isAvailable: Bool, badge: AppAccessBadge? = nil) -> some View {
+        let resolvedBadge = badge ?? ("Bị khóa Sandbox", "lock.fill", Color.orange, true)
+        let isLocked = !isAvailable || resolvedBadge.isSandboxLocked
+
+        return HStack(spacing: 13) {
             BrowserAppIcon(app: app)
                 .frame(width: 47, height: 47)
                 .background(
@@ -704,38 +816,36 @@ struct AppDataBrowserView: View {
                     .lineLimit(1)
                     .truncationMode(.middle)
 
-                if !app.version.isEmpty {
-                    HStack(spacing: 6) {
+                HStack(spacing: 6) {
+                    if !app.version.isEmpty {
                         Text("VERSION  \(app.version)")
                             .font(.system(size: 8, weight: .bold, design: .monospaced))
                             .tracking(0.45)
                             .foregroundStyle(AppTheme.accentSoft.opacity(0.86))
                             .lineLimit(1)
-
-                        if let devApp = LocalDevBridge.shared.installedApps.first(where: { $0.bundle_id == app.bundleID }) {
-                            Text(devApp.accessBadgeTitle)
-                                .font(.system(size: 7, weight: .bold))
-                                .foregroundStyle(devApp.accessBadgeColor)
-                                .padding(.horizontal, 5)
-                                .padding(.vertical, 1.5)
-                                .background(devApp.accessBadgeColor.opacity(0.12), in: Capsule())
-                        }
                     }
-                } else if let devApp = LocalDevBridge.shared.installedApps.first(where: { $0.bundle_id == app.bundleID }) {
-                    Text(devApp.accessBadgeTitle)
-                        .font(.system(size: 7, weight: .bold))
-                        .foregroundStyle(devApp.accessBadgeColor)
-                        .padding(.horizontal, 5)
-                        .padding(.vertical, 1.5)
-                        .background(devApp.accessBadgeColor.opacity(0.12), in: Capsule())
+
+                    HStack(spacing: 3) {
+                        Image(systemName: resolvedBadge.icon)
+                            .font(.system(size: 7, weight: .bold))
+                        Text(resolvedBadge.title)
+                            .font(.system(size: 7.5, weight: .bold))
+                    }
+                    .foregroundStyle(resolvedBadge.color)
+                    .padding(.horizontal, 6)
+                    .padding(.vertical, 2)
+                    .background(resolvedBadge.color.opacity(0.14), in: Capsule())
+                    .overlay {
+                        Capsule().strokeBorder(resolvedBadge.color.opacity(0.28), lineWidth: 0.5)
+                    }
                 }
             }
 
             Spacer(minLength: 4)
 
-            Image(systemName: isAvailable ? "chevron.right" : "lock.fill")
+            Image(systemName: isLocked ? "lock.fill" : "chevron.right")
                 .font(.system(size: 11, weight: .bold))
-                .foregroundStyle(isAvailable ? AppTheme.accent : AppTheme.subduedText)
+                .foregroundStyle(!isAvailable ? AppTheme.subduedText : (isLocked ? Color.orange : AppTheme.accent))
                 .frame(width: 31, height: 31)
                 .background(Color.white.opacity(0.065), in: Circle())
                 .overlay { Circle().strokeBorder(Color.white.opacity(0.10), lineWidth: 1) }
@@ -743,8 +853,8 @@ struct AppDataBrowserView: View {
         .padding(.horizontal, 13)
         .padding(.vertical, 12)
         .frame(minHeight: 76)
-        .background(cardSurface(tint: isAvailable ? AppTheme.accentSoft : AppTheme.subduedText))
-        .opacity(isAvailable ? 1 : 0.58)
+        .background(cardSurface(tint: isLocked ? Color.orange : AppTheme.accentSoft))
+        .opacity(!isAvailable ? 0.58 : (isLocked ? 0.85 : 1))
     }
 
     private func cardSurface(tint: Color) -> some View {
@@ -758,17 +868,25 @@ struct AppDataBrowserView: View {
     }
 
     private var appSearchEmptyState: some View {
-        VStack(spacing: 11) {
+        let trimmedQuery = appSearchText.trimmingCharacters(in: .whitespacesAndNewlines)
+        return VStack(spacing: 11) {
             Image(systemName: "magnifyingglass")
                 .font(.system(size: 27, weight: .light))
                 .foregroundStyle(AppTheme.accentSoft)
-            Text(language.text("browser.search_apps_no_results", appSearchText))
+            Text(
+                trimmedQuery.isEmpty
+                    ? "Không có ứng dụng nào trong nhóm bộ lọc hiện tại."
+                    : language.text("browser.search_apps_no_results", appSearchText)
+            )
                 .font(.system(size: 12, weight: .semibold))
                 .foregroundStyle(AppTheme.subduedText)
                 .multilineTextAlignment(.center)
 
-            Button(language.text("browser.clear_search")) {
-                withAnimation(interfaceAnimation) { appSearchText = "" }
+            Button(trimmedQuery.isEmpty ? "Hiển thị tất cả" : language.text("browser.clear_search")) {
+                withAnimation(interfaceAnimation) {
+                    appSearchText = ""
+                    accessFilter = .all
+                }
             }
             .font(.system(size: 11, weight: .bold, design: .rounded))
             .foregroundStyle(AppTheme.pageBackground)
@@ -995,6 +1113,14 @@ struct AppDataBrowserView: View {
             finishWithApps([])
         }
     }
+}
+
+private enum AppAccessFilter: String, CaseIterable, Identifiable {
+    case all
+    case accessible
+    case sandboxLocked
+
+    var id: String { rawValue }
 }
 
 private enum AppBrowserOverlayState: Equatable {

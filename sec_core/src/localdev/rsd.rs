@@ -1928,20 +1928,57 @@ impl RsdTunnelSession {
     pub fn scan_apps(&self) -> Result<Vec<LocalDevAppInfo>, String> {
         let inst_rsd = obfstr!("com.apple.mobile.installation_proxy.shim.remote").to_string();
         let inst_classic = obfstr!("com.apple.mobile.installation_proxy").to_string();
-        if let Ok(stream) = self.open_checked_in_service(&[inst_rsd.as_str(), inst_classic.as_str()]) {
-            return super::apps::AppScanner::scan_user_apps_over_stream(
+        let inst_candidates = [inst_rsd.as_str(), inst_classic.as_str()];
+
+        let mut primary_apps: Option<Vec<LocalDevAppInfo>> = None;
+        let mut inst_err: Option<String> = None;
+
+        if let Ok(stream) = self.open_checked_in_service(&inst_candidates) {
+            match super::apps::AppScanner::scan_user_apps_over_stream(
                 super::tunnel::LockdownStream::RsdTunnel(stream),
-            );
+            ) {
+                Ok(list) if !list.is_empty() => {
+                    primary_apps = Some(list);
+                }
+                Ok(_) => {}
+                Err(e) => {
+                    inst_err = Some(e);
+                }
+            }
+        }
+
+        if primary_apps.is_none() {
+            if let Ok(stream) = self.open_checked_in_service(&inst_candidates) {
+                match super::apps::AppScanner::lookup_user_apps_over_stream(
+                    super::tunnel::LockdownStream::RsdTunnel(stream),
+                ) {
+                    Ok(list) if !list.is_empty() => {
+                        primary_apps = Some(list);
+                        inst_err = None;
+                    }
+                    Ok(_) => {}
+                    Err(e) => {
+                        if inst_err.is_none() {
+                            inst_err = Some(e);
+                        }
+                    }
+                }
+            }
         }
 
         let app_svc_name = obfstr!("com.apple.coredevice.appservice").to_string();
-        let info = self.services.get(app_svc_name.as_str()).ok_or_else(|| {
-            "Không tìm thấy installation_proxy.shim.remote hoặc coredevice.appservice trong RSD".to_string()
-        })?;
+        let Some(info) = self.services.get(app_svc_name.as_str()) else {
+            return primary_apps.ok_or_else(|| {
+                inst_err.unwrap_or_else(|| {
+                    "Không tìm thấy installation_proxy.shim.remote hoặc coredevice.appservice trong RSD"
+                        .to_string()
+                })
+            });
+        };
         let port = info.port;
 
-        let rt = runtime()?;
         let core_device_req = |transport: &RsdTransport| -> Result<Vec<LocalDevAppInfo>, String> {
+            let rt = runtime()?;
             match transport {
                 RsdTransport::CdTunnel { handle, .. } => {
                     let mut h = handle.clone();
@@ -1950,7 +1987,9 @@ impl RsdTunnelSession {
                             .await
                             .map_err(|_| "AppService connect timeout".to_string())?
                             .map_err(|e| format!("AppService connect failed: {}", e))?;
-                        fetch_apps_via_coredevice_xpc(s).await
+                        tokio::time::timeout(Duration::from_secs(8), fetch_apps_via_coredevice_xpc(s))
+                            .await
+                            .map_err(|_| "AppService RPC timeout".to_string())?
                     })
                 }
                 RsdTransport::DirectHost { host } => {
@@ -1965,12 +2004,43 @@ impl RsdTunnelSession {
                         )
                         .await
                         .map_err(|e| e.to_string())?;
-                        fetch_apps_via_coredevice_xpc(s).await
+                        tokio::time::timeout(Duration::from_secs(8), fetch_apps_via_coredevice_xpc(s))
+                            .await
+                            .map_err(|_| "AppService RPC timeout".to_string())?
                     })
                 }
             }
         };
-        core_device_req(&self.transport)
+
+        let core_result = core_device_req(&self.transport);
+        match (primary_apps, core_result) {
+            (Some(mut list), Ok(extra)) => {
+                // Giữ phân loại quyền chính xác từ installation_proxy, bổ sung các app/game còn thiếu từ CoreDevice listapps.
+                let mut idx_by_bundle: HashMap<String, usize> = list
+                    .iter()
+                    .enumerate()
+                    .map(|(i, a)| (a.bundle_id.clone(), i))
+                    .collect();
+                for app in extra {
+                    if let Some(&idx) = idx_by_bundle.get(&app.bundle_id) {
+                        if list[idx].display_name == list[idx].bundle_id && app.display_name != app.bundle_id {
+                            list[idx].display_name = app.display_name;
+                        }
+                        if list[idx].bundle_path.is_none() {
+                            list[idx].bundle_path = app.bundle_path;
+                        }
+                    } else {
+                        idx_by_bundle.insert(app.bundle_id.clone(), list.len());
+                        list.push(app);
+                    }
+                }
+                list.sort_by(|a, b| a.display_name.to_lowercase().cmp(&b.display_name.to_lowercase()));
+                Ok(list)
+            }
+            (Some(list), Err(_)) => Ok(list),
+            (None, Ok(extra)) => Ok(extra),
+            (None, Err(core_err)) => Err(inst_err.unwrap_or(core_err)),
+        }
     }
 
     pub fn close(self) {
@@ -2061,10 +2131,22 @@ async fn fetch_apps_via_coredevice_xpc<S: AsyncRead + AsyncWrite + Unpin + Send>
     let mut apps = Vec::new();
     let mut seen = HashSet::new();
     for item in items {
-        let Some(bundle_id) = item.dict_get("bundleIdentifier").and_then(|v| v.as_str()) else {
+        let Some(bundle_id) = item
+            .dict_get("bundleIdentifier")
+            .and_then(|v| v.as_str())
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+        else {
             continue;
         };
         if !seen.insert(bundle_id.to_string()) {
+            continue;
+        }
+        let is_app_clip = item
+            .dict_get("isAppClip")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false);
+        if is_app_clip {
             continue;
         }
         let is_first_party = item
@@ -2081,33 +2163,46 @@ async fn fetch_apps_via_coredevice_xpc<S: AsyncRead + AsyncWrite + Unpin + Send>
         let display_name = item
             .dict_get("name")
             .and_then(|v| v.as_str())
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
             .unwrap_or(bundle_id)
             .to_string();
         let version = item
             .dict_get("version")
             .or_else(|| item.dict_get("bundleVersion"))
             .and_then(|v| v.as_str())
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
             .unwrap_or("1.0")
             .to_string();
         let bundle_path = item
             .dict_get("path")
             .and_then(|v| v.as_str())
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
             .map(|s| s.to_string());
         let is_dev = item
             .dict_get("isDeveloperApp")
             .and_then(|v| v.as_bool())
             .unwrap_or(false);
+        let file_sharing = item
+            .dict_get("fileSharingEnabled")
+            .or_else(|| item.dict_get("isFileSharingEnabled"))
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false);
         let access_type = if is_dev {
             "FullContainer".to_string()
-        } else {
+        } else if file_sharing {
             "DocumentsOnly".to_string()
+        } else {
+            "SandboxLocked".to_string()
         };
         apps.push(LocalDevAppInfo {
             bundle_id: bundle_id.to_string(),
             display_name,
             version,
             access_type,
-            file_sharing_enabled: !is_first_party,
+            file_sharing_enabled: is_dev || file_sharing,
             container_path: None,
             bundle_path,
             is_developer_signed: is_dev,

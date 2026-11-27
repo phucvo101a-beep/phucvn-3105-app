@@ -19,6 +19,7 @@ struct FileBrowserView: View {
     @State private var searchText = ""
     @FocusState private var isSearchFocused: Bool
     @State private var isLoadingEntries = true
+    @State private var remoteErrorMessage: String?
     @State private var hasGranted = false
     @State private var pendingReplacementRequest: FileReplacementRequest?
     @State private var replacementRequest: FileReplacementRequest?
@@ -614,12 +615,32 @@ struct FileBrowserView: View {
 
     private var fileEmptyView: some View {
         VStack(spacing: 10) {
-            Image(systemName: "folder")
-                .font(.system(size: AppTheme.emptyIconSize, weight: .light))
-                .foregroundStyle(AppTheme.accentSoft)
-            Text(language.text("browser.empty_folder"))
-                .font(.subheadline.weight(.medium))
+            if let remoteErr = remoteErrorMessage, !remoteErr.isEmpty {
+                let isSandboxLocked = remoteErr.localizedCaseInsensitiveContains("SANDBOX_LOCKED")
+                Image(systemName: isSandboxLocked ? "lock.shield.fill" : "exclamationmark.triangle.fill")
+                    .font(.system(size: AppTheme.emptyIconSize, weight: .light))
+                    .foregroundStyle(.orange)
+                Text(isSandboxLocked ? "Ứng dụng bị khóa Sandbox bởi iOS" : "Không thể mở thư mục qua LocalDev")
+                    .font(.subheadline.weight(.bold))
+                    .foregroundStyle(.white)
+                    .multilineTextAlignment(.center)
+                Text(
+                    isSandboxLocked
+                        ? "iOS chỉ cho phép HouseArrest đọc dữ liệu của app bật UIFileSharingEnabled hoặc app ký Developer. Game và app App Store thông thường vẫn hiển thị trong danh sách nhưng bị hệ điều hành khóa container."
+                        : remoteErr
+                )
+                .font(.caption)
                 .foregroundStyle(AppTheme.subduedText)
+                .multilineTextAlignment(.center)
+                .padding(.horizontal, 12)
+            } else {
+                Image(systemName: "folder")
+                    .font(.system(size: AppTheme.emptyIconSize, weight: .light))
+                    .foregroundStyle(AppTheme.accentSoft)
+                Text(language.text("browser.empty_folder"))
+                    .font(.subheadline.weight(.medium))
+                    .foregroundStyle(AppTheme.subduedText)
+            }
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
         .padding()
@@ -1345,6 +1366,7 @@ struct FileBrowserView: View {
         let shouldGrant = !hasGranted && ContainerAccessPolicy.shouldRequestGrant(isRoot: isRoot)
         hasGranted = true
         isLoadingEntries = true
+        remoteErrorMessage = nil
         let path = currentPath
         let targetBundleID = bundleID
         DispatchQueue.global(qos: .userInitiated).async {
@@ -1354,7 +1376,8 @@ struct FileBrowserView: View {
                     bundleID: parsed.bundleID,
                     path: parsed.remotePath
                 )
-                if !listing.success, let err = listing.error {
+                let remoteErr = listing.success ? nil : listing.error
+                if let err = remoteErr {
                     log("filebrowser: localdev unavailable \(parsed.bundleID) (\(err))")
                 }
                 let remoteEntries = listing.items
@@ -1374,6 +1397,7 @@ struct FileBrowserView: View {
                 DispatchQueue.main.async {
                     guard currentPath == path else { return }
                     entries = remoteEntries
+                    remoteErrorMessage = remoteErr
                     selectedEntryIDs.formIntersection(Set(remoteEntries.map(\.id)))
                     isLoadingEntries = false
                 }
