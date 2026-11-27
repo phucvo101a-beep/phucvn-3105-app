@@ -186,7 +186,7 @@
 "patch.imported_message" = "Đã cài đặt gói thành công. Bạn có thể mở gói trong mục Đã cài.";
 "patch.unlocked_message" = "Đã mở khóa. Thiết bị này sẽ không hỏi lại mật khẩu của gói này.";
 "patch.workspace_synced_message" = "Đã đồng bộ không gian làm việc.";
-"patch.applied_message" = "Đã áp dụng mọi quy tắc và sao lưu các tệp gốc.";
+"patch.applied_message" = "Apply thành công! Đã xác nhận ghi tệp (settle check) và sao lưu bản gốc vào .DiscardedPatchBackups.";
 "patch.restored_message" = "Đã khôi phục các tệp gốc.";
 "patch.reset_message" = "Đã đặt lại mọi tệp về trạng thái của gói lúc áp dụng.";
 "patch.error.unsupported_format" = "Đây không phải là gói chỉnh sửa .3105 hợp lệ.";
@@ -209,6 +209,7 @@
 "patch.error.active_delete" = "Bản chỉnh sửa này vẫn đang hoạt động. Hãy khôi phục tệp gốc trước khi xóa gói.";
 "patch.error.symlink" = "Đường dẫn patch không được đi qua liên kết tượng trưng.";
 "patch.error.apply" = "Không thể áp dụng bản chỉnh sửa. Mọi tệp đã ghi trước đó đều đã được hoàn tác.";
+"patch.error.airlift_detail" = "%@";
 "patch.error.restore" = "Không thể khôi phục tệp gốc an toàn. Ứng dụng không ghi đè đích chưa được xác minh.";
 "patch.error.reset" = "Không thể đặt lại tệp theo trạng thái của gói. Mọi thay đổi dở dang đã được hoàn tác.";
 "patch.error.invalid_import_link" = "Liên kết nhập gói chỉnh sửa không hợp lệ. Hãy dùng liên kết HTTPS an toàn tới gói .3105.";

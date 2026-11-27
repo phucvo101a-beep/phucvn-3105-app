@@ -15,7 +15,14 @@ private typealias CLocalDevStatus = @convention(c) () -> UnsafePointer<CChar>?
 private typealias CLocalDevScanApps = @convention(c) () -> UnsafePointer<CChar>?
 private typealias CLocalDevListDir = @convention(c) (Int32, UnsafePointer<CChar>?, UnsafePointer<CChar>) -> UnsafePointer<CChar>?
 private typealias CLocalDevReadFile = @convention(c) (Int32, UnsafePointer<CChar>?, UnsafePointer<CChar>, UnsafeMutablePointer<Int>) -> UnsafeMutablePointer<UInt8>?
-private typealias CLocalDevWriteFile = @convention(c) (Int32, UnsafePointer<CChar>?, UnsafePointer<CChar>, UnsafePointer<UInt8>, Int) -> UnsafePointer<CChar>?
+private typealias CLocalDevWriteFile = @convention(c) (Int32, UnsafePointer<CChar>?, UnsafePointer<CChar>, UnsafePointer<UInt8>?, Int) -> UnsafePointer<CChar>?
+private typealias CLocalDevFileserviceStatus = @convention(c) (UnsafePointer<CChar>?, UInt64) -> UnsafePointer<CChar>?
+private typealias CLocalDevFileserviceList = @convention(c) (UnsafePointer<CChar>?, UnsafePointer<CChar>?, UInt64) -> UnsafePointer<CChar>?
+private typealias CLocalDevFileserviceRead = @convention(c) (UnsafePointer<CChar>?, UnsafePointer<CChar>?, UInt64, UnsafeMutablePointer<Int>?, UnsafeMutablePointer<Int32>?) -> UnsafeMutablePointer<UInt8>?
+private typealias CLocalDevFileserviceWrite = @convention(c) (UnsafePointer<CChar>?, UnsafePointer<CChar>?, UnsafePointer<UInt8>?, Int, UInt64) -> UnsafePointer<CChar>?
+private typealias CLocalDevFileserviceMkdir = @convention(c) (UnsafePointer<CChar>?, UnsafePointer<CChar>?, UInt64) -> UnsafePointer<CChar>?
+private typealias CLocalDevFileserviceRemove = @convention(c) (UnsafePointer<CChar>?, UnsafePointer<CChar>?, UInt64) -> UnsafePointer<CChar>?
+private typealias CLocalDevAirliftRouteInfo = @convention(c) () -> UnsafePointer<CChar>?
 private typealias CLocalDevMb2ExtractApp = @convention(c) (UnsafePointer<CChar>?, UnsafePointer<CChar>?, UInt64) -> UnsafePointer<CChar>?
 private typealias CLocalDevMb2Status = @convention(c) () -> UnsafePointer<CChar>?
 private typealias CLocalDevMb2Cancel = @convention(c) () -> Int32
@@ -417,6 +424,13 @@ private final class LocalDevLib {
     var fnListDir: CLocalDevListDir?
     var fnReadFile: CLocalDevReadFile?
     var fnWriteFile: CLocalDevWriteFile?
+    var fnFileserviceStatus: CLocalDevFileserviceStatus?
+    var fnFileserviceList: CLocalDevFileserviceList?
+    var fnFileserviceRead: CLocalDevFileserviceRead?
+    var fnFileserviceWrite: CLocalDevFileserviceWrite?
+    var fnFileserviceMkdir: CLocalDevFileserviceMkdir?
+    var fnFileserviceRemove: CLocalDevFileserviceRemove?
+    var fnAirliftRouteInfo: CLocalDevAirliftRouteInfo?
     var fnMb2ExtractApp: CLocalDevMb2ExtractApp?
     var fnMb2Status: CLocalDevMb2Status?
     var fnMb2Cancel: CLocalDevMb2Cancel?
@@ -475,6 +489,27 @@ private final class LocalDevLib {
         }
         if let sym = dlsym(symTarget, "localdev_write_file") {
             fnWriteFile = unsafeBitCast(sym, to: CLocalDevWriteFile.self)
+        }
+        if let sym = dlsym(symTarget, "localdev_fileservice_status") {
+            fnFileserviceStatus = unsafeBitCast(sym, to: CLocalDevFileserviceStatus.self)
+        }
+        if let sym = dlsym(symTarget, "localdev_fileservice_list") {
+            fnFileserviceList = unsafeBitCast(sym, to: CLocalDevFileserviceList.self)
+        }
+        if let sym = dlsym(symTarget, "localdev_fileservice_read") {
+            fnFileserviceRead = unsafeBitCast(sym, to: CLocalDevFileserviceRead.self)
+        }
+        if let sym = dlsym(symTarget, "localdev_fileservice_write") {
+            fnFileserviceWrite = unsafeBitCast(sym, to: CLocalDevFileserviceWrite.self)
+        }
+        if let sym = dlsym(symTarget, "localdev_fileservice_mkdir") {
+            fnFileserviceMkdir = unsafeBitCast(sym, to: CLocalDevFileserviceMkdir.self)
+        }
+        if let sym = dlsym(symTarget, "localdev_fileservice_remove") {
+            fnFileserviceRemove = unsafeBitCast(sym, to: CLocalDevFileserviceRemove.self)
+        }
+        if let sym = dlsym(symTarget, "localdev_airlift_route_info") {
+            fnAirliftRouteInfo = unsafeBitCast(sym, to: CLocalDevAirliftRouteInfo.self)
         }
         if let sym = dlsym(symTarget, "localdev_mb2_extract_app") {
             fnMb2ExtractApp = unsafeBitCast(sym, to: CLocalDevMb2ExtractApp.self)
@@ -541,6 +576,9 @@ public struct LocalDevApp: Codable, Identifiable {
     public let container_path: String?
     public let bundle_path: String?
     public let is_developer_signed: Bool
+    public let data_container_url: String?
+    public let app_group_identifiers: [String]?
+    public let app_group_containers: [String: String]?
 
     public var accessBadgeColor: Color {
         switch access_type {
@@ -581,11 +619,78 @@ public struct LocalDevDirItem: Codable, Hashable {
     public let size: Int64
 }
 
+public struct AirLiftRouteInfo: Codable, Equatable {
+    public let attempt: Bool
+    public let fallback: Bool
+    public let reason: String?
+    public let backend: String
+    public let bundle_id: String
+    public let path: String
+    public let data_container_url: String?
+    public let app_group_identifiers: [String]?
+    public let app_group_paths: [String]?
+    public let control_capacity: UInt64?
+    public let detail: String?
+
+    public var displayBadgeText: String {
+        if backend == "coredevice.fileservice.data" {
+            return "CoreDevice FileService (RSD)"
+        }
+        if fallback {
+            let reasonLabel = reason.map { " [\($0)]" } ?? ""
+            return "\(backend)\(reasonLabel)"
+        }
+        return backend
+    }
+}
+
+public struct LocalDevFileServiceCapabilityReport: Codable, Equatable {
+    public let state: String
+    public let control_service: String?
+    public let control_port: UInt16?
+    public let data_service: String?
+    public let data_port: UInt16?
+    public let controlcapacity_value: UInt64
+    public let control_uses_remote_xpc: Bool
+    public let data_uses_remote_xpc: Bool
+    public let app_group_count: Int
+    public let note: String
+}
+
+public struct AirLiftReadOutcome {
+    public let success: Bool
+    public let data: Data?
+    public let error: String?
+    public let route: AirLiftRouteInfo?
+}
+
+public struct AirLiftWriteOutcome {
+    public let success: Bool
+    public let writtenBytes: Int
+    public let error: String?
+    public let route: AirLiftRouteInfo?
+}
+
 public struct LocalDevDirListing {
     public let success: Bool
     public let mode: String?
     public let error: String?
     public let items: [LocalDevDirItem]
+    public let route: AirLiftRouteInfo?
+
+    public init(
+        success: Bool,
+        mode: String?,
+        error: String?,
+        items: [LocalDevDirItem],
+        route: AirLiftRouteInfo? = nil
+    ) {
+        self.success = success
+        self.mode = mode
+        self.error = error
+        self.items = items
+        self.route = route
+    }
 }
 
 public struct LocalDevMb2Progress: Codable, Equatable {
@@ -665,8 +770,20 @@ private struct ListDirResponse: Codable {
     let error: String?
     let path: String?
     let mode: String?
+    let route: AirLiftRouteInfo?
     let entries: [String]?
     let items: [LocalDevDirItem]?
+}
+
+private struct FileserviceWriteResponse: Codable {
+    let success: Bool
+    let error: String?
+    let written_bytes: Int?
+    let route: AirLiftRouteInfo?
+}
+
+private struct AirliftRouteEnvelope: Codable {
+    let route: AirLiftRouteInfo?
 }
 
 public final class LocalDevBridge: ObservableObject {
@@ -681,6 +798,7 @@ public final class LocalDevBridge: ObservableObject {
     @Published public var isScanning: Bool = false
     @Published public var isCheckingStatus: Bool = false
     @Published public var lastError: String?
+    @Published public var lastAirLiftRoute: AirLiftRouteInfo?
 
     private var storageDirectory: URL {
         let baseDir = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask).first
@@ -2045,6 +2163,8 @@ public final class LocalDevBridge: ObservableObject {
         }
     }
 
+    public static let defaultFileServiceControlCapacity: UInt64 = 4_194_304
+
     public func listDirectory(service: LocalDevServiceType, bundleID: String?, path: String) -> [String] {
         listDirectoryDetailed(service: service, bundleID: bundleID, path: path).items.map(\.name)
     }
@@ -2072,11 +2192,203 @@ public final class LocalDevBridge: ObservableObject {
             return LocalDevDirListing(success: false, mode: nil, error: "Phản hồi LocalDev không hợp lệ", items: [])
         }
 
+        if let route = resp.route {
+            DispatchQueue.main.async { self.lastAirLiftRoute = route }
+        }
         if let items = resp.items, !items.isEmpty {
-            return LocalDevDirListing(success: resp.success, mode: resp.mode, error: resp.error, items: items)
+            return LocalDevDirListing(success: resp.success, mode: resp.mode, error: resp.error, items: items, route: resp.route)
         }
         let fallbackItems = (resp.entries ?? []).map { LocalDevDirItem(name: $0, is_dir: false, size: -1) }
-        return LocalDevDirListing(success: resp.success, mode: resp.mode, error: resp.error, items: fallbackItems)
+        return LocalDevDirListing(success: resp.success, mode: resp.mode, error: resp.error, items: fallbackItems, route: resp.route)
+    }
+
+    public func probeFileServiceStatus(
+        bundleID: String? = nil,
+        controlCapacity: UInt64 = defaultFileServiceControlCapacity
+    ) -> LocalDevFileServiceCapabilityReport? {
+        guard isModuleEnabled else { return nil }
+        ensureCoreInitialized()
+        let safeCap = max(UInt64(1), controlCapacity)
+        guard let fnStatus = LocalDevLib.shared.fnFileserviceStatus,
+              let cStr = fnStatus(bundleID, safeCap) else {
+            return nil
+        }
+        defer { LocalDevLib.shared.fnFreeString?(cStr) }
+        guard let data = String(cString: cStr).data(using: .utf8) else { return nil }
+        return try? JSONDecoder().decode(LocalDevFileServiceCapabilityReport.self, from: data)
+    }
+
+    public func latestAirLiftRouteInfo() -> AirLiftRouteInfo? {
+        ensureCoreInitialized()
+        guard let fnRoute = LocalDevLib.shared.fnAirliftRouteInfo,
+              let cStr = fnRoute() else {
+            return nil
+        }
+        defer { LocalDevLib.shared.fnFreeString?(cStr) }
+        guard let data = String(cString: cStr).data(using: .utf8),
+              let env = try? JSONDecoder().decode(AirliftRouteEnvelope.self, from: data) else {
+            return nil
+        }
+        return env.route
+    }
+
+    public func listDirectoryWithAirLift(
+        bundleID: String,
+        path: String,
+        controlCapacity: UInt64 = defaultFileServiceControlCapacity
+    ) -> LocalDevDirListing {
+        guard isModuleEnabled else {
+            return LocalDevDirListing(success: false, mode: nil, error: "LocalDev đang tắt", items: [])
+        }
+        let keepAliveToken = BackgroundKeepAliveManager.shared.beginWorkToken()
+        defer { BackgroundKeepAliveManager.shared.endWorkToken(keepAliveToken) }
+        ensureCoreInitialized()
+        let safeCap = max(UInt64(1), controlCapacity)
+        if let fnList = LocalDevLib.shared.fnFileserviceList,
+           let cStr = fnList(bundleID, path, safeCap) {
+            defer { LocalDevLib.shared.fnFreeString?(cStr) }
+            if let data = String(cString: cStr).data(using: .utf8),
+               let resp = try? JSONDecoder().decode(ListDirResponse.self, from: data) {
+                if let route = resp.route {
+                    DispatchQueue.main.async { self.lastAirLiftRoute = route }
+                }
+                let items = resp.items ?? (resp.entries ?? []).map { LocalDevDirItem(name: $0, is_dir: false, size: -1) }
+                return LocalDevDirListing(success: resp.success, mode: resp.mode, error: resp.error, items: items, route: resp.route)
+            }
+        }
+        return listDirectoryDetailed(service: .houseArrest, bundleID: bundleID, path: path)
+    }
+
+    public func readFileWithAirLift(
+        bundleID: String,
+        path: String,
+        controlCapacity: UInt64 = defaultFileServiceControlCapacity
+    ) -> AirLiftReadOutcome {
+        guard isModuleEnabled else {
+            return AirLiftReadOutcome(success: false, data: nil, error: "LocalDev đang tắt", route: nil)
+        }
+        let keepAliveToken = BackgroundKeepAliveManager.shared.beginWorkToken()
+        defer { BackgroundKeepAliveManager.shared.endWorkToken(keepAliveToken) }
+        ensureCoreInitialized()
+        let safeCap = max(UInt64(1), controlCapacity)
+        if let fnRead = LocalDevLib.shared.fnFileserviceRead {
+            var outLen = 0
+            var outOk: Int32 = 0
+            let bufPtr = fnRead(bundleID, path, safeCap, &outLen, &outOk)
+            let route = latestAirLiftRouteInfo()
+            if let route {
+                DispatchQueue.main.async { self.lastAirLiftRoute = route }
+            }
+            if outOk != 0 {
+                let resultData: Data
+                if let bufPtr, outLen > 0 {
+                    resultData = Data(bytes: bufPtr, count: outLen)
+                    LocalDevLib.shared.fnFreeBytes?(bufPtr, outLen)
+                } else {
+                    resultData = Data()
+                }
+                return AirLiftReadOutcome(success: true, data: resultData, error: nil, route: route)
+            }
+            return AirLiftReadOutcome(success: false, data: nil, error: route?.detail ?? "Không đọc được tệp qua AirLift", route: route)
+        }
+        if let legacy = readFile(service: .houseArrest, bundleID: bundleID, path: path) {
+            return AirLiftReadOutcome(success: true, data: legacy, error: nil, route: latestAirLiftRouteInfo())
+        }
+        let route = latestAirLiftRouteInfo()
+        return AirLiftReadOutcome(success: false, data: nil, error: route?.detail ?? "Không đọc được tệp", route: route)
+    }
+
+    public func writeFileWithAirLift(
+        bundleID: String,
+        path: String,
+        data: Data,
+        controlCapacity: UInt64 = defaultFileServiceControlCapacity
+    ) -> AirLiftWriteOutcome {
+        guard isModuleEnabled else {
+            return AirLiftWriteOutcome(success: false, writtenBytes: 0, error: "LocalDev đang tắt", route: nil)
+        }
+        let keepAliveToken = BackgroundKeepAliveManager.shared.beginWorkToken()
+        defer { BackgroundKeepAliveManager.shared.endWorkToken(keepAliveToken) }
+        ensureCoreInitialized()
+        let safeCap = max(UInt64(1), controlCapacity)
+        let bytes = [UInt8](data)
+        if let fnWrite = LocalDevLib.shared.fnFileserviceWrite {
+            let cStr = bytes.withUnsafeBufferPointer { buf in
+                fnWrite(bundleID, path, buf.baseAddress, buf.count, safeCap)
+            }
+            if let cStr {
+                defer { LocalDevLib.shared.fnFreeString?(cStr) }
+                if let respData = String(cString: cStr).data(using: .utf8),
+                   let resp = try? JSONDecoder().decode(FileserviceWriteResponse.self, from: respData) {
+                    if let route = resp.route {
+                        DispatchQueue.main.async { self.lastAirLiftRoute = route }
+                    }
+                    return AirLiftWriteOutcome(
+                        success: resp.success,
+                        writtenBytes: resp.written_bytes ?? (resp.success ? data.count : 0),
+                        error: resp.error,
+                        route: resp.route
+                    )
+                }
+            }
+        }
+        let ok = writeFile(service: .houseArrest, bundleID: bundleID, path: path, data: data)
+        let route = latestAirLiftRouteInfo()
+        return AirLiftWriteOutcome(success: ok, writtenBytes: ok ? data.count : 0, error: ok ? nil : route?.detail, route: route)
+    }
+
+    public func createDirectoryWithAirLift(
+        bundleID: String,
+        path: String,
+        controlCapacity: UInt64 = defaultFileServiceControlCapacity
+    ) -> AirLiftWriteOutcome {
+        guard isModuleEnabled else {
+            return AirLiftWriteOutcome(success: false, writtenBytes: 0, error: "LocalDev đang tắt", route: nil)
+        }
+        let keepAliveToken = BackgroundKeepAliveManager.shared.beginWorkToken()
+        defer { BackgroundKeepAliveManager.shared.endWorkToken(keepAliveToken) }
+        ensureCoreInitialized()
+        let safeCap = max(UInt64(1), controlCapacity)
+        guard let fnMkdir = LocalDevLib.shared.fnFileserviceMkdir,
+              let cStr = fnMkdir(bundleID, path, safeCap) else {
+            return AirLiftWriteOutcome(success: false, writtenBytes: 0, error: "Chưa hỗ trợ mkdir AirLift", route: nil)
+        }
+        defer { LocalDevLib.shared.fnFreeString?(cStr) }
+        guard let respData = String(cString: cStr).data(using: .utf8),
+              let resp = try? JSONDecoder().decode(FileserviceWriteResponse.self, from: respData) else {
+            return AirLiftWriteOutcome(success: false, writtenBytes: 0, error: "Phản hồi mkdir không hợp lệ", route: nil)
+        }
+        if let route = resp.route {
+            DispatchQueue.main.async { self.lastAirLiftRoute = route }
+        }
+        return AirLiftWriteOutcome(success: resp.success, writtenBytes: 0, error: resp.error, route: resp.route)
+    }
+
+    public func removePathWithAirLift(
+        bundleID: String,
+        path: String,
+        controlCapacity: UInt64 = defaultFileServiceControlCapacity
+    ) -> AirLiftWriteOutcome {
+        guard isModuleEnabled else {
+            return AirLiftWriteOutcome(success: false, writtenBytes: 0, error: "LocalDev đang tắt", route: nil)
+        }
+        let keepAliveToken = BackgroundKeepAliveManager.shared.beginWorkToken()
+        defer { BackgroundKeepAliveManager.shared.endWorkToken(keepAliveToken) }
+        ensureCoreInitialized()
+        let safeCap = max(UInt64(1), controlCapacity)
+        guard let fnRm = LocalDevLib.shared.fnFileserviceRemove,
+              let cStr = fnRm(bundleID, path, safeCap) else {
+            return AirLiftWriteOutcome(success: false, writtenBytes: 0, error: "Chưa hỗ trợ remove AirLift", route: nil)
+        }
+        defer { LocalDevLib.shared.fnFreeString?(cStr) }
+        guard let respData = String(cString: cStr).data(using: .utf8),
+              let resp = try? JSONDecoder().decode(FileserviceWriteResponse.self, from: respData) else {
+            return AirLiftWriteOutcome(success: false, writtenBytes: 0, error: "Phản hồi remove không hợp lệ", route: nil)
+        }
+        if let route = resp.route {
+            DispatchQueue.main.async { self.lastAirLiftRoute = route }
+        }
+        return AirLiftWriteOutcome(success: resp.success, writtenBytes: 0, error: resp.error, route: resp.route)
     }
 
     public func readFile(service: LocalDevServiceType, bundleID: String?, path: String) -> Data? {
@@ -2100,7 +2412,10 @@ public final class LocalDevBridge: ObservableObject {
         ensureCoreInitialized()
         guard let fnWrite = LocalDevLib.shared.fnWriteFile else { return false }
         let bytes = [UInt8](data)
-        guard let cStr = fnWrite(service.rawValue, bundleID, path, bytes, bytes.count) else {
+        let cStr = bytes.withUnsafeBufferPointer { buf in
+            fnWrite(service.rawValue, bundleID, path, buf.baseAddress, buf.count)
+        }
+        guard let cStr else {
             return false
         }
         defer { LocalDevLib.shared.fnFreeString?(cStr) }

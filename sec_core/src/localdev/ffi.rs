@@ -151,18 +151,21 @@ pub unsafe extern "C" fn localdev_list_dir(
 
     let res: Result<(Vec<String>, Vec<HouseArrestDirItem>, String), String> =
         with_manager(|mgr| mgr.list_dir_detailed(service_type, b_id, path_str));
+    let route = with_manager(|mgr| mgr.last_airlift_route.clone());
 
     match res {
         Ok((entries, items, mode)) => to_json_cstr(json!({
             "success": true,
             "path": path_str,
             "mode": mode,
+            "route": route,
             "entries": entries,
             "items": items
         })),
         Err(e) => to_json_cstr(json!({
             "success": false,
             "error": e,
+            "route": route,
             "entries": [],
             "items": []
         })),
@@ -216,7 +219,7 @@ pub unsafe extern "C" fn localdev_write_file(
     data: *const u8,
     len: usize,
 ) -> *const c_char {
-    if path.is_null() || data.is_null() || len == 0 {
+    if path.is_null() || (data.is_null() && len > 0) {
         return to_json_cstr(json!({
             "success": false,
             "error": "Tham số tệp không hợp lệ"
@@ -229,22 +232,251 @@ pub unsafe extern "C" fn localdev_write_file(
     } else {
         ""
     };
-    let slice = std::slice::from_raw_parts(data, len);
+    let slice = if data.is_null() || len == 0 {
+        &[]
+    } else {
+        std::slice::from_raw_parts(data, len)
+    };
 
     let res: Result<(), String> =
         with_manager(|mgr| mgr.write_file(service_type, b_id, path_str, slice));
+    let route = with_manager(|mgr| mgr.last_airlift_route.clone());
 
     match res {
         Ok(_) => to_json_cstr(json!({
             "success": true,
             "path": path_str,
-            "written_bytes": len
+            "written_bytes": len,
+            "route": route
         })),
         Err(e) => to_json_cstr(json!({
             "success": false,
-            "error": e
+            "error": e,
+            "route": route
         })),
     }
+}
+
+/// Probes CoreDevice FileService (`controlcapacity` + `.data`) readiness over active RSD tunnel
+#[no_mangle]
+pub unsafe extern "C" fn localdev_fileservice_status(
+    bundle_id: *const c_char,
+    control_capacity: u64,
+) -> *const c_char {
+    let b_opt = if !bundle_id.is_null() {
+        CStr::from_ptr(bundle_id).to_str().ok().filter(|s| !s.trim().is_empty())
+    } else {
+        None
+    };
+    let rep = with_manager(|mgr| mgr.probe_fileservice_status(b_opt, control_capacity));
+    to_json_cstr(json!(rep))
+}
+
+/// Lists files via `patch.airlift` router (CoreDevice `fileservice.data` -> HouseArrest -> `afc.shim.remote`)
+#[no_mangle]
+pub unsafe extern "C" fn localdev_fileservice_list(
+    bundle_id: *const c_char,
+    path: *const c_char,
+    control_capacity: u64,
+) -> *const c_char {
+    let b_id = if !bundle_id.is_null() {
+        CStr::from_ptr(bundle_id).to_str().unwrap_or("")
+    } else {
+        ""
+    };
+    let path_str = if !path.is_null() {
+        CStr::from_ptr(path).to_str().unwrap_or("/")
+    } else {
+        "/"
+    };
+
+    match with_manager(|mgr| mgr.airlift_list_dir(b_id, path_str, control_capacity)) {
+        Ok(((entries, items, mode), route)) => to_json_cstr(json!({
+            "success": true,
+            "path": path_str,
+            "mode": mode,
+            "route": route,
+            "entries": entries,
+            "items": items
+        })),
+        Err(e) => {
+            let route = with_manager(|mgr| mgr.last_airlift_route.clone());
+            to_json_cstr(json!({
+                "success": false,
+                "error": e,
+                "route": route,
+                "entries": [],
+                "items": []
+            }))
+        }
+    }
+}
+
+/// Reads file bytes via `patch.airlift` router (`fileservice_read` -> HouseArrest -> `afc.shim.remote`)
+/// Caller sets `out_ok` (1 on success, 0 on error) and frees non-null buffer via `localdev_free_bytes`.
+#[no_mangle]
+pub unsafe extern "C" fn localdev_fileservice_read(
+    bundle_id: *const c_char,
+    path: *const c_char,
+    control_capacity: u64,
+    out_len: *mut usize,
+    out_ok: *mut i32,
+) -> *mut u8 {
+    if !out_ok.is_null() {
+        *out_ok = 0;
+    }
+    if path.is_null() || out_len.is_null() {
+        return std::ptr::null_mut();
+    }
+    *out_len = 0;
+
+    let b_id = if !bundle_id.is_null() {
+        CStr::from_ptr(bundle_id).to_str().unwrap_or("")
+    } else {
+        ""
+    };
+    let path_str = CStr::from_ptr(path).to_str().unwrap_or("");
+    match with_manager(|mgr| mgr.airlift_read_file(b_id, path_str, control_capacity)) {
+        Ok((mut bytes, _route)) => {
+            if !out_ok.is_null() {
+                *out_ok = 1;
+            }
+            *out_len = bytes.len();
+            if bytes.is_empty() {
+                return std::ptr::null_mut();
+            }
+            let ptr = bytes.as_mut_ptr();
+            std::mem::forget(bytes);
+            ptr
+        }
+        Err(_) => std::ptr::null_mut(),
+    }
+}
+
+/// Writes file bytes via `patch.airlift` router (`fileservice.data` -> HouseArrest -> `afc.shim.remote`)
+#[no_mangle]
+pub unsafe extern "C" fn localdev_fileservice_write(
+    bundle_id: *const c_char,
+    path: *const c_char,
+    data: *const u8,
+    len: usize,
+    control_capacity: u64,
+) -> *const c_char {
+    if path.is_null() || (data.is_null() && len > 0) {
+        return to_json_cstr(json!({
+            "success": false,
+            "error": "Tham số fileservice write không hợp lệ"
+        }));
+    }
+    let b_id = if !bundle_id.is_null() {
+        CStr::from_ptr(bundle_id).to_str().unwrap_or("")
+    } else {
+        ""
+    };
+    let path_str = CStr::from_ptr(path).to_str().unwrap_or("");
+    let slice = if data.is_null() || len == 0 {
+        &[]
+    } else {
+        std::slice::from_raw_parts(data, len)
+    };
+
+    match with_manager(|mgr| mgr.airlift_write_file(b_id, path_str, slice, control_capacity)) {
+        Ok((route, written)) => to_json_cstr(json!({
+            "success": true,
+            "path": path_str,
+            "written_bytes": written,
+            "route": route
+        })),
+        Err(e) => {
+            let route = with_manager(|mgr| mgr.last_airlift_route.clone());
+            to_json_cstr(json!({
+                "success": false,
+                "error": e,
+                "route": route
+            }))
+        }
+    }
+}
+
+/// Creates a directory via `patch.airlift` router
+#[no_mangle]
+pub unsafe extern "C" fn localdev_fileservice_mkdir(
+    bundle_id: *const c_char,
+    path: *const c_char,
+    control_capacity: u64,
+) -> *const c_char {
+    if path.is_null() {
+        return to_json_cstr(json!({
+            "success": false,
+            "error": "Thiếu đường dẫn thư mục"
+        }));
+    }
+    let b_id = if !bundle_id.is_null() {
+        CStr::from_ptr(bundle_id).to_str().unwrap_or("")
+    } else {
+        ""
+    };
+    let path_str = CStr::from_ptr(path).to_str().unwrap_or("");
+    match with_manager(|mgr| mgr.airlift_mkdir(b_id, path_str, control_capacity)) {
+        Ok(route) => to_json_cstr(json!({
+            "success": true,
+            "path": path_str,
+            "route": route
+        })),
+        Err(e) => {
+            let route = with_manager(|mgr| mgr.last_airlift_route.clone());
+            to_json_cstr(json!({
+                "success": false,
+                "error": e,
+                "route": route
+            }))
+        }
+    }
+}
+
+/// Deletes a file or directory via `patch.airlift` router
+#[no_mangle]
+pub unsafe extern "C" fn localdev_fileservice_remove(
+    bundle_id: *const c_char,
+    path: *const c_char,
+    control_capacity: u64,
+) -> *const c_char {
+    if path.is_null() {
+        return to_json_cstr(json!({
+            "success": false,
+            "error": "Thiếu đường dẫn cần xóa"
+        }));
+    }
+    let b_id = if !bundle_id.is_null() {
+        CStr::from_ptr(bundle_id).to_str().unwrap_or("")
+    } else {
+        ""
+    };
+    let path_str = CStr::from_ptr(path).to_str().unwrap_or("");
+    match with_manager(|mgr| mgr.airlift_remove(b_id, path_str, control_capacity)) {
+        Ok(route) => to_json_cstr(json!({
+            "success": true,
+            "path": path_str,
+            "route": route
+        })),
+        Err(e) => {
+            let route = with_manager(|mgr| mgr.last_airlift_route.clone());
+            to_json_cstr(json!({
+                "success": false,
+                "error": e,
+                "route": route
+            }))
+        }
+    }
+}
+
+/// Returns the latest `patch.airlift` attempt/fallback route trace JSON
+#[no_mangle]
+pub extern "C" fn localdev_airlift_route_info() -> *const c_char {
+    let route = with_manager(|mgr| mgr.last_airlift_route.clone());
+    to_json_cstr(json!({
+        "route": route
+    }))
 }
 
 /// Runs `com.apple.mobilebackup2` snapshot/extraction into `staging_dir`

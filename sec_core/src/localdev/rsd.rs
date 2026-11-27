@@ -3,7 +3,9 @@
 //! `createListener` + TLS-PSK `CDTunnel` + `jktcp` userspace TCP/IPv6 + `RsdHandshake`,
 //! and provides synchronous `std::io::Read + Write` streams for HouseArrest, AFC, and InstallationProxy.
 
-use super::apps::LocalDevAppInfo;
+use super::apps::{
+    app_group_container_path, container_path_from_url, normalize_data_container_url, LocalDevAppInfo,
+};
 use super::pairing::RemotePairingFile;
 use super::plist_util::{serialize_xml_dict, PlistValue};
 use super::tls_psk::connect_cd_tunnel;
@@ -98,6 +100,19 @@ fn format_uuid_hyphenated(bytes: &[u8; 16]) -> String {
         bytes[8], bytes[9], bytes[10], bytes[11],
         bytes[12], bytes[13], bytes[14], bytes[15]
     )
+}
+
+pub fn device_identifier_string() -> String {
+    format_uuid_hyphenated(&stable_handshake_uuid(None))
+}
+
+pub fn invocation_identifier_string() -> String {
+    let ts = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_nanos())
+        .unwrap_or(0);
+    let hint = format!("inv-{}-{}", ts, std::process::id());
+    format_uuid_hyphenated(&stable_handshake_uuid(Some(&hint)))
 }
 
 // ==============================================================================
@@ -806,14 +821,14 @@ impl XpcValue {
         }
     }
 
-    fn dict_get(&self, key: &str) -> Option<&XpcValue> {
+    pub fn dict_get(&self, key: &str) -> Option<&XpcValue> {
         match self {
             XpcValue::Dictionary(entries) => entries.iter().find(|(k, _)| k == key).map(|(_, v)| v),
             _ => None,
         }
     }
 
-    fn dict_get_ci(&self, candidates: &[&str]) -> Option<&XpcValue> {
+    pub fn dict_get_ci(&self, candidates: &[&str]) -> Option<&XpcValue> {
         let entries = self.as_dict()?;
         for name in candidates {
             if let Some((_, v)) = entries.iter().find(|(k, _)| k == name) {
@@ -829,7 +844,7 @@ impl XpcValue {
         None
     }
 
-    fn summarize_dict_keys(&self) -> String {
+    pub fn summarize_dict_keys(&self) -> String {
         match self.as_dict() {
             Some(entries) => entries
                 .iter()
@@ -840,14 +855,14 @@ impl XpcValue {
         }
     }
 
-    fn as_str(&self) -> Option<&str> {
+    pub fn as_str(&self) -> Option<&str> {
         match self {
             XpcValue::String(s) => Some(s.as_str()),
             _ => None,
         }
     }
 
-    fn as_id_string(&self) -> Option<String> {
+    pub fn as_id_string(&self) -> Option<String> {
         match self {
             XpcValue::String(s) => {
                 let trimmed = s.trim();
@@ -895,14 +910,14 @@ impl XpcValue {
         }
     }
 
-    fn as_array(&self) -> Option<&[XpcValue]> {
+    pub fn as_array(&self) -> Option<&[XpcValue]> {
         match self {
             XpcValue::Array(items) => Some(items.as_slice()),
             _ => None,
         }
     }
 
-    fn as_dict(&self) -> Option<&[(String, XpcValue)]> {
+    pub fn as_dict(&self) -> Option<&[(String, XpcValue)]> {
         match self {
             XpcValue::Dictionary(entries) => Some(entries.as_slice()),
             _ => None,
@@ -1431,13 +1446,17 @@ impl<S: AsyncRead + AsyncWrite + Unpin + Send> RemoteXpcConn<S> {
         Ok(())
     }
 
-    async fn send_object(&mut self, obj: XpcValue, expect_reply: bool) -> Result<(), String> {
+    pub async fn send_object(&mut self, obj: XpcValue, expect_reply: bool) -> Result<(), String> {
         let mut flags = 0x0000_0101_u32; // DataFlag | AlwaysSet
         if expect_reply {
             flags |= 0x0001_0000; // WantingReply
         }
         let encoded = XpcMessage { flags, message: Some(obj) }.encode(self.root_id);
         self.send_channel(XPC_ROOT_CHANNEL, encoded).await
+    }
+
+    pub async fn recv_reply(&mut self) -> Result<XpcValue, String> {
+        self.recv_channel_xpc(XPC_REPLY_CHANNEL).await
     }
 
     async fn recv_channel_xpc(&mut self, channel: u32) -> Result<XpcValue, String> {
@@ -1630,6 +1649,52 @@ async fn perform_rsd_handshake<S: AsyncRead + AsyncWrite + Unpin + Send>(
         product_type,
         os_version,
     })
+}
+
+#[allow(dead_code)]
+pub enum RsdAsyncStream {
+    Jktcp(StreamHandle),
+    Direct(AsyncTransport),
+}
+
+impl AsyncRead for RsdAsyncStream {
+    fn poll_read(
+        self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        buf: &mut ReadBuf<'_>,
+    ) -> Poll<io::Result<()>> {
+        match self.get_mut() {
+            RsdAsyncStream::Jktcp(s) => Pin::new(s).poll_read(cx, buf),
+            RsdAsyncStream::Direct(d) => Pin::new(d).poll_read(cx, buf),
+        }
+    }
+}
+
+impl AsyncWrite for RsdAsyncStream {
+    fn poll_write(
+        self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        buf: &[u8],
+    ) -> Poll<io::Result<usize>> {
+        match self.get_mut() {
+            RsdAsyncStream::Jktcp(s) => Pin::new(s).poll_write(cx, buf),
+            RsdAsyncStream::Direct(d) => Pin::new(d).poll_write(cx, buf),
+        }
+    }
+
+    fn poll_flush(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+        match self.get_mut() {
+            RsdAsyncStream::Jktcp(s) => Pin::new(s).poll_flush(cx),
+            RsdAsyncStream::Direct(d) => Pin::new(d).poll_flush(cx),
+        }
+    }
+
+    fn poll_shutdown(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+        match self.get_mut() {
+            RsdAsyncStream::Jktcp(s) => Pin::new(s).poll_shutdown(cx),
+            RsdAsyncStream::Direct(d) => Pin::new(d).poll_shutdown(cx),
+        }
+    }
 }
 
 #[allow(dead_code)]
@@ -1836,6 +1901,40 @@ impl RsdTunnelSession {
         match &self.iface {
             Some(i) if !i.is_empty() => format!("{} · RSD", i),
             _ => "RSD".to_string(),
+        }
+    }
+
+    pub fn resolve_service_pair(&self, names: &[&str]) -> Option<(String, RsdServiceInfo)> {
+        for name in names {
+            if let Some(info) = self.services.get(*name) {
+                return Some(((*name).to_string(), info.clone()));
+            }
+        }
+        None
+    }
+
+    pub async fn connect_port_async(&self, service_port: u16) -> Result<RsdAsyncStream, String> {
+        match &self.transport {
+            RsdTransport::CdTunnel { handle, .. } => {
+                let mut h = handle.clone();
+                let s = tokio::time::timeout(Duration::from_secs(6), h.connect(service_port))
+                    .await
+                    .map_err(|_| format!("Tunnel connect port {} timeout", service_port))?
+                    .map_err(|e| format!("Tunnel connect port {} failed: {}", service_port, e))?;
+                Ok(RsdAsyncStream::Jktcp(s))
+            }
+            RsdTransport::DirectHost { host } => {
+                let t = connect_async_transport(
+                    host.clone(),
+                    service_port,
+                    Duration::from_secs(4),
+                    LockdownStage::StartService,
+                    false,
+                )
+                .await
+                .map_err(|e| e.to_string())?;
+                Ok(RsdAsyncStream::Direct(t))
+            }
         }
     }
 
@@ -2115,41 +2214,53 @@ async fn fetch_apps_via_coredevice_xpc<S: AsyncRead + AsyncWrite + Unpin + Send>
 ) -> Result<Vec<LocalDevAppInfo>, String> {
     let mut xpc = RemoteXpcConn::connect_and_handshake(stream).await?;
 
-    let input = XpcValue::Dictionary(vec![
-        ("includeAppClips".to_string(), XpcValue::Bool(false)),
-        ("includeRemovableApps".to_string(), XpcValue::Bool(true)),
-        ("includeHiddenApps".to_string(), XpcValue::Bool(false)),
-        ("includeInternalApps".to_string(), XpcValue::Bool(false)),
-        ("includeDefaultApps".to_string(), XpcValue::Bool(false)),
-        ("includeAppGroupIdentifiers".to_string(), XpcValue::Bool(false)),
-        ("includeContainerPaths".to_string(), XpcValue::Bool(false)),
-        ("requireContainerAccess".to_string(), XpcValue::Bool(false)),
-    ]);
+    let build_listapps_req = |include_containers: bool| {
+        let input = XpcValue::Dictionary(vec![
+            ("includeAppClips".to_string(), XpcValue::Bool(false)),
+            ("includeRemovableApps".to_string(), XpcValue::Bool(true)),
+            ("includeHiddenApps".to_string(), XpcValue::Bool(false)),
+            ("includeInternalApps".to_string(), XpcValue::Bool(false)),
+            ("includeDefaultApps".to_string(), XpcValue::Bool(false)),
+            ("includeAppGroupIdentifiers".to_string(), XpcValue::Bool(include_containers)),
+            ("includeContainerPaths".to_string(), XpcValue::Bool(include_containers)),
+            ("requireContainerAccess".to_string(), XpcValue::Bool(false)),
+        ]);
 
-    let inv_id = format_uuid_hyphenated(&stable_handshake_uuid(Some("inv")));
-    let dev_id = format_uuid_hyphenated(&stable_handshake_uuid(None));
-    let req = XpcValue::Dictionary(vec![
-        ("CoreDevice.CoreDeviceDDIProtocolVersion".to_string(), XpcValue::Int64(0)),
-        ("CoreDevice.action".to_string(), XpcValue::Dictionary(Vec::new())),
-        (
-            "CoreDevice.coreDeviceVersion".to_string(),
-            XpcValue::Dictionary(vec![
-                ("components".to_string(), XpcValue::Array(vec![XpcValue::UInt64(629), XpcValue::UInt64(3)])),
-                ("originalComponentsCount".to_string(), XpcValue::Int64(2)),
-                ("stringValue".to_string(), XpcValue::String("629.3".to_string())),
-            ]),
-        ),
-        ("CoreDevice.deviceIdentifier".to_string(), XpcValue::String(dev_id)),
-        (
-            "CoreDevice.featureIdentifier".to_string(),
-            XpcValue::String("com.apple.coredevice.feature.listapps".to_string()),
-        ),
-        ("CoreDevice.input".to_string(), input),
-        ("CoreDevice.invocationIdentifier".to_string(), XpcValue::String(inv_id)),
-    ]);
+        let inv_id = invocation_identifier_string();
+        let dev_id = device_identifier_string();
+        XpcValue::Dictionary(vec![
+            ("CoreDevice.CoreDeviceDDIProtocolVersion".to_string(), XpcValue::Int64(0)),
+            ("CoreDevice.action".to_string(), XpcValue::Dictionary(Vec::new())),
+            (
+                "CoreDevice.coreDeviceVersion".to_string(),
+                XpcValue::Dictionary(vec![
+                    ("components".to_string(), XpcValue::Array(vec![XpcValue::UInt64(629), XpcValue::UInt64(3)])),
+                    ("originalComponentsCount".to_string(), XpcValue::Int64(2)),
+                    ("stringValue".to_string(), XpcValue::String("629.3".to_string())),
+                ]),
+            ),
+            ("CoreDevice.deviceIdentifier".to_string(), XpcValue::String(dev_id)),
+            (
+                "CoreDevice.featureIdentifier".to_string(),
+                XpcValue::String("com.apple.coredevice.feature.listapps".to_string()),
+            ),
+            ("CoreDevice.input".to_string(), input),
+            ("CoreDevice.invocationIdentifier".to_string(), XpcValue::String(inv_id)),
+        ])
+    };
 
+    let req = build_listapps_req(true);
     xpc.send_object(req, true).await?;
-    let reply = xpc.recv_channel_xpc(XPC_REPLY_CHANNEL).await?;
+    let mut reply = xpc.recv_channel_xpc(XPC_REPLY_CHANNEL).await?;
+    if reply.dict_get("CoreDevice.output").is_none() {
+        let fallback_req = build_listapps_req(false);
+        if xpc.send_object(fallback_req, true).await.is_ok() {
+            if let Ok(fallback_reply) = xpc.recv_channel_xpc(XPC_REPLY_CHANNEL).await {
+                reply = fallback_reply;
+            }
+        }
+    }
+
     let output = reply
         .dict_get("CoreDevice.output")
         .ok_or_else(|| "CoreDevice listapps thiếu CoreDevice.output".to_string())?;
@@ -2210,6 +2321,79 @@ async fn fetch_apps_via_coredevice_xpc<S: AsyncRead + AsyncWrite + Unpin + Send>
             .map(str::trim)
             .filter(|s| !s.is_empty())
             .map(|s| s.to_string());
+
+        let raw_data_container = item
+            .dict_get_ci(&["dataContainerURL", "DataContainerURL", "containerURL", "containerPath", "container"])
+            .and_then(|v| v.as_str())
+            .map(str::trim)
+            .filter(|s| !s.is_empty());
+        let data_container_url = raw_data_container.map(normalize_data_container_url);
+        let container_path = raw_data_container
+            .map(container_path_from_url)
+            .filter(|s| !s.is_empty());
+
+        let mut app_group_identifiers: Vec<String> = Vec::new();
+        let mut app_group_containers: HashMap<String, String> = HashMap::new();
+
+        for arr_key in [
+            "systemAppGroupIdentifiers",
+            "appGroupIdentifiers",
+            "appGroupIdentifier",
+        ] {
+            if let Some(arr) = item.dict_get_ci(&[arr_key]).and_then(|v| v.as_array()) {
+                for elem in arr {
+                    if let Some(gid) = elem.as_str().map(str::trim).filter(|s| !s.is_empty()) {
+                        if !app_group_identifiers.iter().any(|g| g == gid) {
+                            app_group_identifiers.push(gid.to_string());
+                        }
+                        app_group_containers
+                            .entry(gid.to_string())
+                            .or_insert_with(|| app_group_container_path(gid));
+                    }
+                }
+            }
+        }
+
+        if let Some(gc_val) = item.dict_get_ci(&["appGroupContainers", "groupContainers"]) {
+            if let Some(entries) = gc_val.as_dict() {
+                for (gid, path_val) in entries {
+                    let clean_gid = gid.trim();
+                    if clean_gid.is_empty() {
+                        continue;
+                    }
+                    if !app_group_identifiers.iter().any(|g| g == clean_gid) {
+                        app_group_identifiers.push(clean_gid.to_string());
+                    }
+                    let mapped = path_val
+                        .as_str()
+                        .map(container_path_from_url)
+                        .filter(|s| !s.is_empty())
+                        .unwrap_or_else(|| app_group_container_path(clean_gid));
+                    app_group_containers.insert(clean_gid.to_string(), mapped);
+                }
+            } else if let Some(arr) = gc_val.as_array() {
+                for elem in arr {
+                    if let Some(gid) = elem
+                        .dict_get_ci(&["identifier", "groupIdentifier", "id"])
+                        .and_then(|v| v.as_str())
+                        .map(str::trim)
+                        .filter(|s| !s.is_empty())
+                    {
+                        if !app_group_identifiers.iter().any(|g| g == gid) {
+                            app_group_identifiers.push(gid.to_string());
+                        }
+                        let mapped = elem
+                            .dict_get_ci(&["url", "path", "containerURL"])
+                            .and_then(|v| v.as_str())
+                            .map(container_path_from_url)
+                            .filter(|s| !s.is_empty())
+                            .unwrap_or_else(|| app_group_container_path(gid));
+                        app_group_containers.insert(gid.to_string(), mapped);
+                    }
+                }
+            }
+        }
+
         let is_dev = item
             .dict_get("isDeveloperApp")
             .and_then(|v| v.as_bool())
@@ -2232,9 +2416,12 @@ async fn fetch_apps_via_coredevice_xpc<S: AsyncRead + AsyncWrite + Unpin + Send>
             version,
             access_type,
             file_sharing_enabled: is_dev || file_sharing,
-            container_path: None,
+            container_path,
             bundle_path,
             is_developer_signed: is_dev,
+            data_container_url,
+            app_group_identifiers,
+            app_group_containers,
         });
     }
     apps.sort_by(|a, b| a.display_name.to_lowercase().cmp(&b.display_name.to_lowercase()));

@@ -18,6 +18,12 @@ pub struct LocalDevAppInfo {
     pub container_path: Option<String>,
     pub bundle_path: Option<String>,
     pub is_developer_signed: bool,
+    #[serde(default)]
+    pub data_container_url: Option<String>,
+    #[serde(default)]
+    pub app_group_identifiers: Vec<String>,
+    #[serde(default)]
+    pub app_group_containers: HashMap<String, String>,
 }
 
 pub struct AppScanReport {
@@ -25,6 +31,34 @@ pub struct AppScanReport {
     pub saw_complete: bool,
     pub chunks: usize,
     pub error: Option<String>,
+}
+
+pub fn normalize_data_container_url(raw: &str) -> String {
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        return String::new();
+    }
+    if trimmed.starts_with("file://") {
+        trimmed.to_string()
+    } else if trimmed.starts_with('/') {
+        format!("file://{}", trimmed)
+    } else {
+        trimmed.to_string()
+    }
+}
+
+pub fn container_path_from_url(raw: &str) -> String {
+    let trimmed = raw.trim();
+    if let Some(stripped) = trimmed.strip_prefix("file://") {
+        stripped.trim_end_matches('/').to_string()
+    } else {
+        trimmed.trim_end_matches('/').to_string()
+    }
+}
+
+pub fn app_group_container_path(group_id: &str) -> String {
+    let clean = group_id.trim().trim_start_matches('/');
+    format!("/var/mobile/Containers/Shared/AppGroup/{}", clean)
 }
 
 pub fn merge_app_lists(dst: &mut Vec<LocalDevAppInfo>, extra: Vec<LocalDevAppInfo>) {
@@ -47,6 +81,17 @@ pub fn merge_app_lists(dst: &mut Vec<LocalDevAppInfo>, extra: Vec<LocalDevAppInf
             }
             if dst[idx].container_path.is_none() {
                 dst[idx].container_path = app.container_path;
+            }
+            if dst[idx].data_container_url.is_none() {
+                dst[idx].data_container_url = app.data_container_url;
+            }
+            for gid in app.app_group_identifiers {
+                if !gid.is_empty() && !dst[idx].app_group_identifiers.contains(&gid) {
+                    dst[idx].app_group_identifiers.push(gid);
+                }
+            }
+            for (k, v) in app.app_group_containers {
+                dst[idx].app_group_containers.entry(k).or_insert(v);
             }
             if dst[idx].access_type == "SandboxLocked" && app.access_type != "SandboxLocked" {
                 dst[idx].access_type = app.access_type;
@@ -262,6 +307,8 @@ fn user_app_client_options() -> HashMap<String, PlistValue> {
         PlistValue::String("Entitlements".to_string()),
         PlistValue::String("Path".to_string()),
         PlistValue::String("Container".to_string()),
+        PlistValue::String("DataContainerURL".to_string()),
+        PlistValue::String("GroupContainers".to_string()),
     ];
     client_options.insert("ReturnAttributes".to_string(), PlistValue::Array(return_attrs));
     client_options
@@ -281,6 +328,8 @@ fn user_app_client_options_minimal() -> HashMap<String, PlistValue> {
         PlistValue::String("Entitlements".to_string()),
         PlistValue::String("Path".to_string()),
         PlistValue::String("Container".to_string()),
+        PlistValue::String("DataContainerURL".to_string()),
+        PlistValue::String("GroupContainers".to_string()),
     ];
     client_options.insert("ReturnAttributes".to_string(), PlistValue::Array(return_attrs));
     client_options
@@ -339,8 +388,65 @@ fn parse_app_record(fallback_bundle_id: Option<&str>, dict: &HashMap<String, Pli
     let open_in_place = plist_truthy(dict.get("LSSupportsOpeningDocumentsInPlace"));
     let file_sharing_enabled = ui_file_sharing || open_in_place;
 
-    let container_path = non_empty_str(dict, "Container").map(|s| s.to_string());
+    let raw_data_container = non_empty_str(dict, "DataContainerURL")
+        .or_else(|| non_empty_str(dict, "Container"));
+    let data_container_url = raw_data_container.map(normalize_data_container_url);
+    let container_path = non_empty_str(dict, "Container")
+        .map(|s| container_path_from_url(s))
+        .or_else(|| data_container_url.as_deref().map(container_path_from_url))
+        .filter(|s| !s.is_empty());
     let bundle_path = non_empty_str(dict, "Path").map(|s| s.to_string());
+
+    let mut app_group_identifiers: Vec<String> = Vec::new();
+    let mut app_group_containers: HashMap<String, String> = HashMap::new();
+
+    if let Some(gc_dict) = dict.get("GroupContainers").and_then(|v| v.as_dict()) {
+        for (gid, path_val) in gc_dict {
+            let clean_gid = gid.trim();
+            if clean_gid.is_empty() {
+                continue;
+            }
+            if !app_group_identifiers.iter().any(|g| g == clean_gid) {
+                app_group_identifiers.push(clean_gid.to_string());
+            }
+            let mapped = path_val
+                .as_str()
+                .map(container_path_from_url)
+                .filter(|s| !s.is_empty())
+                .unwrap_or_else(|| app_group_container_path(clean_gid));
+            app_group_containers.insert(clean_gid.to_string(), mapped);
+        }
+    }
+
+    if let Some(PlistValue::Array(ent_groups)) = dict
+        .get("Entitlements")
+        .and_then(|e| e.as_dict())
+        .and_then(|ent| ent.get("com.apple.security.application-groups"))
+    {
+        for item in ent_groups {
+            if let Some(gid) = item.as_str().map(str::trim).filter(|s| !s.is_empty()) {
+                if !app_group_identifiers.iter().any(|g| g == gid) {
+                    app_group_identifiers.push(gid.to_string());
+                }
+                app_group_containers
+                    .entry(gid.to_string())
+                    .or_insert_with(|| app_group_container_path(gid));
+            }
+        }
+    }
+
+    if let Some(PlistValue::Array(sys_groups)) = dict.get("systemAppGroupIdentifiers") {
+        for item in sys_groups {
+            if let Some(gid) = item.as_str().map(str::trim).filter(|s| !s.is_empty()) {
+                if !app_group_identifiers.iter().any(|g| g == gid) {
+                    app_group_identifiers.push(gid.to_string());
+                }
+                app_group_containers
+                    .entry(gid.to_string())
+                    .or_insert_with(|| app_group_container_path(gid));
+            }
+        }
+    }
 
     // Check entitlements for get-task-allow (developer signed)
     let is_developer_signed = plist_truthy(
@@ -370,5 +476,8 @@ fn parse_app_record(fallback_bundle_id: Option<&str>, dict: &HashMap<String, Pli
         container_path,
         bundle_path,
         is_developer_signed,
+        data_container_url,
+        app_group_identifiers,
+        app_group_containers,
     })
 }

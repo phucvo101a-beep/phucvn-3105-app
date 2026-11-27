@@ -1256,6 +1256,15 @@ private struct PatchProjectDetailView: View {
                         messageArgument: privateErrorArgument(for: error)
                     )
                 }
+            } catch let airliftError as AirLiftPatchError {
+                await MainActor.run {
+                    isWorking = false
+                    actionAlert = PatchStoreAlert(
+                        titleKey: "common.failed",
+                        messageKey: "patch.error.airlift_detail",
+                        messageArgument: airliftError.localizedDescription
+                    )
+                }
             } catch {
                 await MainActor.run {
                     isWorking = false
@@ -1285,6 +1294,15 @@ private struct PatchProjectDetailView: View {
                         titleKey: "common.failed",
                         messageKey: privateErrorKey(for: error),
                         messageArgument: privateErrorArgument(for: error)
+                    )
+                }
+            } catch let airliftError as AirLiftPatchError {
+                await MainActor.run {
+                    isWorking = false
+                    actionAlert = PatchStoreAlert(
+                        titleKey: "common.failed",
+                        messageKey: "patch.error.airlift_detail",
+                        messageArgument: airliftError.localizedDescription
                     )
                 }
             } catch {
@@ -1348,6 +1366,15 @@ private struct PatchProjectDetailView: View {
                         messageArgument: privateErrorArgument(for: error)
                     )
                 }
+            } catch let airliftError as AirLiftPatchError {
+                await MainActor.run {
+                    isWorking = false
+                    actionAlert = PatchStoreAlert(
+                        titleKey: "common.failed",
+                        messageKey: "patch.error.airlift_detail",
+                        messageArgument: airliftError.localizedDescription
+                    )
+                }
             } catch {
                 await MainActor.run {
                     isWorking = false
@@ -1382,6 +1409,15 @@ private struct PatchProjectDetailView: View {
                         messageArgument: privateErrorArgument(for: error)
                     )
                 }
+            } catch let airliftError as AirLiftPatchError {
+                await MainActor.run {
+                    isWorking = false
+                    actionAlert = PatchStoreAlert(
+                        titleKey: "common.failed",
+                        messageKey: "patch.error.airlift_detail",
+                        messageArgument: airliftError.localizedDescription
+                    )
+                }
             } catch {
                 await MainActor.run {
                     isWorking = false
@@ -1414,6 +1450,15 @@ private struct PatchProjectDetailView: View {
                         titleKey: "common.failed",
                         messageKey: privateErrorKey(for: error),
                         messageArgument: privateErrorArgument(for: error)
+                    )
+                }
+            } catch let airliftError as AirLiftPatchError {
+                await MainActor.run {
+                    isWorking = false
+                    actionAlert = PatchStoreAlert(
+                        titleKey: "common.failed",
+                        messageKey: "patch.error.airlift_detail",
+                        messageArgument: airliftError.localizedDescription
                     )
                 }
             } catch {
@@ -2380,8 +2425,15 @@ struct ProxyModPresetDetailView: View {
                     isWorking = false
                     statusToggle.toggle()
                     onModified()
-                    alertTitle = "Thành công"
-                    alertMessage = "Đã áp dụng \(mod.name) vào Free Fire thành công!"
+                    alertTitle = "Apply thành công"
+                    alertMessage = "Đã áp dụng \(mod.name) thành công (đã sao lưu bản gốc vào .DiscardedPatchBackups và hoàn tất settle check)!"
+                    showAlert = true
+                }
+            } catch let airliftError as AirLiftPatchError {
+                await MainActor.run {
+                    isWorking = false
+                    alertTitle = "Không thể áp dụng"
+                    alertMessage = airliftError.localizedDescription
                     showAlert = true
                 }
             } catch let error as PatchPackageError {

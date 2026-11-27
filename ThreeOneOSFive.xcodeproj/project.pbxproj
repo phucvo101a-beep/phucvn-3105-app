@@ -78,6 +78,7 @@
 		3105K306 /* AirliftLanServer.swift in Sources */ = {isa = PBXBuildFile; fileRef = 3105K305; };
 		3105K308 /* IpaFileSharingPatcher.swift in Sources */ = {isa = PBXBuildFile; fileRef = 3105K307; };
 		3105K310 /* AirliftToolsView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 3105K309; };
+		3105K312 /* AirLiftPatchTransaction.swift in Sources */ = {isa = PBXBuildFile; fileRef = 3105K311; };
 		3105A228 /* Localizable.strings in Resources */ = {isa = PBXBuildFile; fileRef = 3105A120; };
 		3105A211 /* Assets.xcassets in Resources */ = {isa = PBXBuildFile; fileRef = 3105A031; };
 		3105P101 /* Antena_PhucVN_FFVN.3105 in Resources */ = {isa = PBXBuildFile; fileRef = 3105P001; };
@@ -196,6 +197,7 @@
 		3105K305 /* AirliftLanServer.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AirliftLanServer.swift; sourceTree = "<group>"; };
 		3105K307 /* IpaFileSharingPatcher.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = IpaFileSharingPatcher.swift; sourceTree = "<group>"; };
 		3105K309 /* AirliftToolsView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AirliftToolsView.swift; sourceTree = "<group>"; };
+		3105K311 /* AirLiftPatchTransaction.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AirLiftPatchTransaction.swift; sourceTree = "<group>"; };
 		3105A122 /* vi */ = {isa = PBXFileReference; lastKnownFileType = text.plist.strings; name = vi; path = vi.lproj/Localizable.strings; sourceTree = "<group>"; };
 /* End PBXFileReference section */
 
@@ -303,6 +305,7 @@
 				3105K303 /* BackupExtractorService.swift */,
 				3105K305 /* AirliftLanServer.swift */,
 				3105K307 /* IpaFileSharingPatcher.swift */,
+				3105K311 /* AirLiftPatchTransaction.swift */,
 				3105SEC01 /* GeneratedSecurityConfig.swift */,
 				3105SEC03 /* SecureMemory.swift */,
 				3105SEC05 /* SecCoreBridge.swift */,
@@ -503,6 +506,7 @@
 				3105K306,
 				3105K308,
 				3105K310,
+				3105K312,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};

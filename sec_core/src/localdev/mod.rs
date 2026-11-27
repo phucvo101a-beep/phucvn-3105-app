@@ -5,6 +5,7 @@
 pub mod afc_client;
 pub mod apps;
 pub mod ffi;
+pub mod fileservice;
 pub mod heartbeat;
 pub mod house_arrest;
 pub mod mobilebackup2;
@@ -15,6 +16,12 @@ pub mod tls_psk;
 pub mod tunnel;
 
 use afc_client::AfcClient;
+use apps::{app_group_container_path, container_path_from_url, LocalDevAppInfo};
+use fileservice::{
+    normalize_control_capacity, probe_capabilities, CoreDeviceFileServiceClient,
+    CoreDeviceFileServiceError, FileServiceCapabilityReport, FileServiceTargetContext,
+    DEFAULT_CONTROL_CAPACITY,
+};
 use heartbeat::HeartbeatService;
 use house_arrest::{HouseArrestClient, HouseArrestDirItem, ERR_SANDBOX_LOCKED_APPSTORE};
 use mobilebackup2::{Mb2ExtractReport, MobileBackup2Client};
@@ -22,6 +29,7 @@ use obfstr::obfstr;
 use pairing::UnifiedPairing;
 use rsd::RsdTunnelSession;
 use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Mutex;
 use std::time::Duration;
@@ -71,6 +79,22 @@ pub struct LocalDevStatusReport {
     pub is_heartbeat_alive: bool,
 }
 
+#[allow(dead_code)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AirLiftRouteInfo {
+    pub attempt: bool,
+    pub fallback: bool,
+    pub reason: Option<String>,
+    pub backend: String,
+    pub bundle_id: String,
+    pub path: String,
+    pub data_container_url: Option<String>,
+    pub app_group_identifiers: Vec<String>,
+    pub app_group_paths: Vec<String>,
+    pub control_capacity: u64,
+    pub detail: Option<String>,
+}
+
 pub struct LocalDevManager {
     pub host: String,
     pub port: u16,
@@ -81,6 +105,9 @@ pub struct LocalDevManager {
     pub active_pairing: Option<UnifiedPairing>,
     pub active_rsd: Option<RsdTunnelSession>,
     pub heartbeat: HeartbeatService,
+    pub cached_apps: HashMap<String, LocalDevAppInfo>,
+    pub did_scan_for_cache: bool,
+    pub last_airlift_route: Option<AirLiftRouteInfo>,
 }
 
 impl Default for LocalDevManager {
@@ -101,6 +128,9 @@ impl LocalDevManager {
             active_pairing: None,
             active_rsd: None,
             heartbeat: HeartbeatService::new(),
+            cached_apps: HashMap::new(),
+            did_scan_for_cache: false,
+            last_airlift_route: None,
         }
     }
 
@@ -109,6 +139,8 @@ impl LocalDevManager {
         if let Some(sess) = self.active_rsd.take() {
             sess.close();
         }
+        self.did_scan_for_cache = false;
+        self.last_airlift_route = None;
     }
 
     /// Updates dynamic tunnel candidate endpoints discovered via Swift `getifaddrs()` (`utun`)
@@ -577,39 +609,342 @@ impl LocalDevManager {
 
     /// Scans installed user apps via active RSD (`installation_proxy.shim.remote` / `coredevice.appservice`)
     /// or classic `62078` Lockdown fallback.
-    pub fn scan_apps(&mut self) -> Result<Vec<apps::LocalDevAppInfo>, String> {
-        if self.ensure_backend()? {
+    pub fn scan_apps(&mut self) -> Result<Vec<LocalDevAppInfo>, String> {
+        let result = if self.ensure_backend()? {
             let first = self
                 .active_rsd
                 .as_ref()
                 .ok_or_else(|| "RSD session unavailable".to_string())?
                 .scan_apps();
-            if let Ok(apps) = first {
-                return Ok(apps);
-            }
-            if self.reconnect_rsd_once().is_ok() {
+            if first.is_ok() {
+                first
+            } else if self.reconnect_rsd_once().is_ok() {
                 if let Some(ref sess) = self.active_rsd {
-                    return sess.scan_apps();
+                    sess.scan_apps()
+                } else {
+                    first
+                }
+            } else {
+                first
+            }
+        } else {
+            let lockdown_pairing = self
+                .active_pairing
+                .as_ref()
+                .and_then(|p| p.lockdown.as_ref())
+                .ok_or_else(|| "Chưa có pairing file Lockdown hợp lệ".to_string())?;
+            let candidate_pairs: Vec<(String, u16)> = self
+                .effective_candidates_for_port(DEFAULT_LOCKDOWN_PORT)
+                .into_iter()
+                .map(|c| (c.host, c.port))
+                .collect();
+            let (apps, connected_host, connected_port) =
+                apps::AppScanner::scan_user_apps_with_candidates(&candidate_pairs, lockdown_pairing)?;
+            self.host = connected_host;
+            self.port = connected_port;
+            Ok(apps)
+        }?;
+
+        self.cache_scanned_apps(&result);
+        Ok(result)
+    }
+
+    fn cache_scanned_apps(&mut self, apps: &[LocalDevAppInfo]) {
+        self.cached_apps.clear();
+        for app in apps {
+            self.cached_apps.insert(app.bundle_id.clone(), app.clone());
+        }
+        self.did_scan_for_cache = true;
+    }
+
+    fn resolve_target_context(&mut self, bundle_id: &str) -> FileServiceTargetContext {
+        let clean_bundle = bundle_id.trim();
+        if !clean_bundle.is_empty()
+            && !self.cached_apps.contains_key(clean_bundle)
+            && !self.did_scan_for_cache
+        {
+            self.did_scan_for_cache = true;
+            if let Ok(apps) = self.scan_apps() {
+                self.cache_scanned_apps(&apps);
+            }
+        }
+        if let Some(info) = self.cached_apps.get(clean_bundle) {
+            let durl = info
+                .data_container_url
+                .as_deref()
+                .or(info.container_path.as_deref());
+            FileServiceTargetContext::from_app_info(
+                clean_bundle,
+                durl,
+                &info.app_group_identifiers,
+                &info.app_group_containers,
+            )
+        } else {
+            FileServiceTargetContext::from_app_info(clean_bundle, None, &[], &HashMap::new())
+        }
+    }
+
+    pub fn probe_fileservice_status(
+        &mut self,
+        bundle_id: Option<&str>,
+        control_capacity: u64,
+    ) -> FileServiceCapabilityReport {
+        let _ = self.ensure_backend();
+        let ctx = bundle_id
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .map(|bid| self.resolve_target_context(bid));
+        probe_capabilities(self.active_rsd.as_ref(), ctx.as_ref(), control_capacity)
+    }
+
+    fn try_afc_container_fallback<T>(
+        &mut self,
+        ctx: &FileServiceTargetContext,
+        rel_path: &str,
+        op: impl Fn(AfcClient, &str) -> Result<T, String>,
+    ) -> Result<T, String> {
+        let Some(ref raw_root) = ctx.data_container_url else {
+            return Err("Không có DataContainerURL để thăm dò afc.shim.remote".to_string());
+        };
+        let container_root = container_path_from_url(raw_root);
+        if container_root.is_empty() {
+            return Err("DataContainerURL rỗng".to_string());
+        }
+        let stripped_private = container_root
+            .strip_prefix("/private")
+            .unwrap_or(container_root.as_str());
+        let sub = rel_path.trim().trim_start_matches('/');
+        let full_target = if sub.is_empty() {
+            stripped_private.to_string()
+        } else {
+            format!("{}/{}", stripped_private.trim_end_matches('/'), sub)
+        };
+
+        let afc_rsd = obfstr!("com.apple.afc.shim.remote").to_string();
+        let afc2_svc = obfstr!("com.apple.afc2").to_string();
+        let afc_classic = obfstr!("com.apple.afc").to_string();
+
+        if let Some(ref sess) = self.active_rsd {
+            for svc in [afc_rsd.as_str(), afc2_svc.as_str(), afc_classic.as_str()] {
+                if let Ok(s) = sess.open_checked_in_service(&[svc]) {
+                    let mut afc = AfcClient::new(LockdownStream::RsdTunnel(s));
+                    // Verify AFC is NOT merely returning /var/mobile/Media; container root must actually exist
+                    if afc.get_file_info(stripped_private).is_ok() {
+                        if let Ok(res) = op(afc, &full_target) {
+                            return Ok(res);
+                        }
+                    }
                 }
             }
-            return first;
+        }
+        Err("afc.shim.remote bị giới hạn Sandbox Media".to_string())
+    }
+
+    fn record_airlift_route(
+        &mut self,
+        attempt: bool,
+        fallback: bool,
+        reason: Option<String>,
+        backend: String,
+        ctx: &FileServiceTargetContext,
+        path: &str,
+        cap: u64,
+        detail: Option<String>,
+    ) -> AirLiftRouteInfo {
+        let app_group_paths = ctx
+            .system_app_group_identifiers
+            .iter()
+            .map(|gid| {
+                ctx.app_group_containers
+                    .get(gid)
+                    .cloned()
+                    .unwrap_or_else(|| app_group_container_path(gid))
+            })
+            .collect();
+        let info = AirLiftRouteInfo {
+            attempt,
+            fallback,
+            reason,
+            backend,
+            bundle_id: ctx.bundle_id.clone(),
+            path: path.to_string(),
+            data_container_url: ctx.data_container_url.clone(),
+            app_group_identifiers: ctx.system_app_group_identifiers.clone(),
+            app_group_paths,
+            control_capacity: cap,
+            detail,
+        };
+        eprintln!(
+            "patch.airlift attempt={} fallback={} reason={} backend={} bundle={} path={}",
+            info.attempt,
+            info.fallback,
+            info.reason.as_deref().unwrap_or("none"),
+            info.backend,
+            info.bundle_id,
+            info.path
+        );
+        self.last_airlift_route = Some(info.clone());
+        info
+    }
+
+    fn execute_airlift_app_op<T>(
+        &mut self,
+        bundle_id: &str,
+        path: &str,
+        control_capacity: u64,
+        fs_op: impl Fn(&mut CoreDeviceFileServiceClient, &FileServiceTargetContext, &str) -> Result<T, CoreDeviceFileServiceError>,
+        afc_op: impl Fn(AfcClient, String, &str) -> Result<T, String>,
+    ) -> Result<(T, AirLiftRouteInfo), String> {
+        let cap = normalize_control_capacity(control_capacity);
+        let ctx = self.resolve_target_context(bundle_id);
+        let is_rsd = self.ensure_backend()?;
+
+        let mut fs_reason = "unavailable".to_string();
+        let mut fs_detail = "Lockdown mode (RSD FileService unavailable)".to_string();
+
+        // Step 1 (attempt=true): Try `com.apple.coredevice.fileservice.controlcapacity` + `.data` first
+        if is_rsd {
+            let fs_res = {
+                let sess = self
+                    .active_rsd
+                    .as_ref()
+                    .ok_or_else(|| "RSD session unavailable".to_string())?;
+                CoreDeviceFileServiceClient::connect_blocking(sess, cap)
+                    .and_then(|mut client| fs_op(&mut client, &ctx, path))
+            };
+            match fs_res {
+                Ok(val) => {
+                    let route = self.record_airlift_route(
+                        true,
+                        false,
+                        None,
+                        "coredevice.fileservice.data".to_string(),
+                        &ctx,
+                        path,
+                        cap,
+                        ctx.data_container_url.clone(),
+                    );
+                    return Ok((val, route));
+                }
+                Err(err) => {
+                    fs_reason = err.reason.as_str().to_string();
+                    fs_detail = err.detail;
+                }
+            }
+        }
+
+        // Step 2 (fallback=true): Downgrade sequentially -> HouseArrest (VendContainer -> VendDocuments) -> afc.shim.remote
+        let ha_res = self.try_house_arrest_only(bundle_id, |afc, mode| {
+            let val = afc_op(afc, mode.clone(), path)?;
+            Ok((val, mode))
+        });
+
+        match ha_res {
+            Ok((val, mode)) => {
+                let route = self.record_airlift_route(
+                    true,
+                    true,
+                    Some(fs_reason),
+                    format!("house_arrest.{}", mode),
+                    &ctx,
+                    path,
+                    cap,
+                    Some(fs_detail),
+                );
+                Ok((val, route))
+            }
+            Err(ha_err) => {
+                if is_rsd {
+                    if let Ok(val) = self.try_afc_container_fallback(&ctx, path, |afc, resolved_path| {
+                        afc_op(afc, "afc.shim.remote".to_string(), resolved_path)
+                    }) {
+                        let route = self.record_airlift_route(
+                            true,
+                            true,
+                            Some(fs_reason),
+                            "afc.shim.remote".to_string(),
+                            &ctx,
+                            path,
+                            cap,
+                            Some(fs_detail),
+                        );
+                        return Ok((val, route));
+                    }
+                }
+
+                // Step 3: Both CoreDevice FileService AND HouseArrest (+ afc.shim.remote) failed -> SandboxLocked
+                let combined_err = format!(
+                    "{} [patch.airlift attempt=true fallback=true reason={} | fileservice: {}]",
+                    ha_err, fs_reason, fs_detail
+                );
+                self.record_airlift_route(
+                    true,
+                    true,
+                    Some(fs_reason),
+                    "sandbox_locked".to_string(),
+                    &ctx,
+                    path,
+                    cap,
+                    Some(combined_err.clone()),
+                );
+                Err(combined_err)
+            }
+        }
+    }
+
+    fn try_house_arrest_only<T>(
+        &mut self,
+        bundle_id: &str,
+        op: impl Fn(AfcClient, String) -> Result<T, String>,
+    ) -> Result<T, String> {
+        let is_rsd = self.ensure_backend()?;
+        let ha_rsd = obfstr!("com.apple.mobile.house_arrest.shim.remote").to_string();
+        let ha_classic = obfstr!("com.apple.mobile.house_arrest").to_string();
+
+        if is_rsd {
+            let open_pair = |sess: &RsdTunnelSession| -> Result<(AfcClient, String), String> {
+                HouseArrestClient::connect_app_container_with_opener(
+                    || {
+                        let s = sess.open_checked_in_service(&[ha_rsd.as_str(), ha_classic.as_str()])?;
+                        Ok(LockdownStream::RsdTunnel(s))
+                    },
+                    bundle_id,
+                )
+            };
+
+            let sess = self
+                .active_rsd
+                .as_ref()
+                .ok_or_else(|| "RSD session unavailable".to_string())?;
+            let first = open_pair(sess).and_then(|(afc, mode)| op(afc, mode));
+            match first {
+                Ok(v) => return Ok(v),
+                Err(err) if err.contains(ERR_SANDBOX_LOCKED_APPSTORE) => return Err(err),
+                Err(err) => {
+                    if self.reconnect_rsd_once().is_ok() {
+                        if let Some(ref new_sess) = self.active_rsd {
+                            if let Ok((afc, mode)) = open_pair(new_sess) {
+                                return op(afc, mode);
+                            }
+                        }
+                    }
+                    return Err(err);
+                }
+            }
         }
 
         let lockdown_pairing = self
             .active_pairing
             .as_ref()
             .and_then(|p| p.lockdown.as_ref())
-            .ok_or_else(|| "Chưa có pairing file Lockdown hợp lệ".to_string())?;
-        let candidate_pairs: Vec<(String, u16)> = self
-            .effective_candidates_for_port(DEFAULT_LOCKDOWN_PORT)
-            .into_iter()
-            .map(|c| (c.host, c.port))
-            .collect();
-        let (apps, connected_host, connected_port) =
-            apps::AppScanner::scan_user_apps_with_candidates(&candidate_pairs, lockdown_pairing)?;
-        self.host = connected_host;
-        self.port = connected_port;
-        Ok(apps)
+            .ok_or_else(|| "Chưa có pairing file".to_string())?;
+        let (afc, mode) = HouseArrestClient::connect_app_container(
+            &self.host,
+            self.port,
+            lockdown_pairing,
+            bundle_id,
+        )?;
+        op(afc, mode)
     }
 
     fn with_afc_client<T>(
@@ -695,38 +1030,45 @@ impl LocalDevManager {
         bundle_id: &str,
         path: &str,
     ) -> Result<(Vec<String>, Vec<HouseArrestDirItem>, String), String> {
+        if service_type == ffi::SERVICE_TYPE_HOUSE_ARREST {
+            let ((entries, items, mode), _route) =
+                self.airlift_list_dir(bundle_id, path, DEFAULT_CONTROL_CAPACITY)?;
+            return Ok((entries, items, mode));
+        }
         let path_owned = path.to_string();
         self.with_afc_client(service_type, bundle_id, move |mut afc, mode| {
-            if service_type == ffi::SERVICE_TYPE_HOUSE_ARREST {
-                HouseArrestClient::list_dir_detailed_with_afc(afc, mode, &path_owned)
-            } else {
-                let entries = afc.list_dir(&path_owned)?;
-                let prefix = path_owned.trim_end_matches('/');
-                let mut items = Vec::with_capacity(entries.len());
-                for name in &entries {
-                    let full = if prefix.is_empty() {
-                        format!("/{}", name)
-                    } else {
-                        format!("{}/{}", prefix, name)
-                    };
-                    let info = afc.get_file_info(&full).unwrap_or_default();
-                    let is_dir = info.get("st_ifmt").map(|v| v == "S_IFDIR").unwrap_or(false);
-                    let size = if is_dir {
-                        -1
-                    } else {
-                        info.get("st_size")
-                            .and_then(|s| s.parse::<i64>().ok())
-                            .unwrap_or(0)
-                    };
-                    items.push(HouseArrestDirItem {
-                        name: name.clone(),
-                        is_dir,
-                        size,
-                    });
-                }
-                Ok((entries, items, mode))
-            }
+            let entries = afc.list_dir(&path_owned)?;
+            let items = build_afc_dir_items(&mut afc, &path_owned, &entries);
+            Ok((entries, items, mode))
         })
+    }
+
+    pub fn airlift_list_dir(
+        &mut self,
+        bundle_id: &str,
+        path: &str,
+        control_capacity: u64,
+    ) -> Result<((Vec<String>, Vec<HouseArrestDirItem>, String), AirLiftRouteInfo), String> {
+        let ((entries, items, mode), route) = self.execute_airlift_app_op(
+            bundle_id,
+            path,
+            control_capacity,
+            |client, ctx, p| {
+                let items = client.list_blocking(ctx, p)?;
+                let entries = items.iter().map(|i| i.name.clone()).collect();
+                Ok((entries, items, "coredevice.fileservice.data".to_string()))
+            },
+            |mut afc, mode, p| {
+                if mode == "afc.shim.remote" {
+                    let entries = afc.list_dir(p)?;
+                    let items = build_afc_dir_items(&mut afc, p, &entries);
+                    Ok((entries, items, mode))
+                } else {
+                    HouseArrestClient::list_dir_detailed_with_afc(afc, mode, p)
+                }
+            },
+        )?;
+        Ok(((entries, items, mode), route))
     }
 
     pub fn read_file(
@@ -735,14 +1077,36 @@ impl LocalDevManager {
         bundle_id: &str,
         path: &str,
     ) -> Result<Vec<u8>, String> {
+        if service_type == ffi::SERVICE_TYPE_HOUSE_ARREST {
+            let (bytes, _route) =
+                self.airlift_read_file(bundle_id, path, DEFAULT_CONTROL_CAPACITY)?;
+            return Ok(bytes);
+        }
         let path_owned = path.to_string();
-        self.with_afc_client(service_type, bundle_id, move |mut afc, mode| {
-            if service_type == ffi::SERVICE_TYPE_HOUSE_ARREST {
-                HouseArrestClient::read_file_with_afc(afc, &mode, &path_owned)
-            } else {
-                afc.read_file_full(&path_owned)
-            }
+        self.with_afc_client(service_type, bundle_id, move |mut afc, _mode| {
+            afc.read_file_full(&path_owned)
         })
+    }
+
+    pub fn airlift_read_file(
+        &mut self,
+        bundle_id: &str,
+        path: &str,
+        control_capacity: u64,
+    ) -> Result<(Vec<u8>, AirLiftRouteInfo), String> {
+        self.execute_airlift_app_op(
+            bundle_id,
+            path,
+            control_capacity,
+            |client, ctx, p| client.fileservice_read(ctx, p),
+            |mut afc, mode, p| {
+                if mode == "afc.shim.remote" {
+                    afc.read_file_full(p)
+                } else {
+                    HouseArrestClient::read_file_with_afc(afc, &mode, p)
+                }
+            },
+        )
     }
 
     pub fn write_file(
@@ -752,19 +1116,88 @@ impl LocalDevManager {
         path: &str,
         data: &[u8],
     ) -> Result<(), String> {
+        if service_type == ffi::SERVICE_TYPE_HOUSE_ARREST {
+            let (_route, _) =
+                self.airlift_write_file(bundle_id, path, data, DEFAULT_CONTROL_CAPACITY)?;
+            return Ok(());
+        }
         let path_owned = path.to_string();
         let data_owned = data.to_vec();
-        self.with_afc_client(service_type, bundle_id, move |mut afc, mode| {
-            if service_type == ffi::SERVICE_TYPE_HOUSE_ARREST {
-                HouseArrestClient::write_file_safe_with_afc(afc, &mode, &path_owned, &data_owned)
-            } else {
-                if let Ok(existing) = afc.read_file_full(&path_owned) {
-                    let backup_path = format!("{}.bak", path_owned);
-                    let _ = afc.write_file_full(&backup_path, &existing);
-                }
-                afc.write_file_full(&path_owned, &data_owned)
+        self.with_afc_client(service_type, bundle_id, move |mut afc, _mode| {
+            if let Ok(existing) = afc.read_file_full(&path_owned) {
+                let backup_path = format!("{}.bak", path_owned);
+                let _ = afc.write_file_full(&backup_path, &existing);
             }
+            afc.write_file_full(&path_owned, &data_owned)
         })
+    }
+
+    pub fn airlift_write_file(
+        &mut self,
+        bundle_id: &str,
+        path: &str,
+        data: &[u8],
+        control_capacity: u64,
+    ) -> Result<(AirLiftRouteInfo, usize), String> {
+        let len = data.len();
+        let (_, route) = self.execute_airlift_app_op(
+            bundle_id,
+            path,
+            control_capacity,
+            |client, ctx, p| client.fileservice_write(ctx, p, data),
+            |mut afc, mode, p| {
+                if mode == "afc.shim.remote" {
+                    afc.write_file_full(p, data)
+                } else {
+                    HouseArrestClient::write_file_safe_with_afc(afc, &mode, p, data)
+                }
+            },
+        )?;
+        Ok((route, len))
+    }
+
+    pub fn airlift_mkdir(
+        &mut self,
+        bundle_id: &str,
+        path: &str,
+        control_capacity: u64,
+    ) -> Result<AirLiftRouteInfo, String> {
+        let (_, route) = self.execute_airlift_app_op(
+            bundle_id,
+            path,
+            control_capacity,
+            |client, ctx, p| client.fileservice_mkdir(ctx, p),
+            |mut afc, mode, p| {
+                if mode == "afc.shim.remote" {
+                    afc.make_dir(p)
+                } else {
+                    HouseArrestClient::make_dir_with_afc(afc, &mode, p)
+                }
+            },
+        )?;
+        Ok(route)
+    }
+
+    pub fn airlift_remove(
+        &mut self,
+        bundle_id: &str,
+        path: &str,
+        control_capacity: u64,
+    ) -> Result<AirLiftRouteInfo, String> {
+        let (_, route) = self.execute_airlift_app_op(
+            bundle_id,
+            path,
+            control_capacity,
+            |client, ctx, p| client.fileservice_remove(ctx, p),
+            |mut afc, mode, p| {
+                if mode == "afc.shim.remote" {
+                    afc.remove_path(p)
+                } else {
+                    HouseArrestClient::remove_path_with_afc(afc, &mode, p)
+                }
+            },
+        )?;
+        Ok(route)
     }
 
     /// Extracts unencrypted `com.apple.mobilebackup2` snapshot over RSD (`10.7.0.1:49152`) or Lockdown
@@ -849,6 +1282,33 @@ impl LocalDevManager {
             free_bytes,
         )
     }
+}
+
+fn build_afc_dir_items(afc: &mut AfcClient, dir_path: &str, entries: &[String]) -> Vec<HouseArrestDirItem> {
+    let prefix = dir_path.trim_end_matches('/');
+    let mut items = Vec::with_capacity(entries.len());
+    for name in entries {
+        let full = if prefix.is_empty() {
+            format!("/{}", name)
+        } else {
+            format!("{}/{}", prefix, name)
+        };
+        let info = afc.get_file_info(&full).unwrap_or_default();
+        let is_dir = info.get("st_ifmt").map(|v| v == "S_IFDIR").unwrap_or(false);
+        let size = if is_dir {
+            -1
+        } else {
+            info.get("st_size")
+                .and_then(|s| s.parse::<i64>().ok())
+                .unwrap_or(0)
+        };
+        items.push(HouseArrestDirItem {
+            name: name.clone(),
+            is_dir,
+            size,
+        });
+    }
+    items
 }
 
 fn format_live_rsd_message(

@@ -21,6 +21,7 @@ struct FileBrowserView: View {
     @FocusState private var isSearchFocused: Bool
     @State private var isLoadingEntries = true
     @State private var remoteErrorMessage: String?
+    @State private var airliftRouteInfo: AirLiftRouteInfo?
     @State private var createZipOnBackup = true
     @State private var hasGranted = false
     @State private var pendingReplacementRequest: FileReplacementRequest?
@@ -97,6 +98,21 @@ struct FileBrowserView: View {
                 .padding(.horizontal, AppTheme.pageInset)
                 .padding(.top, 12)
                 .padding(.bottom, 5)
+
+            if let route = airliftRouteInfo, LocalDevVirtualPath.isLocalDevPath(currentPath) {
+                HStack(spacing: 6) {
+                    Image(systemName: route.fallback ? "arrow.triangle.branch" : "bolt.horizontal.circle.fill")
+                        .font(.system(size: 11, weight: .bold))
+                        .foregroundStyle(route.fallback ? Color.cyan : AppTheme.success)
+                    Text("AirLift: \(route.displayBadgeText)")
+                        .font(.system(size: 10.5, weight: .semibold, design: .monospaced))
+                        .foregroundStyle(AppTheme.subduedText)
+                        .lineLimit(1)
+                    Spacer()
+                }
+                .padding(.horizontal, AppTheme.pageInset)
+                .padding(.bottom, 4)
+            }
 
             List {
                 Section {
@@ -859,6 +875,60 @@ struct FileBrowserView: View {
         guard let prompt = namePrompt else { return }
         let requestedName = nameInput
         namePrompt = nil
+
+        if let parsedRemote = LocalDevVirtualPath.parse(currentPath) {
+            let trimmed = requestedName.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !trimmed.isEmpty, !trimmed.contains("/"), !trimmed.contains("..") else { return }
+            let targetRemote = parsedRemote.remotePath == "/"
+                ? "/\(trimmed)"
+                : "\(parsedRemote.remotePath.trimmingCharacters(in: CharacterSet(charactersIn: "/")).isEmpty ? "" : parsedRemote.remotePath)/\(trimmed)"
+            switch prompt.action {
+            case .createFile:
+                performFileOperation(
+                    activity: language.text("browser.creating"),
+                    operationName: "airlift create file"
+                ) {
+                    let res = LocalDevBridge.shared.writeFileWithAirLift(
+                        bundleID: parsedRemote.bundleID,
+                        path: targetRemote,
+                        data: Data()
+                    )
+                    guard res.success else {
+                        throw NSError(
+                            domain: "com.phucvn.3105",
+                            code: 13,
+                            userInfo: [NSLocalizedDescriptionKey: res.error ?? "Không tạo được tệp qua AirLift"]
+                        )
+                    }
+                    return targetRemote
+                }
+            case .createFolder:
+                performFileOperation(
+                    activity: language.text("browser.creating"),
+                    operationName: "airlift create folder"
+                ) {
+                    let res = LocalDevBridge.shared.createDirectoryWithAirLift(
+                        bundleID: parsedRemote.bundleID,
+                        path: targetRemote
+                    )
+                    guard res.success else {
+                        throw NSError(
+                            domain: "com.phucvn.3105",
+                            code: 13,
+                            userInfo: [NSLocalizedDescriptionKey: res.error ?? "Không tạo được thư mục qua AirLift"]
+                        )
+                    }
+                    return targetRemote
+                }
+            case .rename, .archive:
+                operationNotice = FileReplacementNotice(
+                    title: language.text("browser.operation_error_title"),
+                    message: "Tính năng đổi tên / nén ZIP chỉ áp dụng cho thư mục Sandbox cục bộ."
+                )
+            }
+            return
+        }
+
         guard let directoryURL = ContainerStore.validatedLocalFileURL(
             fromPath: currentPath,
             isDirectory: true
@@ -955,7 +1025,19 @@ struct FileBrowserView: View {
             operationName: "delete"
         ) {
             for entry in targets {
-                if let targetURL = ContainerStore.validatedLocalFileURL(
+                if let parsed = LocalDevVirtualPath.parse(entry.path) {
+                    let res = LocalDevBridge.shared.removePathWithAirLift(
+                        bundleID: parsed.bundleID,
+                        path: parsed.remotePath
+                    )
+                    guard res.success else {
+                        throw NSError(
+                            domain: "com.phucvn.3105",
+                            code: 13,
+                            userInfo: [NSLocalizedDescriptionKey: res.error ?? "Không xóa được qua AirLift"]
+                        )
+                    }
+                } else if let targetURL = ContainerStore.validatedLocalFileURL(
                     fromPath: entry.path,
                     isDirectory: entry.isDirectory,
                     requireExists: true
@@ -1242,6 +1324,43 @@ struct FileBrowserView: View {
             let validSourceURLs = sourceURLs.compactMap {
                 ContainerStore.validatedExternalFileURL($0)
             }
+            if !validSourceURLs.isEmpty,
+               let parsedRemote = LocalDevVirtualPath.parse(currentPath) {
+                activityText = language.text("browser.importing", validSourceURLs.first?.lastPathComponent ?? "")
+                DispatchQueue.global(qos: .userInitiated).async {
+                    var imported = 0
+                    var lastErr: String?
+                    for srcURL in validSourceURLs {
+                        let scoped = srcURL.startAccessingSecurityScopedResource()
+                        defer { if scoped { srcURL.stopAccessingSecurityScopedResource() } }
+                        guard let bytes = try? Data(contentsOf: srcURL) else {
+                            lastErr = "Không đọc được \(srcURL.lastPathComponent)"
+                            continue
+                        }
+                        let base = parsedRemote.remotePath == "/" ? "" : parsedRemote.remotePath
+                        let dest = "\(base)/\(srcURL.lastPathComponent)"
+                        let res = LocalDevBridge.shared.writeFileWithAirLift(
+                            bundleID: parsedRemote.bundleID,
+                            path: dest,
+                            data: bytes
+                        )
+                        if res.success {
+                            imported += 1
+                        } else {
+                            lastErr = res.error ?? "Ghi tệp AirLift thất bại"
+                        }
+                    }
+                    DispatchQueue.main.async {
+                        activityText = nil
+                        load()
+                        operationNotice = FileReplacementNotice(
+                            title: imported > 0 ? language.text("browser.import_done_title") : language.text("browser.import_error_title"),
+                            message: imported > 0 ? "Đã đưa \(imported) tệp qua AirLift thành công." : (lastErr ?? "Không thể đưa tệp qua AirLift.")
+                        )
+                    }
+                }
+                return
+            }
             guard !validSourceURLs.isEmpty,
                   let destinationURL = ContainerStore.validatedLocalFileURL(
                       fromPath: currentPath,
@@ -1504,6 +1623,7 @@ struct FileBrowserView: View {
                 DispatchQueue.main.async {
                     guard currentPath == path else { return }
                     entries = remoteEntries
+                    airliftRouteInfo = listing.route
                     remoteErrorMessage = remoteErr
                     selectedEntryIDs.formIntersection(Set(remoteEntries.map(\.id)))
                     isLoadingEntries = false
@@ -1639,6 +1759,23 @@ struct FileBrowserView: View {
     }
 
     private func requestReplacement(for entry: FileEntry) {
+        if LocalDevVirtualPath.isLocalDevPath(entry.path), !entry.isDirectory {
+            let request = FileReplacementRequest(
+                targetURL: URL(fileURLWithPath: "/"),
+                targetName: entry.name,
+                remoteVirtualPath: entry.path
+            )
+            pendingReplacementRequest = request
+            log("filebrowser: remote replacement requested target=\(entry.name)")
+            DispatchQueue.main.asyncAfter(
+                deadline: .now() + ReplacementPickerPolicy.presentationDelay
+            ) {
+                guard pendingReplacementRequest?.id == request.id else { return }
+                pendingReplacementRequest = nil
+                replacementRequest = request
+            }
+            return
+        }
         guard let targetURL = ContainerStore.validatedLocalFileURL(
             fromPath: entry.path,
             isDirectory: entry.isDirectory,
@@ -1694,6 +1831,63 @@ struct FileBrowserView: View {
                     "source=\(selection.sourceURL.lastPathComponent)"
             )
             DispatchQueue.global(qos: .userInitiated).async {
+                if let remoteVPath = request.remoteVirtualPath,
+                   let parsedRemote = LocalDevVirtualPath.parse(remoteVPath) {
+                    guard let validSourceURL = ContainerStore.validatedExternalFileURL(selection.sourceURL) else {
+                        DispatchQueue.main.async {
+                            activityText = nil
+                            replacementNotice = FileReplacementNotice(
+                                title: language.text("browser.replace_error_title"),
+                                message: replacementErrorMessage(FileReplacementError.sourceMissing)
+                            )
+                        }
+                        return
+                    }
+                    let scoped = validSourceURL.startAccessingSecurityScopedResource()
+                    defer { if scoped { validSourceURL.stopAccessingSecurityScopedResource() } }
+                    do {
+                        let newData = try Data(contentsOf: validSourceURL)
+                        // Sao lưu bản gốc vào Documents/.DiscardedPatchBackups-<timestamp> trước khi ghi đè
+                        let readOrig = LocalDevBridge.shared.readFileWithAirLift(
+                            bundleID: parsedRemote.bundleID,
+                            path: parsedRemote.remotePath
+                        )
+                        if readOrig.success, let origData = readOrig.data {
+                            if let (backupDir, _) = try? AirLiftPatchTransaction.createDiscardedBackupDirectory(
+                                transactionID: UUID()
+                            ) {
+                                let dst = backupDir.appendingPathComponent(selection.targetName)
+                                try? origData.write(to: dst, options: .atomic)
+                            }
+                        }
+                        let writeRes = LocalDevBridge.shared.writeFileWithAirLift(
+                            bundleID: parsedRemote.bundleID,
+                            path: parsedRemote.remotePath,
+                            data: newData
+                        )
+                        let sizeStr = ByteCountFormatter.string(fromByteCount: Int64(newData.count), countStyle: .file)
+                        DispatchQueue.main.async {
+                            activityText = nil
+                            load()
+                            replacementNotice = FileReplacementNotice(
+                                title: writeRes.success ? language.text("browser.replace_done_title") : language.text("browser.replace_error_title"),
+                                message: writeRes.success
+                                    ? language.text("browser.replace_done_message", selection.targetName, sizeStr)
+                                    : (writeRes.error ?? "Ghi tệp AirLift thất bại")
+                            )
+                        }
+                    } catch {
+                        DispatchQueue.main.async {
+                            activityText = nil
+                            replacementNotice = FileReplacementNotice(
+                                title: language.text("browser.replace_error_title"),
+                                message: error.localizedDescription
+                            )
+                        }
+                    }
+                    return
+                }
+
                 guard let validSourceURL = ContainerStore.validatedExternalFileURL(selection.sourceURL),
                       let validTargetURL = ContainerStore.validatedLocalFileURL(
                           fromPath: selection.targetURL.path,

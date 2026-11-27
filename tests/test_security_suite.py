@@ -1570,6 +1570,98 @@ class SecuritySuiteTests(unittest.TestCase):
         ):
             self.assertIn(fname, pbx)
 
+    # -----------------------------------------------------------------------
+    # SCENARIO 14: CoreDevice FileService, patch.airlift Fallback & AirLiftPatchTransaction
+    # -----------------------------------------------------------------------
+    def test_14_coredevice_fileservice_airlift_and_patch_transaction(self):
+        fs_rs = (REPO_ROOT / "sec_core" / "src" / "localdev" / "fileservice.rs").read_text("utf-8")
+        for sym in (
+            "com.apple.coredevice.fileservice.controlcapacity",
+            "com.apple.coredevice.fileservice.data",
+            "DEFAULT_CONTROL_CAPACITY",
+            "normalize_control_capacity",
+            "validate_positive_control_capacity",
+            "/var/mobile/Containers/Shared/AppGroup",
+            "DataContainerURL",
+            "systemAppGroupIdentifiers",
+            "fileservice_read",
+            "fileservice_write",
+            "unavailable",
+            "unsupported",
+            "request_mapping_incomplete",
+        ):
+            self.assertIn(sym, fs_rs)
+
+        apps_rs = (REPO_ROOT / "sec_core" / "src" / "localdev" / "apps.rs").read_text("utf-8")
+        for sym in ("data_container_url", "app_group_identifiers", "app_group_container_path"):
+            self.assertIn(sym, apps_rs)
+
+        rsd_rs = (REPO_ROOT / "sec_core" / "src" / "localdev" / "rsd.rs").read_text("utf-8")
+        for sym in (
+            "includeAppGroupIdentifiers",
+            "includeContainerPaths",
+            "systemAppGroupIdentifiers",
+            "resolve_service_pair",
+            "connect_port_async",
+        ):
+            self.assertIn(sym, rsd_rs)
+
+        mod_rs = (REPO_ROOT / "sec_core" / "src" / "localdev" / "mod.rs").read_text("utf-8")
+        for sym in (
+            "pub mod fileservice;",
+            "execute_airlift_app_op",
+            "coredevice.fileservice.data",
+            "afc.shim.remote",
+            "patch.airlift attempt=",
+            "ERR_SANDBOX_LOCKED_APPSTORE",
+        ):
+            self.assertIn(sym, mod_rs)
+
+        ffi_rs = (REPO_ROOT / "sec_core" / "src" / "localdev" / "ffi.rs").read_text("utf-8")
+        obf_py = (REPO_ROOT / "scripts" / "obfuscate_build.py").read_text("utf-8")
+        ld_swift = (REPO_ROOT / "ThreeOneOSFive" / "helpers" / "LocalDevBridge.swift").read_text("utf-8")
+        new_syms = (
+            "localdev_fileservice_status",
+            "localdev_fileservice_list",
+            "localdev_fileservice_read",
+            "localdev_fileservice_write",
+            "localdev_fileservice_mkdir",
+            "localdev_fileservice_remove",
+            "localdev_airlift_route_info",
+        )
+        for sym in new_syms:
+            self.assertIn(sym, ffi_rs)
+            self.assertIn(sym, obf_py)
+            self.assertIn(f'"{sym}"', ld_swift)
+
+        airlift_tx = (REPO_ROOT / "ThreeOneOSFive" / "helpers" / "AirLiftPatchTransaction.swift").read_text("utf-8")
+        for sym in (
+            "struct AirLiftPatchWriteDescriptor",
+            "enum AirLiftPatchTransaction",
+            ".DiscardedPatchBackups-",
+            "createDiscardedBackupDirectory",
+            "applyRemoteAirLift",
+            "verifyRemoteSettleCheck",
+            "verifyLocalSettleCheck",
+            "restoreRemoteAirLift",
+        ):
+            self.assertIn(sym, airlift_tx)
+
+        dev_patch = (REPO_ROOT / "ThreeOneOSFive" / "helpers" / "DevicePatchService.swift").read_text("utf-8")
+        self.assertIn("AirLiftPatchTransaction", dev_patch)
+        self.assertIn("AirLiftPatchWriteDescriptor", dev_patch)
+
+        fb_swift = (REPO_ROOT / "ThreeOneOSFive" / "views" / "FileBrowserView.swift").read_text("utf-8")
+        self.assertIn("Ứng dụng bị khóa Sandbox bởi iOS", fb_swift)
+        self.assertIn("Trích xuất dữ liệu qua Backup (mobilebackup2)", fb_swift)
+        self.assertIn("writeFileWithAirLift", fb_swift)
+
+        loc_vi = (REPO_ROOT / "ThreeOneOSFive" / "vi.lproj" / "Localizable.strings").read_text("utf-8")
+        self.assertIn("Apply thành công", loc_vi)
+
+        pbx = (REPO_ROOT / "ThreeOneOSFive.xcodeproj" / "project.pbxproj").read_text("utf-8")
+        self.assertIn("AirLiftPatchTransaction.swift", pbx)
+
 
 def main():
     parser = argparse.ArgumentParser(description="Run 3105 5-Scenario Security Test Suite")

@@ -162,6 +162,18 @@ impl HouseArrestClient {
         Self::read_file_with_afc(afc, &mode, path)
     }
 
+    /// Creates directory inside an already-started HouseArrest `(AfcClient, mode)` session.
+    pub fn make_dir_with_afc(mut afc: AfcClient, mode: &str, path: &str) -> Result<(), String> {
+        let effective_path = normalize_house_arrest_path(mode, path);
+        afc.make_dir(&effective_path)
+    }
+
+    /// Removes a path inside an already-started HouseArrest `(AfcClient, mode)` session.
+    pub fn remove_path_with_afc(mut afc: AfcClient, mode: &str, path: &str) -> Result<(), String> {
+        let effective_path = normalize_house_arrest_path(mode, path);
+        afc.remove_path(&effective_path)
+    }
+
     /// Writes file bytes into an already-started HouseArrest `(AfcClient, mode)` session with `.bak` backup.
     pub fn write_file_safe_with_afc(
         mut afc: AfcClient,

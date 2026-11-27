@@ -225,8 +225,24 @@ impl AfcClient {
         Ok(content)
     }
 
+    /// Ensures all parent directories exist before writing a file
+    pub fn ensure_parent_dirs(&mut self, file_path: &str) {
+        let trimmed = file_path.trim().trim_start_matches('/');
+        let parts: Vec<&str> = trimmed.split('/').filter(|s| !s.is_empty()).collect();
+        if parts.len() <= 1 {
+            return;
+        }
+        let mut acc = String::new();
+        for dir in &parts[..parts.len() - 1] {
+            acc.push('/');
+            acc.push_str(dir);
+            let _ = self.make_dir(&acc);
+        }
+    }
+
     /// Writes an entire file in chunks
     pub fn write_file_full(&mut self, path: &str, data: &[u8]) -> Result<(), String> {
+        self.ensure_parent_dirs(path);
         let handle = self.file_open(path, AFC_FOPEN_WRONLY)?;
 
         for chunk in data.chunks(AFC_CHUNK_SIZE) {
