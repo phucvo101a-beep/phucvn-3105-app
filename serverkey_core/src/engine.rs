@@ -621,13 +621,10 @@ pub fn handle_v3_request(
                 || rec.status.eq_ignore_ascii_case("disabled")
                 || rec.status.eq_ignore_ascii_case("revoked")
             {
-                let reason = rec.ban_reason.trim();
-                let msg = if reason.is_empty() {
-                    "Mã Key này đã bị khóa hoặc thu hồi!".to_string()
-                } else {
-                    format!("Mã Key này đã bị khóa/cấm! Lý do: {reason}")
-                };
-                return Ok(KeyCheckOutcome::Fail("KEY_REVOKED", msg));
+                return Ok(KeyCheckOutcome::Fail(
+                    "KEY_REVOKED",
+                    "Mã Key này đã bị khóa hoặc thu hồi!".to_string(),
+                ));
             }
 
             if !rec.bound_packages.is_empty() && !rec.bound_packages.contains(&req.pkg) {
@@ -637,29 +634,14 @@ pub fn handle_v3_request(
                 ));
             }
 
-            // Compute or backfill expiry_ts cleanly so non-permanent keys never emit expiry_ts=0
-            let effective_dur = if rec.duration.trim().is_empty() {
-                if let Some(days_val) = rec.extra.get("days").and_then(|v| v.as_i64()) {
-                    if days_val <= 0 {
-                        "permanent".to_string()
-                    } else {
-                        format!("{days_val}d")
-                    }
-                } else {
-                    "30d".to_string()
-                }
-            } else {
-                rec.duration.clone()
-            };
+            // Compute or activate expiry_ts cleanly (fixes bug in old api_v2.php!)
             let mut exp_ts = rec
                 .expiry_ts
                 .or_else(|| rec.expiry_date.as_deref().and_then(parse_expiry_ts))
                 .unwrap_or(0);
-            let dur_opt = duration_to_seconds(&effective_dur);
-            let is_permanent = exp_ts == 0 && dur_opt.is_none();
 
-            if exp_ts <= 0 {
-                if let Some(dur_secs) = dur_opt {
+            if !rec.is_used && exp_ts == 0 {
+                if let Some(dur_secs) = duration_to_seconds(&rec.duration) {
                     exp_ts = now + dur_secs;
                     rec.expiry_ts = Some(exp_ts);
                     rec.expiry_date = Some(format_vn_time(exp_ts));
@@ -671,6 +653,7 @@ pub fn handle_v3_request(
                 rec.expiry_ts = Some(exp_ts);
             }
 
+            let is_permanent = exp_ts == 0 && duration_to_seconds(&rec.duration).is_none();
             if exp_ts > 0 && now >= exp_ts {
                 return Ok(KeyCheckOutcome::Fail(
                     "KEY_EXPIRED",

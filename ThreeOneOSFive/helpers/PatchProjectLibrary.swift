@@ -285,11 +285,6 @@ enum PatchProjectLibrary {
             projectID: item.id,
             backupRoot: backupRoot,
             fileManager: fileManager
-        ) == nil,
-        AirLiftPatchTransaction.latestRemoteReceipt(
-            projectID: item.id,
-            backupRoot: backupRoot,
-            fileManager: fileManager
         ) == nil else {
             throw PatchPackageError.activePatchCannotBeDeleted
         }

@@ -1,6 +1,6 @@
 <?php
 /**
- * PHUCVN 3105 - Hardened Core Configuration, Env Loader & Atomic Storage Layer
+ * Tobi AIM - Hardened Core Configuration, Env Loader & Atomic Storage Layer
  */
 
 if (session_status() === PHP_SESSION_NONE && PHP_SAPI !== 'cli') {
@@ -31,7 +31,7 @@ function loadServerEnv(): array {
         getenv('SERVERKEY_ENV_FILE') ?: null,
         dirname(__DIR__) . '/.env',
         dirname(__DIR__, 2) . '/.env',
-        '/etc/phucvn3105/.env',
+        '/etc/tobiaim3105/.env',
         __DIR__ . '/.env',
     ]);
     foreach ($candidates as $path) {
@@ -77,7 +77,7 @@ function envValue(string $key, string $default = ''): string {
 
 $configuredDataDir = envValue('SERVERKEY_DATA_DIR', '');
 if ($configuredDataDir === '') {
-    $outsideDefault = dirname(__DIR__) . '/phucvn_data';
+    $outsideDefault = dirname(__DIR__) . '/tobiaim_data';
     $configuredDataDir = @is_dir($outsideDefault) ? $outsideDefault : (__DIR__ . '/data');
 }
 
@@ -156,8 +156,8 @@ function writeJsonFile($path, $data) {
 
 function getSettings(): array {
     $defaults = [
-        'app_name' => 'PHUCVN STUDIO',
-        'admin_user' => envValue('ADMIN_USERNAME', 'phucvn_admin'),
+        'app_name' => 'Tobi AIM',
+        'admin_user' => envValue('ADMIN_USERNAME', 'tobiaim_admin'),
         'admin_pass_hash' => envValue('ADMIN_PASS_HASH', ''),
         'allow_register' => false,
         'require_key' => true,
@@ -165,7 +165,7 @@ function getSettings(): array {
         'default_duration' => '30d',
         'bind_hwid' => true,
         'lock_master_hwid' => false,
-        'telegram_support' => 'https://t.me/phuciosvn',
+        'telegram_support' => '',
         // Kill-Switch & Force Update policies
         'server_open' => true,
         'system_paused' => false,
@@ -386,14 +386,14 @@ function getServerDeviceCookieSecret(): string {
     foreach (['PRE_SHARED_PEPPER', 'CI_SYNC_SECRET', 'SERVER_X25519_PRIV_HEX'] as $k) {
         $v = trim(envValue($k, ''));
         if ($v !== '' && !str_starts_with($v, 'REPLACE_WITH_')) {
-            return hash('sha256', 'PHUCVN-DEV-COOKIE|' . $v, true);
+            return hash('sha256', 'TOBIAIM-DEV-COOKIE|' . $v, true);
         }
     }
     $keyFile = DATA_DIR . '/.device_hmac_key';
     if (@is_file($keyFile)) {
         $raw = trim((string)@file_get_contents($keyFile));
         if (strlen($raw) >= 64) {
-            return hash('sha256', 'PHUCVN-DEV-COOKIE|' . $raw, true);
+            return hash('sha256', 'TOBIAIM-DEV-COOKIE|' . $raw, true);
         }
     }
     if (!file_exists(DATA_DIR)) {
@@ -402,7 +402,7 @@ function getServerDeviceCookieSecret(): string {
     $randHex = bin2hex(random_bytes(32));
     @file_put_contents($keyFile, $randHex, LOCK_EX);
     @chmod($keyFile, 0600);
-    return hash('sha256', 'PHUCVN-DEV-COOKIE|' . $randHex, true);
+    return hash('sha256', 'TOBIAIM-DEV-COOKIE|' . $randHex, true);
 }
 
 function parseBrowserDeviceInfo(string $ua): array {
@@ -440,7 +440,7 @@ function resolveClientDeviceIdentity(?string $submittedFp = null, bool $issueCoo
     $uaFamily = $parsedUa['family'];
     $secret = getServerDeviceCookieSecret();
 
-    $rawCookie = (string)($_COOKIE['phucvn_srv_dev'] ?? '');
+    $rawCookie = (string)($_COOKIE['tobiaim_srv_dev'] ?? '');
     $devId = '';
     $hasValidCookie = false;
     if (str_contains($rawCookie, '.')) {
@@ -458,11 +458,11 @@ function resolveClientDeviceIdentity(?string $submittedFp = null, bool $issueCoo
         $devId = bin2hex(random_bytes(16));
         $sig = hash_hmac('sha256', "DEVCOOKIE|{$devId}|{$uaFamily}", $secret);
         $cookieVal = $devId . '.' . $sig;
-        $_COOKIE['phucvn_srv_dev'] = $cookieVal;
+        $_COOKIE['tobiaim_srv_dev'] = $cookieVal;
         if ($issueCookie && PHP_SAPI !== 'cli' && !headers_sent()) {
             $isHttps = (!empty($_SERVER['HTTPS']) && $_SERVER['HTTPS'] !== 'off')
                 || (($_SERVER['SERVER_PORT'] ?? '') == 443);
-            @setcookie('phucvn_srv_dev', $cookieVal, [
+            @setcookie('tobiaim_srv_dev', $cookieVal, [
                 'expires' => time() + 86400 * 1825,
                 'path' => '/',
                 'httponly' => true,
@@ -486,11 +486,6 @@ function resolveClientDeviceIdentity(?string $submittedFp = null, bool $issueCoo
         'label' => $parsedUa['label'],
         'has_valid_cookie' => $hasValidCookie,
     ];
-}
-
-function getMasterAdminUsername(array $settings): string {
-    $envUser = envValue('ADMIN_USERNAME', '');
-    return $envUser !== '' ? $envUser : (string)($settings['admin_user'] ?? '');
 }
 
 function authenticateAndBindAdminAccount(string $username, string $password, array $settings, array $devInfo, string $clientIp): array {
@@ -552,18 +547,13 @@ function authenticateAndBindAdminAccount(string $username, string $password, arr
                 continue;
             }
             if (empty($u['is_active'])) {
-                $bReason = trim((string)($u['ban_reason'] ?? ''));
-                $errMsg = $bReason !== ''
-                    ? "Tài khoản này đã bị khóa! Lý do: {$bReason}"
-                    : 'Tài khoản này đã bị khóa!';
-                return ['ok' => false, 'code' => 'ACCOUNT_LOCKED', 'username' => (string)$u['username'], 'error' => $errMsg];
+                return ['ok' => false, 'code' => 'ACCOUNT_LOCKED', 'username' => (string)$u['username'], 'error' => 'Tài khoản này đã bị khóa!'];
             }
             if (!verifyUserPassword($password, (string)($u['password'] ?? ''))) {
                 return ['ok' => false, 'code' => 'BAD_CREDENTIALS', 'username' => (string)$u['username'], 'error' => 'Sai tài khoản hoặc mật khẩu quản trị!'];
             }
-            $userRole = strtolower(trim((string)($u['role'] ?? 'member')));
-            if (!in_array($userRole, ['admin', 'vip', 'member'], true)) {
-                return ['ok' => false, 'code' => 'NO_ADMIN_ROLE', 'username' => (string)$u['username'], 'error' => 'Tài khoản không có quyền truy cập!'];
+            if (strtolower((string)($u['role'] ?? '')) !== 'admin') {
+                return ['ok' => false, 'code' => 'NO_ADMIN_ROLE', 'username' => (string)$u['username'], 'error' => 'Tài khoản không có quyền Quản trị Admin!'];
             }
             if (!empty($u['expiry_date']) && $u['expiry_date'] !== 'permanent') {
                 if (new DateTime() > new DateTime((string)$u['expiry_date'])) {
@@ -665,16 +655,8 @@ function verifyCurrentAdminSession(array $settings, array $devInfo): array {
     }
 
     $user = findUserByUsername($username);
-    if (!$user) {
-        return ['valid' => false, 'reason' => 'Tài khoản đã bị xóa khỏi hệ thống!'];
-    }
-    $userRole = strtolower(trim((string)($user['role'] ?? 'member')));
-    if (empty($user['is_active']) || !in_array($userRole, ['admin', 'vip', 'member'], true)) {
-        $bReason = trim((string)($user['ban_reason'] ?? ''));
-        $reasonMsg = $bReason !== ''
-            ? "Tài khoản đã bị khóa! Lý do: {$bReason}"
-            : 'Tài khoản đã bị khóa hoặc thu hồi quyền truy cập!';
-        return ['valid' => false, 'reason' => $reasonMsg];
+    if (!$user || empty($user['is_active']) || strtolower((string)($user['role'] ?? '')) !== 'admin') {
+        return ['valid' => false, 'reason' => 'Tài khoản đã bị khóa hoặc xóa quyền quản trị!'];
     }
     if (!empty($user['expiry_date']) && $user['expiry_date'] !== 'permanent') {
         if (new DateTime() > new DateTime((string)$user['expiry_date'])) {
@@ -739,16 +721,6 @@ function normalizeKey(&$k) {
     if (!isset($k['status']) || $k['status'] === '') {
         $k['status'] = 'active';
     }
-    if (!isset($k['created_by'])) {
-        $k['created_by'] = '';
-    } else {
-        $k['created_by'] = trim((string)$k['created_by']);
-    }
-    if (!isset($k['ban_reason'])) {
-        $k['ban_reason'] = '';
-    } else {
-        $k['ban_reason'] = trim((string)$k['ban_reason']);
-    }
     if (!isset($k['devices']) || !is_array($k['devices'])) {
         $k['devices'] = [];
         if (!empty($k['used_by']) && is_string($k['used_by'])) {
@@ -787,62 +759,6 @@ function getKeys() {
 
 function saveKeys($keys) {
     return writeJsonFile(KEYS_FILE, $keys);
-}
-
-function cascadeBanCreatorKeys(string $creatorUsername, string $reason, string $bannedBy = 'admin'): int {
-    $targetLower = strtolower(trim($creatorUsername));
-    if ($targetLower === '') {
-        return 0;
-    }
-    $cleanReason = trim($reason);
-    if ($cleanReason === '') {
-        $cleanReason = 'Tài khoản tạo key đã bị Admin khóa / cấm';
-    }
-    $nowStr = date('Y-m-d H:i:s');
-
-    return withLockedJson(KEYS_FILE, [], function (&$keys, &$dirty) use ($targetLower, $cleanReason, $bannedBy, $nowStr) {
-        $count = 0;
-        foreach ($keys as &$k) {
-            normalizeKey($k);
-            if (strtolower(trim((string)($k['created_by'] ?? ''))) === $targetLower) {
-                $k['status'] = 'banned';
-                $k['ban_reason'] = $cleanReason;
-                $k['banned_by'] = $bannedBy;
-                $k['banned_at'] = $nowStr;
-                $k['banned_by_account_action'] = true;
-                $count++;
-                $dirty = true;
-            }
-        }
-        unset($k);
-        return $count;
-    });
-}
-
-function cascadeRestoreCreatorKeys(string $creatorUsername): int {
-    $targetLower = strtolower(trim($creatorUsername));
-    if ($targetLower === '') {
-        return 0;
-    }
-
-    return withLockedJson(KEYS_FILE, [], function (&$keys, &$dirty) use ($targetLower) {
-        $count = 0;
-        foreach ($keys as &$k) {
-            normalizeKey($k);
-            if (
-                strtolower(trim((string)($k['created_by'] ?? ''))) === $targetLower
-                && !empty($k['banned_by_account_action'])
-            ) {
-                $k['status'] = 'active';
-                $k['ban_reason'] = '';
-                unset($k['banned_by'], $k['banned_at'], $k['banned_by_account_action']);
-                $count++;
-                $dirty = true;
-            }
-        }
-        unset($k);
-        return $count;
-    });
 }
 
 function getBuildManifests(): array {

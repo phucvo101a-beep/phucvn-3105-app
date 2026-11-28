@@ -6,13 +6,11 @@ struct LogView: View {
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @Environment(\.appLanguage) private var language
     @State private var copied = false
-    @State private var exportedUSB = false
 
     private var shareText: String {
         var lines: [String] = []
         lines.append("3105 Log")
         lines.append("iOS \(AppInfo.osVersion) (\(AppInfo.osBuild)) — \(AppInfo.machineName)")
-        lines.append("Access Mode: \(ContainerStore.accessModeDescription)")
         lines.append("Generated: \(Date())")
         lines.append("")
         lines.append(contentsOf: appLog.entries)
@@ -92,15 +90,6 @@ struct LogView: View {
                         .disabled(appLog.entries.isEmpty)
                 }
                 ToolbarItemGroup(placement: .navigationBarTrailing) {
-                    Button {
-                        AppLog.shared.writeDiagnosticsSnapshot()
-                        exportedUSB = true
-                        DispatchQueue.main.asyncAfter(deadline: .now() + 1.8) { exportedUSB = false }
-                    } label: {
-                        Image(systemName: exportedUSB ? "checkmark.circle.fill" : "cable.connector")
-                    }
-                    .accessibilityLabel("Lưu snapshot chẩn đoán ra Documents (USB)")
-
                     Button {
                         UIPasteboard.general.string = shareText
                         copied = true

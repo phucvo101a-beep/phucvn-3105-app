@@ -64,13 +64,6 @@ impl PlistValue {
     }
 }
 
-/// Returns sorted list of dictionary key names for non-sensitive diagnostics logging
-pub fn dict_key_names(dict: &HashMap<String, PlistValue>) -> Vec<String> {
-    let mut keys: Vec<String> = dict.keys().cloned().collect();
-    keys.sort();
-    keys
-}
-
 // ==============================================================================
 // BASE64 ENCODER / DECODER
 // ==============================================================================
@@ -141,16 +134,9 @@ pub fn base64_encode(input: &[u8]) -> String {
 // ==============================================================================
 
 pub fn parse_plist(data: &[u8]) -> Result<PlistValue, String> {
-    let trimmed = {
-        let mut i = 0usize;
-        while i < data.len() && data[i].is_ascii_whitespace() {
-            i += 1;
-        }
-        &data[i..]
-    };
     let bplist_magic = obfstr::obfstr!("bplist00").to_string();
-    if trimmed.starts_with(bplist_magic.as_bytes()) {
-        parse_binary_plist(trimmed)
+    if data.starts_with(bplist_magic.as_bytes()) {
+        parse_binary_plist(data)
     } else {
         let s = std::str::from_utf8(data)
             .map_err(|e| format!("Invalid UTF-8 XML plist: {}", e))?;
@@ -159,10 +145,9 @@ pub fn parse_plist(data: &[u8]) -> Result<PlistValue, String> {
 }
 
 pub fn parse_xml_plist(xml: &str) -> Result<PlistValue, String> {
-    let clean_xml = xml.trim_start_matches('\u{FEFF}');
     let mut cursor = 0;
-    skip_xml_declaration_and_doctypes(clean_xml, &mut cursor);
-    parse_xml_element(clean_xml, &mut cursor)
+    skip_xml_declaration_and_doctypes(xml, &mut cursor);
+    parse_xml_element(xml, &mut cursor)
 }
 
 fn skip_xml_declaration_and_doctypes(xml: &str, cursor: &mut usize) {
@@ -175,13 +160,7 @@ fn skip_xml_declaration_and_doctypes(xml: &str, cursor: &mut usize) {
                 continue;
             }
         }
-        if xml[*cursor..].starts_with("<!--") {
-            if let Some(end) = xml[*cursor..].find("-->") {
-                *cursor += end + 3;
-                continue;
-            }
-        }
-        if xml[*cursor..].starts_with("<!DOCTYPE") {
+        if xml[*cursor..].starts_with("<!DOCTYPE") || xml[*cursor..].starts_with("<!--") {
             if let Some(end) = xml[*cursor..].find('>') {
                 *cursor += end + 1;
                 continue;
@@ -210,83 +189,38 @@ fn parse_xml_element(xml: &str, cursor: &mut usize) -> Result<PlistValue, String
         return Err("Unexpected end of XML".to_string());
     }
 
-    if xml[*cursor..].starts_with("<dict/>") || xml[*cursor..].starts_with("<dict />") {
-        if let Some(end) = xml[*cursor..].find('>') {
-            *cursor += end + 1;
-        }
-        Ok(PlistValue::Dictionary(HashMap::new()))
-    } else if xml[*cursor..].starts_with("<dict>") || xml[*cursor..].starts_with("<dict ") {
+    if xml[*cursor..].starts_with("<dict>") || xml[*cursor..].starts_with("<dict ") {
         parse_xml_dict(xml, cursor)
-    } else if xml[*cursor..].starts_with("<array/>") || xml[*cursor..].starts_with("<array />") {
-        if let Some(end) = xml[*cursor..].find('>') {
-            *cursor += end + 1;
-        }
-        Ok(PlistValue::Array(Vec::new()))
     } else if xml[*cursor..].starts_with("<array>") || xml[*cursor..].starts_with("<array ") {
         parse_xml_array(xml, cursor)
     } else if xml[*cursor..].starts_with("<string>") {
         parse_xml_leaf(xml, cursor, "<string>", "</string>").map(PlistValue::String)
-    } else if xml[*cursor..].starts_with("<string/>") || xml[*cursor..].starts_with("<string />") {
-        if let Some(end) = xml[*cursor..].find('>') {
-            *cursor += end + 1;
-        }
-        Ok(PlistValue::String(String::new()))
-    } else if xml[*cursor..].starts_with("<date>") {
-        parse_xml_leaf(xml, cursor, "<date>", "</date>").map(PlistValue::String)
-    } else if xml[*cursor..].starts_with("<date/>") || xml[*cursor..].starts_with("<date />") {
-        if let Some(end) = xml[*cursor..].find('>') {
-            *cursor += end + 1;
-        }
+    } else if xml[*cursor..].starts_with("<string/>") {
+        *cursor += "<string/>".len();
         Ok(PlistValue::String(String::new()))
     } else if xml[*cursor..].starts_with("<data>") {
         let content = parse_xml_leaf(xml, cursor, "<data>", "</data>")?;
         let bytes = base64_decode(&content)?;
         Ok(PlistValue::Data(bytes))
-    } else if xml[*cursor..].starts_with("<data/>") || xml[*cursor..].starts_with("<data />") {
-        if let Some(end) = xml[*cursor..].find('>') {
-            *cursor += end + 1;
-        }
+    } else if xml[*cursor..].starts_with("<data/>") {
+        *cursor += "<data/>".len();
         Ok(PlistValue::Data(Vec::new()))
     } else if xml[*cursor..].starts_with("<integer>") {
         let content = parse_xml_leaf(xml, cursor, "<integer>", "</integer>")?;
         let num: i64 = content.trim().parse().unwrap_or(0);
         Ok(PlistValue::Integer(num))
-    } else if xml[*cursor..].starts_with("<integer/>") || xml[*cursor..].starts_with("<integer />") {
-        if let Some(end) = xml[*cursor..].find('>') {
-            *cursor += end + 1;
-        }
-        Ok(PlistValue::Integer(0))
     } else if xml[*cursor..].starts_with("<real>") {
         let content = parse_xml_leaf(xml, cursor, "<real>", "</real>")?;
         let num: f64 = content.trim().parse().unwrap_or(0.0);
         Ok(PlistValue::Real(num))
-    } else if xml[*cursor..].starts_with("<real/>") || xml[*cursor..].starts_with("<real />") {
-        if let Some(end) = xml[*cursor..].find('>') {
-            *cursor += end + 1;
-        }
-        Ok(PlistValue::Real(0.0))
-    } else if xml[*cursor..].starts_with("<true/>") || xml[*cursor..].starts_with("<true />") {
-        if let Some(end) = xml[*cursor..].find('>') {
-            *cursor += end + 1;
-        }
+    } else if xml[*cursor..].starts_with("<true/>") {
+        *cursor += "<true/>".len();
         Ok(PlistValue::Boolean(true))
-    } else if xml[*cursor..].starts_with("<true></true>") {
-        *cursor += "<true></true>".len();
-        Ok(PlistValue::Boolean(true))
-    } else if xml[*cursor..].starts_with("<false/>") || xml[*cursor..].starts_with("<false />") {
-        if let Some(end) = xml[*cursor..].find('>') {
-            *cursor += end + 1;
-        }
-        Ok(PlistValue::Boolean(false))
-    } else if xml[*cursor..].starts_with("<false></false>") {
-        *cursor += "<false></false>".len();
+    } else if xml[*cursor..].starts_with("<false/>") {
+        *cursor += "<false/>".len();
         Ok(PlistValue::Boolean(false))
     } else {
-        let mut preview_end = (*cursor + 30).min(xml.len());
-        while preview_end > *cursor && !xml.is_char_boundary(preview_end) {
-            preview_end -= 1;
-        }
-        Err(format!("Unknown XML tag near: {}", &xml[*cursor..preview_end]))
+        Err(format!("Unknown XML tag near: {}", &xml[*cursor..(*cursor + 30).min(xml.len())]))
     }
 }
 
@@ -327,12 +261,6 @@ fn parse_xml_dict(xml: &str, cursor: &mut usize) -> Result<PlistValue, String> {
             break;
         }
 
-        if xml[*cursor..].starts_with("<!--") {
-            if let Some(end) = xml[*cursor..].find("-->") {
-                *cursor += end + 3;
-                continue;
-            }
-        }
         if xml[*cursor..].starts_with("<key>") {
             let key = parse_xml_leaf(xml, cursor, "<key>", "</key>")?;
             skip_whitespace(xml, cursor);
@@ -459,49 +387,20 @@ fn parse_bplist_object(
             }
         }
         0x10 => {
-            // Integer (count is 2^count bytes; 16-byte values in bplist are signed 128-bit)
-            let bytes_len = 1usize << count;
+            // Integer (count is 2^count bytes)
+            let bytes_len = 1 << count;
             if cur + bytes_len > data.len() {
                 return Err("bplist integer out of bounds".to_string());
             }
-            let mut val = 0u128;
+            let mut val = 0i64;
             for &b in &data[cur..cur + bytes_len] {
-                val = (val << 8) | (b as u128);
+                val = (val << 8) | (b as i64);
             }
-            let as_i64 = if bytes_len <= 8 && (data[cur] & 0x80) != 0 && bytes_len < 8 {
-                let shift = (8 - bytes_len) * 8;
-                ((val as i64) << shift) >> shift
-            } else {
-                val as i64
-            };
-            PlistValue::Integer(as_i64)
+            PlistValue::Integer(val)
         }
         0x20 => {
-            // Real (float, 2^count bytes)
-            let bytes_len = 1usize << count;
-            if bytes_len == 4 && cur + 4 <= data.len() {
-                let bits = u32::from_be_bytes([data[cur], data[cur + 1], data[cur + 2], data[cur + 3]]);
-                PlistValue::Real(f32::from_bits(bits) as f64)
-            } else if bytes_len == 8 && cur + 8 <= data.len() {
-                let bits = u64::from_be_bytes([
-                    data[cur], data[cur + 1], data[cur + 2], data[cur + 3],
-                    data[cur + 4], data[cur + 5], data[cur + 6], data[cur + 7],
-                ]);
-                PlistValue::Real(f64::from_bits(bits))
-            } else {
-                PlistValue::Real(0.0)
-            }
-        }
-        0x30 => {
-            // Apple Date (8-byte float seconds since 2001-01-01)
-            if cur + 8 > data.len() {
-                return Err("bplist date out of bounds".to_string());
-            }
-            let bits = u64::from_be_bytes([
-                data[cur], data[cur + 1], data[cur + 2], data[cur + 3],
-                data[cur + 4], data[cur + 5], data[cur + 6], data[cur + 7],
-            ]);
-            PlistValue::Real(f64::from_bits(bits))
+            // Real (float)
+            PlistValue::Real(0.0)
         }
         0x40 => {
             // Data
@@ -513,13 +412,13 @@ fn parse_bplist_object(
             }
             PlistValue::Data(data[cur..cur + count].to_vec())
         }
-        0x50 | 0x70 => {
-            // ASCII / UTF-8 String
+        0x50 => {
+            // ASCII String
             if count == 0x0F {
                 count = read_bplist_length(data, &mut cur, get_offset)?;
             }
             if cur + count > data.len() {
-                return Err("bplist string out of bounds".to_string());
+                return Err("bplist ASCII string out of bounds".to_string());
             }
             let s = String::from_utf8_lossy(&data[cur..cur + count]).to_string();
             PlistValue::String(s)
@@ -540,19 +439,7 @@ fn parse_bplist_object(
             let s = String::from_utf16_lossy(&u16s);
             PlistValue::String(s)
         }
-        0x80 => {
-            // UID (count + 1 bytes unsigned integer)
-            let bytes_len = (count + 1).min(8);
-            if cur + bytes_len > data.len() {
-                return Err("bplist UID out of bounds".to_string());
-            }
-            let mut val = 0i64;
-            for &b in &data[cur..cur + bytes_len] {
-                val = (val << 8) | (b as i64);
-            }
-            PlistValue::Integer(val)
-        }
-        0xA0 | 0xB0 | 0xC0 => {
+        0xA0 => {
             // Array
             if count == 0x0F {
                 count = read_bplist_length(data, &mut cur, get_offset)?;
@@ -639,28 +526,15 @@ fn read_bplist_length(
 // XML PLIST SERIALIZER
 // ==============================================================================
 
-pub fn serialize_xml_value(val: &PlistValue) -> String {
-    let mut xml = String::from("<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n");
-    xml.push_str("<!DOCTYPE plist PUBLIC \"-//Apple//DTD PLIST 1.0//EN\" \"http://www.apple.com/DTDs/PropertyList-1.0.dtd\">\n");
-    xml.push_str("<plist version=\"1.0\">\n");
-    serialize_value_xml(&mut xml, val, 0);
-    xml.push_str("</plist>\n");
-    xml
-}
-
 pub fn serialize_xml_dict(dict: &HashMap<String, PlistValue>) -> String {
     let mut xml = String::from("<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n");
     xml.push_str("<!DOCTYPE plist PUBLIC \"-//Apple//DTD PLIST 1.0//EN\" \"http://www.apple.com/DTDs/PropertyList-1.0.dtd\">\n");
     xml.push_str("<plist version=\"1.0\">\n<dict>\n");
-    let mut keys: Vec<&String> = dict.keys().collect();
-    keys.sort();
-    for k in keys {
-        if let Some(v) = dict.get(k) {
-            xml.push_str(&format!("  <key>{}</key>\n", escape_xml(k)));
-            serialize_value_xml(&mut xml, v, 1);
-        }
+    for (k, v) in dict {
+        xml.push_str(&format!("  <key>{}</key>\n", escape_xml(k)));
+        serialize_value_xml(&mut xml, v, 2);
     }
-    xml.push_str("</dict>\n</plist>\n");
+    xml.push_str("</dict>\n</plist>");
     xml
 }
 
@@ -695,13 +569,9 @@ fn serialize_value_xml(out: &mut String, val: &PlistValue, indent: usize) {
         }
         PlistValue::Dictionary(dict) => {
             out.push_str(&format!("{}<dict>\n", ind));
-            let mut keys: Vec<&String> = dict.keys().collect();
-            keys.sort();
-            for k in keys {
-                if let Some(v) = dict.get(k) {
-                    out.push_str(&format!("{}  <key>{}</key>\n", ind, escape_xml(k)));
-                    serialize_value_xml(out, v, indent + 1);
-                }
+            for (k, v) in dict {
+                out.push_str(&format!("{}  <key>{}</key>\n", ind, escape_xml(k)));
+                serialize_value_xml(out, v, indent + 1);
             }
             out.push_str(&format!("{}</dict>\n", ind));
         }

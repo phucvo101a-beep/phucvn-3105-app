@@ -1,18 +1,18 @@
 <?php
 /**
- * PHUCVN 3105 - V3 Cryptographic Auth Engine (PHP ext-sodium fallback matching serverkey_core Rust)
+ * Tobi AIM - V3 Cryptographic Auth Engine (PHP ext-sodium fallback matching serverkey_core Rust)
  */
 
 final class CoreEngine {
     public const BUNDLED_PRESETS = [
         'AIM BODY FFVN (1).3105',
-        'Aim_Neck_PhucVN_FFVN.3105',
-        'AimDrag_85_Antena_PhucVN_FFVN.3105',
-        'AimDrag_85_PhucVN_FFVN.3105',
-        'AimNeck_Antena_PhucVN_FFVN.3105',
-        'Antena_PhucVN_FFVN.3105',
-        'DinhVi_Chams_PhucVN_FFVN.3105',
-        'DinhVi_Sung_PhucVN_FFVN.3105',
+        'Aim_Neck_TobiAim_FFVN.3105',
+        'AimDrag_85_Antena_TobiAim_FFVN.3105',
+        'AimDrag_85_TobiAim_FFVN.3105',
+        'AimNeck_Antena_TobiAim_FFVN.3105',
+        'Antena_TobiAim_FFVN.3105',
+        'DinhVi_Chams_TobiAim_FFVN.3105',
+        'DinhVi_Sung_TobiAim_FFVN.3105',
         'MODSKIN FFVN PHUCVN (1).3105',
         'MODSKIN FFVN PHUCVN (2).3105',
         'MODSKIN FFVN PHUCVN (3).3105',
@@ -22,13 +22,13 @@ final class CoreEngine {
 
     public const PRESET_LABELS = [
         'AIM BODY FFVN (1).3105' => 'AIM BODY',
-        'Aim_Neck_PhucVN_FFVN.3105' => 'AIM NECK',
-        'AimDrag_85_Antena_PhucVN_FFVN.3105' => 'AIM DRAG ANTENA',
-        'AimDrag_85_PhucVN_FFVN.3105' => 'DRAG 85%',
-        'AimNeck_Antena_PhucVN_FFVN.3105' => 'AIM NECK ANTENA',
-        'Antena_PhucVN_FFVN.3105' => 'ANTENA',
-        'DinhVi_Chams_PhucVN_FFVN.3105' => 'CHAMS',
-        'DinhVi_Sung_PhucVN_FFVN.3105' => 'DINHVI SUNG KEO',
+        'Aim_Neck_TobiAim_FFVN.3105' => 'AIM NECK',
+        'AimDrag_85_Antena_TobiAim_FFVN.3105' => 'AIM DRAG ANTENA',
+        'AimDrag_85_TobiAim_FFVN.3105' => 'DRAG 85%',
+        'AimNeck_Antena_TobiAim_FFVN.3105' => 'AIM NECK ANTENA',
+        'Antena_TobiAim_FFVN.3105' => 'ANTENA',
+        'DinhVi_Chams_TobiAim_FFVN.3105' => 'CHAMS',
+        'DinhVi_Sung_TobiAim_FFVN.3105' => 'DINHVI SUNG KEO',
         'MODSKIN FFVN PHUCVN (1).3105' => 'MODSKIN 1',
         'MODSKIN FFVN PHUCVN (2).3105' => 'MODSKIN 2',
         'MODSKIN FFVN PHUCVN (3).3105' => 'MODSKIN 3',
@@ -445,37 +445,24 @@ final class CoreEngine {
                 normalizeKey($rec);
                 $status = strtolower((string)($rec['status'] ?? 'active'));
                 if (in_array($status, ['banned', 'disabled', 'revoked'], true)) {
-                    $banReason = trim((string)($rec['ban_reason'] ?? ''));
-                    $msg = $banReason !== ''
-                        ? "Mã Key này đã bị khóa/cấm! Lý do: {$banReason}"
-                        : 'Mã Key này đã bị khóa hoặc thu hồi!';
-                    return ['ok' => false, 'code' => 'KEY_REVOKED', 'msg' => $msg];
+                    return ['ok' => false, 'code' => 'KEY_REVOKED', 'msg' => 'Mã Key này đã bị khóa hoặc thu hồi!'];
                 }
                 $boundPkgs = $rec['bound_packages'] ?? [];
                 if (!empty($boundPkgs) && !in_array($pkg, $boundPkgs, true)) {
                     return ['ok' => false, 'code' => 'PACKAGE_DENIED', 'msg' => 'Mã Key không hợp lệ cho gói ứng dụng này.'];
                 }
 
-                $rawDur = trim((string)($rec['duration'] ?? ''));
-                if ($rawDur === '' && isset($rec['days'])) {
-                    $daysVal = intval($rec['days']);
-                    $rawDur = ($daysVal <= 0) ? 'permanent' : ($daysVal . 'd');
-                }
-                if ($rawDur === '') {
-                    $rawDur = '30d';
-                }
-                $durSecs = self::durationSeconds($rawDur);
+                $durSecs = self::durationSeconds((string)($rec['duration'] ?? '30d'));
                 $isPerm = ($durSecs === null);
                 $expTs = isset($rec['expiry_ts']) ? intval($rec['expiry_ts']) : 0;
                 if ($expTs === 0 && !empty($rec['expiry_date']) && $rec['expiry_date'] !== 'permanent') {
                     $parsed = strtotime((string)$rec['expiry_date']);
                     if ($parsed !== false) $expTs = $parsed;
                 }
-                if ($expTs <= 0 && !$isPerm) {
+                if (empty($rec['is_used']) && $expTs === 0 && !$isPerm) {
                     $expTs = $now + $durSecs;
                     $rec['expiry_ts'] = $expTs;
                     $rec['expiry_date'] = date('Y-m-d H:i:s', $expTs);
-                    $dirty = true;
                 } elseif ($expTs > 0) {
                     $rec['expiry_ts'] = $expTs;
                 }

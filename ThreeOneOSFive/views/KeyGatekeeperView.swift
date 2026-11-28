@@ -50,8 +50,7 @@ final class KeyAuthManager: ObservableObject {
     private var bootstrapGeneration: UInt64 = 0
     private var activationGeneration: UInt64 = 0
     private var isBootstrapping: Bool = false
-    private var isHeartbeatInFlight: Bool = false
-    private let supportURLString = "https://20-10.store"
+    private let supportURLString = "https://tobivn.chickenkiller.com"
 
     var activeVerifiedTicket: RuntimeSessionTicket? {
         if case .unlocked(let ticket) = gatePhase, SecCoreBridge.shared.isActiveTicketValid(ticket) {
@@ -245,12 +244,33 @@ final class KeyAuthManager: ObservableObject {
                     self.isVerifying = false
                     switch outcome {
                     case .unlocked(let ticket, let summary, let presetStatuses):
-                        self.applyUnlockedState(
-                            trimmedKey: trimmed,
-                            ticket: ticket,
-                            summary: summary,
-                            presetStatuses: presetStatuses
-                        )
+                        KeychainLicenseVault.saveLicenseKey(trimmed)
+                        self.updatePresetStatuses(presetStatuses)
+                        self.currentKey = trimmed
+                        self.role = summary.role.isEmpty ? "VIP" : summary.role
+                        self.isPermanent = summary.isPermanent
+                        self.deviceSlotsText = summary.maxDevices == 0
+                            ? "\(summary.usedDevices) / Vô hạn"
+                            : "\(summary.usedDevices) / \(summary.maxDevices) máy"
+
+                        if summary.isPermanent {
+                            self.expiryDateText = "Vĩnh Viễn"
+                            self.exactExpiryDateText = "Vĩnh Viễn (Trọn Đời)"
+                            self.remainingCountdownText = "Vĩnh Viễn (Trọn Đời)"
+                            self.expirationDate = nil
+                            self.secondsRemaining = 999_999_999
+                        } else {
+                            let expDate = Date(timeIntervalSince1970: TimeInterval(summary.expiryTS))
+                            self.expirationDate = expDate
+                            self.secondsRemaining = max(0, TimeInterval(summary.remainingSeconds))
+                            self.expiryDateText = summary.expiryText
+                            let fmt = DateFormatter()
+                            fmt.dateFormat = "dd/MM/yyyy 'lúc' HH:mm:ss"
+                            self.exactExpiryDateText = fmt.string(from: expDate)
+                            self.updateCountdownText()
+                        }
+                        self.gatePhase = .unlocked(ticket)
+                        self.startTimers()
 
                     case .serverClosed(let msg):
                         self.lockOut(to: .serverClosed(message: msg))
@@ -298,154 +318,37 @@ final class KeyAuthManager: ObservableObject {
         }
     }
 
-    private func applyUnlockedState(
-        trimmedKey: String,
-        ticket: RuntimeSessionTicket,
-        summary: V3LicenseSummary,
-        presetStatuses: [String: V3PresetStatus]
-    ) {
-        KeychainLicenseVault.saveLicenseKey(trimmedKey)
-        updatePresetStatuses(presetStatuses)
-        currentKey = trimmedKey
-        role = summary.role.isEmpty ? "VIP" : summary.role
-        isPermanent = summary.isPermanent
-        deviceSlotsText = summary.maxDevices == 0
-            ? "\(summary.usedDevices) / Vô hạn"
-            : "\(summary.usedDevices) / \(summary.maxDevices) máy"
-
-        if summary.isPermanent {
-            expiryDateText = "Vĩnh Viễn"
-            exactExpiryDateText = "Vĩnh Viễn (Trọn Đời)"
-            remainingCountdownText = "Vĩnh Viễn (Trọn Đời)"
-            expirationDate = nil
-            secondsRemaining = 999_999_999
-        } else {
-            let expDate = Date(timeIntervalSince1970: TimeInterval(summary.expiryTS))
-            expirationDate = expDate
-            secondsRemaining = max(0, TimeInterval(summary.remainingSeconds))
-            expiryDateText = summary.expiryText
-            let fmt = DateFormatter()
-            fmt.dateFormat = "dd/MM/yyyy 'lúc' HH:mm:ss"
-            exactExpiryDateText = fmt.string(from: expDate)
-            updateCountdownText()
-        }
-        gatePhase = .unlocked(ticket)
-        startTimers()
-    }
-
-    func presentGatekeeper(reason: String? = nil) {
-        DispatchQueue.main.async {
-            self.stopTimers()
-            self.stopCheckingTimer()
-            self.activationGeneration &+= 1
-            SecCoreBridge.shared.wipeSession()
-            if let reason, !reason.isEmpty {
-                self.errorMessage = reason
-            }
-            self.gatePhase = .requiresKey
-        }
-    }
-
-    /// Attempts live server revalidation via V3 `activate` using saved Keychain license when RAM vault ticket became invalid.
-    func revalidateSessionOnDemand() async -> (ticket: RuntimeSessionTicket?, failureReason: String?) {
-        if let existing = activeVerifiedTicket {
-            return (existing, nil)
-        }
-        let saved = await MainActor.run {
-            let cur = self.currentKey.trimmingCharacters(in: .whitespacesAndNewlines)
-            return cur.isEmpty ? KeychainLicenseVault.loadLicenseKey() : cur
-        }
-        guard !saved.isEmpty else {
-            let msg = "Không tìm thấy mã Key trong máy. Vui lòng xác thực lại Key."
-            presentGatekeeper(reason: msg)
-            return (nil, msg)
-        }
-        let outcome = await withCheckedContinuation { continuation in
-            DispatchQueue.global(qos: .userInitiated).async {
-                continuation.resume(returning: SecCoreBridge.shared.activate(licenseKey: saved))
-            }
-        }
-        return await MainActor.run {
-            switch outcome {
-            case .unlocked(let ticket, let summary, let presetStatuses):
-                self.applyUnlockedState(
-                    trimmedKey: saved,
-                    ticket: ticket,
-                    summary: summary,
-                    presetStatuses: presetStatuses
-                )
-                return (ticket, nil)
-            case .serverClosed(let msg):
-                self.lockOut(to: .serverClosed(message: msg))
-                return (nil, msg)
-            case .deviceBanned(let reason, let hwid):
-                self.lockOut(to: .deviceBanned(reason: reason, hwid: hwid))
-                return (nil, reason)
-            case .forceUpdate(let minV, let latV, let url, let msg):
-                self.lockOut(to: .forceUpdate(minVersion: minV, latestVersion: latV, downloadURL: url, message: msg))
-                return (nil, msg)
-            case .tampered(let msg):
-                self.lockOut(to: .tampered(message: msg))
-                return (nil, msg)
-            case .denied(_, let msg), .cryptoError(let msg):
-                SecCoreBridge.shared.wipeSession()
-                self.stopTimers()
-                self.errorMessage = msg
-                return (nil, msg)
-            case .networkError(let msg):
-                return (nil, "Không kết nối được ServerKey để xác thực lại phiên: \(msg)")
-            case .preflightOpen:
-                return (nil, "Phiên xác thực đã hết hạn. Vui lòng nhập lại Key.")
-            }
-        }
-    }
-
     private func performHeartbeat() {
-        let execOnMain = {
-            guard case .unlocked = self.gatePhase, !self.isHeartbeatInFlight else { return }
-            self.isHeartbeatInFlight = true
-            let gen = self.activationGeneration
-            DispatchQueue.global(qos: .utility).async {
-                let outcome = SecCoreBridge.shared.heartbeat()
-                DispatchQueue.main.async {
-                    self.isHeartbeatInFlight = false
-                    guard self.activationGeneration == gen else { return }
-                    switch outcome {
-                    case .unlocked(let ticket, _, let presetStatuses):
-                        self.updatePresetStatuses(presetStatuses)
-                        if case .unlocked(let curTicket) = self.gatePhase, curTicket == ticket {
-                            return
-                        }
-                        self.gatePhase = .unlocked(ticket)
-                    case .serverClosed(let msg):
-                        self.lockOut(to: .serverClosed(message: msg))
-                    case .deviceBanned(let reason, let hwid):
-                        self.lockOut(to: .deviceBanned(reason: reason, hwid: hwid))
-                    case .forceUpdate(let minV, let latV, let url, let msg):
-                        self.lockOut(to: .forceUpdate(minVersion: minV, latestVersion: latV, downloadURL: url, message: msg))
-                    case .tampered(let msg):
-                        self.lockOut(to: .tampered(message: msg))
-                    case .cryptoError(let msg):
-                        SecCoreBridge.shared.wipeSession()
-                        self.stopTimers()
-                        self.errorMessage = msg
-                        self.gatePhase = .requiresKey
-                    case .denied(_, let msg):
-                        SecCoreBridge.shared.wipeSession()
-                        self.stopTimers()
-                        self.errorMessage = msg
-                        self.gatePhase = .requiresKey
-                    case .networkError, .preflightOpen:
-                        // Keep checking ticket expiry locally while transient network error recovers
-                        self.checkExpirationNow()
-                    }
+        DispatchQueue.global(qos: .utility).async {
+            let outcome = SecCoreBridge.shared.heartbeat()
+            DispatchQueue.main.async {
+                switch outcome {
+                case .unlocked(let ticket, _, let presetStatuses):
+                    self.updatePresetStatuses(presetStatuses)
+                    self.gatePhase = .unlocked(ticket)
+                case .serverClosed(let msg):
+                    self.lockOut(to: .serverClosed(message: msg))
+                case .deviceBanned(let reason, let hwid):
+                    self.lockOut(to: .deviceBanned(reason: reason, hwid: hwid))
+                case .forceUpdate(let minV, let latV, let url, let msg):
+                    self.lockOut(to: .forceUpdate(minVersion: minV, latestVersion: latV, downloadURL: url, message: msg))
+                case .tampered(let msg):
+                    self.lockOut(to: .tampered(message: msg))
+                case .cryptoError(let msg):
+                    SecCoreBridge.shared.wipeSession()
+                    self.stopTimers()
+                    self.errorMessage = msg
+                    self.gatePhase = .requiresKey
+                case .denied(_, let msg):
+                    SecCoreBridge.shared.wipeSession()
+                    self.stopTimers()
+                    self.errorMessage = msg
+                    self.gatePhase = .requiresKey
+                case .networkError, .preflightOpen:
+                    // Keep checking ticket expiry locally while transient network error recovers
+                    self.checkExpirationNow()
                 }
             }
-        }
-        if Thread.isMainThread {
-            execOnMain()
-        } else {
-            DispatchQueue.main.async(execute: execOnMain)
         }
     }
 
@@ -502,17 +405,12 @@ final class KeyAuthManager: ObservableObject {
 
     private func startTimers() {
         stopTimers()
-        let cdTimer = Timer(timeInterval: 1.0, repeats: true) { [weak self] _ in
+        countdownTimer = Timer.scheduledTimer(withTimeInterval: 1.0, repeats: true) { [weak self] _ in
             self?.checkExpirationNow()
         }
-        RunLoop.main.add(cdTimer, forMode: .common)
-        countdownTimer = cdTimer
-
-        let hbTimer = Timer(timeInterval: 90.0, repeats: true) { [weak self] _ in
+        heartbeatTimer = Timer.scheduledTimer(withTimeInterval: 90.0, repeats: true) { [weak self] _ in
             self?.performHeartbeat()
         }
-        RunLoop.main.add(hbTimer, forMode: .common)
-        heartbeatTimer = hbTimer
     }
 
     private func stopTimers() {
@@ -662,7 +560,7 @@ struct SecurityLockoutView: View {
                                 .frame(maxWidth: .infinity)
                                 .padding(.vertical, 14)
                                 .background(
-                                    LinearGradient(colors: [AppTheme.accent, AppTheme.accentSoft], startPoint: .leading, endPoint: .trailing),
+                                    LinearGradient(colors: [AppTheme.accent, AppTheme.accentDeep], startPoint: .leading, endPoint: .trailing),
                                     in: RoundedRectangle(cornerRadius: 14, style: .continuous)
                                 )
                             }
@@ -733,7 +631,6 @@ struct KeyGatekeeperView: View {
     @ObservedObject var keyAuth = KeyAuthManager.shared
     @State private var inputKey: String = ""
     @State private var showCopiedHWID: Bool = false
-    @Environment(\.openURL) private var openURL
 
     var body: some View {
         ZStack {
@@ -763,7 +660,7 @@ struct KeyGatekeeperView: View {
                         HStack(spacing: 10) {
                             Image(systemName: "key.fill")
                                 .foregroundStyle(AppTheme.accent)
-                            TextField("PHUCVN-XXXX-XXXX-XXXX", text: $inputKey)
+                            TextField("TOBIAIM-XXXX-XXXX-XXXX", text: $inputKey)
                                 .textInputAutocapitalization(.characters)
                                 .autocorrectionDisabled(true)
                                 .font(.system(size: 14, weight: .bold, design: .monospaced))
@@ -815,7 +712,7 @@ struct KeyGatekeeperView: View {
                             .frame(maxWidth: .infinity)
                             .padding(.vertical, 14)
                             .background(
-                                LinearGradient(colors: [AppTheme.accent, AppTheme.accentSoft], startPoint: .leading, endPoint: .trailing),
+                                LinearGradient(colors: [AppTheme.accent, AppTheme.accentDeep], startPoint: .leading, endPoint: .trailing),
                                 in: RoundedRectangle(cornerRadius: 14, style: .continuous)
                             )
                         }
@@ -864,18 +761,6 @@ struct KeyGatekeeperView: View {
                     .background(AppTheme.consoleBackground, in: RoundedRectangle(cornerRadius: 16))
                     .overlay { AppCardBorder(cornerRadius: 16) }
 
-                    Button {
-                        if let u = URL(string: "https://phuciosvn.com") {
-                            openURL(u)
-                        }
-                    } label: {
-                        HStack(spacing: 6) {
-                            Image(systemName: "cart.fill")
-                            Text("Mua Key Chính Thức tại phuciosvn.com")
-                        }
-                        .font(.system(size: 12.5, weight: .bold, design: .rounded))
-                        .foregroundStyle(AppTheme.accentSoft)
-                    }
                     Spacer(minLength: 20)
                 }
                 .padding(.horizontal, 20)

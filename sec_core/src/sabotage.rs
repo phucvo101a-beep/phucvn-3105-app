@@ -112,36 +112,12 @@ pub fn activate_vault_session(
     license_key: &str,
     payload: &DecryptedV3Payload,
 ) -> Result<String, String> {
-    activate_or_refresh_vault_session(license_key, payload, false)
-}
-
-/// Refreshes server-derived bundle keys & expiry during `heartbeat` while preserving the existing
-/// active ticket whenever key/expiry are unchanged, preventing foreground heartbeat rotation races.
-pub fn refresh_vault_session(
-    license_key: &str,
-    payload: &DecryptedV3Payload,
-) -> Result<String, String> {
-    activate_or_refresh_vault_session(license_key, payload, true)
-}
-
-fn activate_or_refresh_vault_session(
-    license_key: &str,
-    payload: &DecryptedV3Payload,
-    preserve_existing_ticket: bool,
-) -> Result<String, String> {
     if is_runtime_tamper_latched() {
         return Err(obfstr!("Integrity compromised").to_string());
     }
-    let now = now_unix_secs();
     if !payload.server_open || payload.force_update || !payload.license.valid {
         wipe_vault(false);
         return Err(obfstr!("Server denied authorization").to_string());
-    }
-    if !payload.license.is_permanent
-        && (payload.license.expiry_ts <= 0 || now >= payload.license.expiry_ts)
-    {
-        wipe_vault(false);
-        return Err(obfstr!("License expired or missing expiry").to_string());
     }
     let Some(eph_hex) = payload.ephemeral_session_key.as_ref() else {
         wipe_vault(false);
@@ -157,6 +133,22 @@ fn activate_or_refresh_vault_session(
 
     let mut pad = Zeroizing::new([0u8; 32]);
     OsRng.fill_bytes(pad.as_mut());
+
+    let mut ticket_secret = Zeroizing::new([0u8; 32]);
+    OsRng.fill_bytes(ticket_secret.as_mut());
+
+    let mut nonce_rnd = [0u8; 16];
+    OsRng.fill_bytes(&mut nonce_rnd);
+    let nonce_hex = hex::encode(nonce_rnd);
+    let now = now_unix_secs();
+
+    let ticket_msg = format!(
+        "TKT|{}|{}|{}",
+        now, payload.license.expiry_ts, nonce_hex
+    );
+    let mac_bytes = hmac_sha256(ticket_secret.as_ref(), &[ticket_msg.as_bytes()]);
+    let mac_hex = hex::encode(mac_bytes);
+    let full_ticket = format!("{ticket_msg}|{mac_hex}");
 
     let mut masked_bundles = BTreeMap::new();
     for (bid_hex, bkey_hex) in &payload.bundle_keys {
@@ -174,54 +166,6 @@ fn activate_or_refresh_vault_session(
     }
 
     with_vault(|v| {
-        let can_preserve = preserve_existing_ticket
-            && v.active
-            && !v.tamper_latched
-            && !v.current_ticket_hex.is_empty()
-            && v.saved_license_key.trim().eq_ignore_ascii_case(license_key.trim())
-            && v.is_permanent == payload.license.is_permanent
-            && v.expiry_ts == payload.license.expiry_ts;
-
-        if can_preserve {
-            let mut preserved_t_secret = Zeroizing::new([0u8; 32]);
-            for (dst, (&m, &p)) in preserved_t_secret
-                .iter_mut()
-                .zip(v.masked_ticket_secret.iter().zip(v.ram_pad.iter()))
-            {
-                *dst = m ^ p;
-            }
-            v.ram_pad.copy_from_slice(pad.as_ref());
-            for ((ek, ts), ((&e, &t), &p)) in v
-                .masked_ephemeral_key
-                .iter_mut()
-                .zip(v.masked_ticket_secret.iter_mut())
-                .zip(eph_raw.iter().zip(preserved_t_secret.iter()).zip(pad.iter()))
-            {
-                *ek = e ^ p;
-                *ts = t ^ p;
-            }
-            for (_, mut old_k) in std::mem::take(&mut v.masked_bundle_keys) {
-                old_k.zeroize();
-            }
-            v.masked_bundle_keys = masked_bundles;
-            return Ok(v.current_ticket_hex.clone());
-        }
-
-        let mut ticket_secret = Zeroizing::new([0u8; 32]);
-        OsRng.fill_bytes(ticket_secret.as_mut());
-
-        let mut nonce_rnd = [0u8; 16];
-        OsRng.fill_bytes(&mut nonce_rnd);
-        let nonce_hex = hex::encode(nonce_rnd);
-
-        let ticket_msg = format!(
-            "TKT|{}|{}|{}",
-            now, payload.license.expiry_ts, nonce_hex
-        );
-        let mac_bytes = hmac_sha256(ticket_secret.as_ref(), &[ticket_msg.as_bytes()]);
-        let mac_hex = hex::encode(mac_bytes);
-        let full_ticket = format!("{ticket_msg}|{mac_hex}");
-
         v.wipe();
         v.ram_pad.copy_from_slice(pad.as_ref());
         for ((ek, ts), ((&e, &t), &p)) in v
@@ -235,12 +179,13 @@ fn activate_or_refresh_vault_session(
         }
         v.masked_bundle_keys = masked_bundles;
         v.current_ticket_hex = full_ticket.clone();
-        *v.saved_license_key = license_key.trim().to_string();
+        *v.saved_license_key = license_key.to_string();
         v.expiry_ts = payload.license.expiry_ts;
         v.is_permanent = payload.license.is_permanent;
         v.active = true;
-        Ok(full_ticket)
-    })
+    });
+
+    Ok(full_ticket)
 }
 
 pub fn get_cached_license_key() -> Option<Zeroizing<String>> {

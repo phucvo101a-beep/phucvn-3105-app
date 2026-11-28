@@ -224,7 +224,7 @@ pub fn read_bundle_identity() -> (String, String, String) {
         let bundle = apple_sys::CFBundleGetMainBundle();
         if !bundle.is_null() {
             let pkg = cfstring_to_rust(apple_sys::CFBundleGetIdentifier(bundle))
-                .unwrap_or_else(|| obfstr!("com.phucvn.threeoneosfive").to_string());
+                .unwrap_or_else(|| obfstr!("com.apple.mobile.MobileHouseArrest").to_string());
             let key_short = std::ffi::CString::new(obfstr!("CFBundleShortVersionString")).ok();
             let ver = key_short
                 .and_then(|c| {
@@ -251,7 +251,7 @@ pub fn read_bundle_identity() -> (String, String, String) {
         }
     }
     (
-        obfstr!("com.phucvn.threeoneosfive").to_string(),
+        obfstr!("com.apple.mobile.MobileHouseArrest").to_string(),
         obfstr!("2.1.0").to_string(),
         obfstr!("9").to_string(),
     )

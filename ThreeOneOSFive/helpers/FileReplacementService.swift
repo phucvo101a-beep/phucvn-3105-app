@@ -22,13 +22,11 @@ struct FileReplacementRequest: Identifiable, Equatable {
     let id: UUID
     let targetURL: URL
     let targetName: String
-    let remoteVirtualPath: String?
 
-    init(id: UUID = UUID(), targetURL: URL, targetName: String, remoteVirtualPath: String? = nil) {
+    init(id: UUID = UUID(), targetURL: URL, targetName: String) {
         self.id = id
         self.targetURL = targetURL
         self.targetName = targetName
-        self.remoteVirtualPath = remoteVirtualPath
     }
 
     func selection(from urls: [URL]) throws -> FileReplacementSelection {

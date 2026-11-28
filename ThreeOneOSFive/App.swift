@@ -11,8 +11,7 @@ struct ThreeOneOSFiveApp: App {
     init() {
         setupLogCapture()
         _ = LocalDevBridge.shared
-        log("app: 3105 x PHUCVN launching — iOS \(AppInfo.osVersion) (\(AppInfo.osBuild)) \(AppInfo.machineName)")
-        AppLog.shared.writeDiagnosticsSnapshot()
+        log("app: Tobi AIM launching — iOS \(AppInfo.osVersion) (\(AppInfo.osBuild)) \(AppInfo.machineName)")
     }
 
     private var language: AppLanguage { .vietnamese }
@@ -103,16 +102,7 @@ private struct SecurityGateRootView: View {
                         .opacity(showOnboarding ? 0 : 1)
                         .allowsHitTesting(!showOnboarding)
                         .onOpenURL { url in
-                            guard url.isFileURL else { return }
-                            let ext = url.pathExtension.lowercased()
-                            if let validURL = ContainerStore.validatedExternalFileURL(url) {
-                                if ext == "mobiledevicepairing" || ext == "pairing"
-                                    || ((ext == "plist" || ext == "json") && LocalDevBridge.looksLikePairingFile(at: validURL)) {
-                                    _ = LocalDevBridge.shared.importPairingFile(from: validURL)
-                                    return
-                                }
-                                patchDraftCoordinator.presentImport(validURL)
-                            }
+                            patchDraftCoordinator.presentImport(url)
                         }
 
                     if showOnboarding {
@@ -151,9 +141,6 @@ private struct SecurityGateRootView: View {
         .onChange(of: scenePhase) { phase in
             if phase == .active {
                 keyAuth.verifyLiveSessionOnForeground()
-                if LocalDevBridge.shared.isModuleEnabled {
-                    LocalDevBridge.shared.handleAppDidBecomeActive()
-                }
                 if !showOnboarding && keyAuth.activeVerifiedTicket != nil {
                     appState.detectSupport()
                 }
@@ -202,7 +189,6 @@ class AppState: ObservableObject {
         unsupportedMessage = supported ? nil : "iOS \(AppInfo.osVersion) (\(AppInfo.osBuild))"
         if let unsupportedMessage {
             exploitStatus = .unsupported(unsupportedMessage)
-            AppLog.shared.writeDiagnosticsSnapshot()
             return
         }
 
@@ -212,10 +198,7 @@ class AppState: ObservableObject {
             patch: v.patch,
             build: AppInfo.osBuild
         )
-        guard applicable else {
-            AppLog.shared.writeDiagnosticsSnapshot()
-            return
-        }
+        guard applicable else { return }
 
         refreshKernelExploitStatus()
         maybeAutoRunKernelExploit()

@@ -51,8 +51,6 @@ serverkey/data/login_limits.json
 *.tmp
 *.swp
 *~
-usb_diagnostics/
-usb_live.log
 
 __pycache__/
 *.pyc

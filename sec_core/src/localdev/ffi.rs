@@ -1,7 +1,8 @@
 //! C-ABI FFI Bridge for Swift & UIKit Integration
 //! All functions are thread-safe, return structured JSON and guarantee safe memory management
 
-use super::house_arrest::HouseArrestDirItem;
+use super::afc_client::AfcClient;
+use super::house_arrest::HouseArrestClient;
 use super::with_manager;
 use serde_json::json;
 use std::ffi::{c_char, CStr, CString};
@@ -37,39 +38,6 @@ pub unsafe extern "C" fn localdev_init(
         mgr.init(storage_str, host_str, port_opt);
     });
 
-    0
-}
-
-/// Registers Swift Network.framework callbacks (`NWBrowser`/`NWConnection` pre-warm + relay proxy)
-/// so iOS 26/27 NECP policy blocks (`EPERM / os error 1`) can be unlocked and relayed seamlessly
-#[no_mangle]
-pub unsafe extern "C" fn localdev_register_nw_callbacks(
-    prewarm_cb: Option<super::tunnel::LocalDevNwPrewarmFn>,
-    relay_connect_cb: Option<super::tunnel::LocalDevNwRelayConnectFn>,
-) -> i32 {
-    super::tunnel::register_nw_callbacks(prewarm_cb, relay_connect_cb);
-    0
-}
-
-/// Receives dynamically discovered `utun` endpoints (JSON array) and Swift Local Network state (`1` OK, `-1` denied, `0` unknown)
-#[no_mangle]
-pub unsafe extern "C" fn localdev_set_candidates(
-    candidates_json: *const c_char,
-    local_network_state: i32,
-) -> i32 {
-    let candidates = if !candidates_json.is_null() {
-        CStr::from_ptr(candidates_json)
-            .to_str()
-            .ok()
-            .and_then(|s| serde_json::from_str::<Vec<super::TunnelCandidate>>(s).ok())
-            .unwrap_or_default()
-    } else {
-        Vec::new()
-    };
-
-    with_manager(|mgr| {
-        mgr.set_candidates(candidates, local_network_state);
-    });
     0
 }
 
@@ -149,25 +117,31 @@ pub unsafe extern "C" fn localdev_list_dir(
         ""
     };
 
-    let res: Result<(Vec<String>, Vec<HouseArrestDirItem>, String), String> =
-        with_manager(|mgr| mgr.list_dir_detailed(service_type, b_id, path_str));
-    let route = with_manager(|mgr| mgr.last_airlift_route.clone());
+    let res = with_manager(|mgr| {
+        let pairing = mgr.active_pairing.as_ref().ok_or_else(|| "Chưa có pairing file".to_string())?;
+
+        if service_type == SERVICE_TYPE_HOUSE_ARREST {
+            if b_id.is_empty() {
+                return Err("bundle_id is required for HouseArrest".to_string());
+            }
+            HouseArrestClient::list_dir(&mgr.host, mgr.port, pairing, b_id, path_str)
+        } else {
+            let (mut afc, _source) = AfcClient::connect_device_afc(&mgr.host, mgr.port, pairing)?;
+            let entries = afc.list_dir(path_str)?;
+            Ok(entries)
+        }
+    });
 
     match res {
-        Ok((entries, items, mode)) => to_json_cstr(json!({
+        Ok(entries) => to_json_cstr(json!({
             "success": true,
             "path": path_str,
-            "mode": mode,
-            "route": route,
-            "entries": entries,
-            "items": items
+            "entries": entries
         })),
         Err(e) => to_json_cstr(json!({
             "success": false,
             "error": e,
-            "route": route,
-            "entries": [],
-            "items": []
+            "entries": []
         })),
     }
 }
@@ -193,8 +167,16 @@ pub unsafe extern "C" fn localdev_read_file(
         ""
     };
 
-    let res: Result<Vec<u8>, String> =
-        with_manager(|mgr| mgr.read_file(service_type, b_id, path_str));
+    let res: Result<Vec<u8>, String> = with_manager(|mgr| {
+        let pairing = mgr.active_pairing.as_ref().ok_or_else(|| "Chưa có pairing file".to_string())?;
+
+        if service_type == SERVICE_TYPE_HOUSE_ARREST {
+            HouseArrestClient::read_file(&mgr.host, mgr.port, pairing, b_id, path_str)
+        } else {
+            let (mut afc, _src) = AfcClient::connect_device_afc(&mgr.host, mgr.port, pairing)?;
+            afc.read_file_full(path_str)
+        }
+    });
 
     match res {
         Ok(mut bytes) => {
@@ -219,7 +201,7 @@ pub unsafe extern "C" fn localdev_write_file(
     data: *const u8,
     len: usize,
 ) -> *const c_char {
-    if path.is_null() || (data.is_null() && len > 0) {
+    if path.is_null() || data.is_null() || len == 0 {
         return to_json_cstr(json!({
             "success": false,
             "error": "Tham số tệp không hợp lệ"
@@ -232,398 +214,35 @@ pub unsafe extern "C" fn localdev_write_file(
     } else {
         ""
     };
-    let slice = if data.is_null() || len == 0 {
-        &[]
-    } else {
-        std::slice::from_raw_parts(data, len)
-    };
+    let slice = std::slice::from_raw_parts(data, len);
 
-    let res: Result<(), String> =
-        with_manager(|mgr| mgr.write_file(service_type, b_id, path_str, slice));
-    let route = with_manager(|mgr| mgr.last_airlift_route.clone());
+    let res: Result<(), String> = with_manager(|mgr| {
+        let pairing = mgr.active_pairing.as_ref().ok_or_else(|| "Chưa có pairing file".to_string())?;
+
+        if service_type == SERVICE_TYPE_HOUSE_ARREST {
+            HouseArrestClient::write_file_safe(&mgr.host, mgr.port, pairing, b_id, path_str, slice)
+        } else {
+            let (mut afc, _src) = AfcClient::connect_device_afc(&mgr.host, mgr.port, pairing)?;
+            // Safety backup
+            if let Ok(existing) = afc.read_file_full(path_str) {
+                let backup_path = format!("{}.bak", path_str);
+                let _ = afc.write_file_full(&backup_path, &existing);
+            }
+            afc.write_file_full(path_str, slice)
+        }
+    });
 
     match res {
         Ok(_) => to_json_cstr(json!({
             "success": true,
             "path": path_str,
-            "written_bytes": len,
-            "route": route
-        })),
-        Err(e) => to_json_cstr(json!({
-            "success": false,
-            "error": e,
-            "route": route
-        })),
-    }
-}
-
-/// Sends a remove request for either `SERVICE_TYPE_DEVICE_AFC` (`/var/mobile/Media`) or `SERVICE_TYPE_HOUSE_ARREST`
-#[no_mangle]
-pub unsafe extern "C" fn localdev_mkdir(
-    service_type: i32,
-    bundle_id: *const c_char,
-    path: *const c_char,
-) -> *const c_char {
-    if path.is_null() {
-        return to_json_cstr(json!({
-            "success": false,
-            "error": "Thiếu đường dẫn thư mục"
-        }));
-    }
-    let path_str = CStr::from_ptr(path).to_str().unwrap_or("");
-    let b_id = if !bundle_id.is_null() {
-        CStr::from_ptr(bundle_id).to_str().unwrap_or("")
-    } else {
-        ""
-    };
-    let res = with_manager(|mgr| mgr.make_dir(service_type, b_id, path_str));
-    let route = with_manager(|mgr| mgr.last_airlift_route.clone());
-    match res {
-        Ok(mode) => to_json_cstr(json!({
-            "success": true,
-            "path": path_str,
-            "mode": mode,
-            "route": route
-        })),
-        Err(e) => to_json_cstr(json!({
-            "success": false,
-            "error": e,
-            "route": route
-        })),
-    }
-}
-
-/// Removes a file or recursive directory on either `SERVICE_TYPE_DEVICE_AFC` (`/var/mobile/Media`) or `SERVICE_TYPE_HOUSE_ARREST`
-#[no_mangle]
-pub unsafe extern "C" fn localdev_remove_path(
-    service_type: i32,
-    bundle_id: *const c_char,
-    path: *const c_char,
-) -> *const c_char {
-    if path.is_null() {
-        return to_json_cstr(json!({
-            "success": false,
-            "error": "Thiếu đường dẫn cần xóa"
-        }));
-    }
-    let path_str = CStr::from_ptr(path).to_str().unwrap_or("");
-    let b_id = if !bundle_id.is_null() {
-        CStr::from_ptr(bundle_id).to_str().unwrap_or("")
-    } else {
-        ""
-    };
-    let res = with_manager(|mgr| mgr.remove_path(service_type, b_id, path_str));
-    let route = with_manager(|mgr| mgr.last_airlift_route.clone());
-    match res {
-        Ok(mode) => to_json_cstr(json!({
-            "success": true,
-            "path": path_str,
-            "mode": mode,
-            "route": route
-        })),
-        Err(e) => to_json_cstr(json!({
-            "success": false,
-            "error": e,
-            "route": route
-        })),
-    }
-}
-
-/// Probes CoreDevice FileService (`controlcapacity` + `.data`) readiness over active RSD tunnel
-#[no_mangle]
-pub unsafe extern "C" fn localdev_fileservice_status(
-    bundle_id: *const c_char,
-    control_capacity: u64,
-) -> *const c_char {
-    let b_opt = if !bundle_id.is_null() {
-        CStr::from_ptr(bundle_id).to_str().ok().filter(|s| !s.trim().is_empty())
-    } else {
-        None
-    };
-    let rep = with_manager(|mgr| mgr.probe_fileservice_status(b_opt, control_capacity));
-    to_json_cstr(json!(rep))
-}
-
-/// Lists files via `patch.airlift` router (CoreDevice `fileservice.data` -> HouseArrest -> `afc.shim.remote`)
-#[no_mangle]
-pub unsafe extern "C" fn localdev_fileservice_list(
-    bundle_id: *const c_char,
-    path: *const c_char,
-    control_capacity: u64,
-) -> *const c_char {
-    let b_id = if !bundle_id.is_null() {
-        CStr::from_ptr(bundle_id).to_str().unwrap_or("")
-    } else {
-        ""
-    };
-    let path_str = if !path.is_null() {
-        CStr::from_ptr(path).to_str().unwrap_or("/")
-    } else {
-        "/"
-    };
-
-    match with_manager(|mgr| mgr.airlift_list_dir(b_id, path_str, control_capacity)) {
-        Ok(((entries, items, mode), route)) => to_json_cstr(json!({
-            "success": true,
-            "path": path_str,
-            "mode": mode,
-            "route": route,
-            "entries": entries,
-            "items": items
-        })),
-        Err(e) => {
-            let route = with_manager(|mgr| mgr.last_airlift_route.clone());
-            to_json_cstr(json!({
-                "success": false,
-                "error": e,
-                "route": route,
-                "entries": [],
-                "items": []
-            }))
-        }
-    }
-}
-
-/// Reads file bytes via `patch.airlift` router (`fileservice_read` -> HouseArrest -> `afc.shim.remote`)
-/// Caller sets `out_ok` (1 on success, 0 on error) and frees non-null buffer via `localdev_free_bytes`.
-#[no_mangle]
-pub unsafe extern "C" fn localdev_fileservice_read(
-    bundle_id: *const c_char,
-    path: *const c_char,
-    control_capacity: u64,
-    out_len: *mut usize,
-    out_ok: *mut i32,
-) -> *mut u8 {
-    if !out_ok.is_null() {
-        *out_ok = 0;
-    }
-    if path.is_null() || out_len.is_null() {
-        return std::ptr::null_mut();
-    }
-    *out_len = 0;
-
-    let b_id = if !bundle_id.is_null() {
-        CStr::from_ptr(bundle_id).to_str().unwrap_or("")
-    } else {
-        ""
-    };
-    let path_str = CStr::from_ptr(path).to_str().unwrap_or("");
-    match with_manager(|mgr| mgr.airlift_read_file(b_id, path_str, control_capacity)) {
-        Ok((mut bytes, _route)) => {
-            if !out_ok.is_null() {
-                *out_ok = 1;
-            }
-            *out_len = bytes.len();
-            if bytes.is_empty() {
-                return std::ptr::null_mut();
-            }
-            let ptr = bytes.as_mut_ptr();
-            std::mem::forget(bytes);
-            ptr
-        }
-        Err(_) => std::ptr::null_mut(),
-    }
-}
-
-unsafe fn ffi_fileservice_write_impl(
-    bundle_id: *const c_char,
-    path: *const c_char,
-    data: *const u8,
-    len: usize,
-    control_capacity: u64,
-    direct_known_path: bool,
-) -> *const c_char {
-    if path.is_null() || (data.is_null() && len > 0) {
-        return to_json_cstr(json!({
-            "success": false,
-            "error": "Tham số fileservice write không hợp lệ"
-        }));
-    }
-    let b_id = if !bundle_id.is_null() {
-        CStr::from_ptr(bundle_id).to_str().unwrap_or("")
-    } else {
-        ""
-    };
-    let path_str = CStr::from_ptr(path).to_str().unwrap_or("");
-    let slice = if data.is_null() || len == 0 {
-        &[]
-    } else {
-        std::slice::from_raw_parts(data, len)
-    };
-
-    match with_manager(|mgr| {
-        mgr.airlift_write_file_opts(b_id, path_str, slice, control_capacity, direct_known_path)
-    }) {
-        Ok((route, written)) => to_json_cstr(json!({
-            "success": true,
-            "path": path_str,
-            "written_bytes": written,
-            "route": route
-        })),
-        Err(e) => {
-            let route = with_manager(|mgr| mgr.last_airlift_route.clone());
-            to_json_cstr(json!({
-                "success": false,
-                "error": e,
-                "route": route
-            }))
-        }
-    }
-}
-
-/// Writes file bytes via `patch.airlift` router (`fileservice.data` -> HouseArrest -> `afc.shim.remote`)
-#[no_mangle]
-pub unsafe extern "C" fn localdev_fileservice_write(
-    bundle_id: *const c_char,
-    path: *const c_char,
-    data: *const u8,
-    len: usize,
-    control_capacity: u64,
-) -> *const c_char {
-    ffi_fileservice_write_impl(bundle_id, path, data, len, control_capacity, false)
-}
-
-/// Writes file bytes via `patch.airlift` with optional `direct_known_path` (`bulk_directory_disabled` + `direct_read_disabled`)
-#[no_mangle]
-pub unsafe extern "C" fn localdev_fileservice_write_opts(
-    bundle_id: *const c_char,
-    path: *const c_char,
-    data: *const u8,
-    len: usize,
-    control_capacity: u64,
-    direct_known_path: i32,
-) -> *const c_char {
-    ffi_fileservice_write_impl(
-        bundle_id,
-        path,
-        data,
-        len,
-        control_capacity,
-        direct_known_path != 0,
-    )
-}
-
-/// Creates a directory via `patch.airlift` router
-#[no_mangle]
-pub unsafe extern "C" fn localdev_fileservice_mkdir(
-    bundle_id: *const c_char,
-    path: *const c_char,
-    control_capacity: u64,
-) -> *const c_char {
-    if path.is_null() {
-        return to_json_cstr(json!({
-            "success": false,
-            "error": "Thiếu đường dẫn thư mục"
-        }));
-    }
-    let b_id = if !bundle_id.is_null() {
-        CStr::from_ptr(bundle_id).to_str().unwrap_or("")
-    } else {
-        ""
-    };
-    let path_str = CStr::from_ptr(path).to_str().unwrap_or("");
-    match with_manager(|mgr| mgr.airlift_mkdir(b_id, path_str, control_capacity)) {
-        Ok(route) => to_json_cstr(json!({
-            "success": true,
-            "path": path_str,
-            "route": route
-        })),
-        Err(e) => {
-            let route = with_manager(|mgr| mgr.last_airlift_route.clone());
-            to_json_cstr(json!({
-                "success": false,
-                "error": e,
-                "route": route
-            }))
-        }
-    }
-}
-
-/// Deletes a file or directory via `patch.airlift` router
-#[no_mangle]
-pub unsafe extern "C" fn localdev_fileservice_remove(
-    bundle_id: *const c_char,
-    path: *const c_char,
-    control_capacity: u64,
-) -> *const c_char {
-    if path.is_null() {
-        return to_json_cstr(json!({
-            "success": false,
-            "error": "Thiếu đường dẫn cần xóa"
-        }));
-    }
-    let b_id = if !bundle_id.is_null() {
-        CStr::from_ptr(bundle_id).to_str().unwrap_or("")
-    } else {
-        ""
-    };
-    let path_str = CStr::from_ptr(path).to_str().unwrap_or("");
-    match with_manager(|mgr| mgr.airlift_remove(b_id, path_str, control_capacity)) {
-        Ok(route) => to_json_cstr(json!({
-            "success": true,
-            "path": path_str,
-            "route": route
-        })),
-        Err(e) => {
-            let route = with_manager(|mgr| mgr.last_airlift_route.clone());
-            to_json_cstr(json!({
-                "success": false,
-                "error": e,
-                "route": route
-            }))
-        }
-    }
-}
-
-/// Returns the latest `patch.airlift` attempt/fallback route trace JSON
-#[no_mangle]
-pub extern "C" fn localdev_airlift_route_info() -> *const c_char {
-    let route = with_manager(|mgr| mgr.last_airlift_route.clone());
-    to_json_cstr(json!({
-        "route": route
-    }))
-}
-
-/// Runs `com.apple.mobilebackup2` snapshot/extraction into `staging_dir`
-#[no_mangle]
-pub unsafe extern "C" fn localdev_mb2_extract_app(
-    bundle_id: *const c_char,
-    staging_dir: *const c_char,
-    free_bytes: u64,
-) -> *const c_char {
-    if bundle_id.is_null() || staging_dir.is_null() {
-        return to_json_cstr(json!({
-            "success": false,
-            "error": "Tham số trích xuất Backup không hợp lệ"
-        }));
-    }
-    let b_id = CStr::from_ptr(bundle_id).to_str().unwrap_or("");
-    let st_dir = CStr::from_ptr(staging_dir).to_str().unwrap_or("");
-    let res = with_manager(|mgr| mgr.extract_backup_app(b_id, st_dir, free_bytes));
-    match res {
-        Ok(report) => to_json_cstr(json!({
-            "success": true,
-            "report": report
+            "written_bytes": len
         })),
         Err(e) => to_json_cstr(json!({
             "success": false,
             "error": e
         })),
     }
-}
-
-/// Returns current progress snapshot of `mobilebackup2` transfer
-#[no_mangle]
-pub extern "C" fn localdev_mb2_status() -> *const c_char {
-    let snap = super::mobilebackup2::get_progress_snapshot();
-    to_json_cstr(json!(snap))
-}
-
-/// Requests cooperative cancellation of active `mobilebackup2` transfer
-#[no_mangle]
-pub extern "C" fn localdev_mb2_cancel() -> i32 {
-    super::mobilebackup2::request_cancel();
-    0
 }
 
 /// Frees C-string allocated by Rust

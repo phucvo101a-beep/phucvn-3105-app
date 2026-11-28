@@ -9,13 +9,13 @@ enum PatchPackageCodec {
     private static let minimumSchemaVersion = 1
 
     private static let v4BundleIDToUUID: [String: UUID] = [
-        "61e146614cbea2ad84072a4f5fca5317": UUID(uuidString: "16A78656-EE0A-41F9-B0FA-5F9F44973BBE")!,
-        "4777d77cec3805986e68685216b8a307": UUID(uuidString: "DFC0AF84-76EF-49AF-9945-E8307FAE5C2B")!,
-        "6722c689f5f0451d3811369e3006eaae": UUID(uuidString: "B8192D12-7013-4420-8073-794D00FB4200")!,
-        "fb3dbf9849c3ec6a54057ac5f3f48688": UUID(uuidString: "855F300E-A213-45B6-8A14-D1EFA8D0F7AE")!,
-        "fbdf2846758499d9e60db27d90d3c8df": UUID(uuidString: "C0CA95DF-CD18-4F4A-A3CD-56DA11324716")!,
-        "cde208676db7538d5094f384a236f8e9": UUID(uuidString: "5A53E415-D850-4722-ADF3-1FAE7E73F9AB")!,
-        "a55aee362dde280664cf694b99f3020c": UUID(uuidString: "233DAE36-3734-4E2B-8C66-C491B540B4B5")!,
+        "4fe0338b456ba3037ecb4cba476e27d6": UUID(uuidString: "16A78656-EE0A-41F9-B0FA-5F9F44973BBE")!,
+        "48db91058470b8f242ddb2999666d8c6": UUID(uuidString: "DFC0AF84-76EF-49AF-9945-E8307FAE5C2B")!,
+        "9fada8b53cd68249f2176252d3cc9de5": UUID(uuidString: "B8192D12-7013-4420-8073-794D00FB4200")!,
+        "8132be7b3c12916da96e8e28a29e3cc4": UUID(uuidString: "855F300E-A213-45B6-8A14-D1EFA8D0F7AE")!,
+        "4c895848faf6eb6a13ab785f91dc34d6": UUID(uuidString: "C0CA95DF-CD18-4F4A-A3CD-56DA11324716")!,
+        "f9918fb30abc12499b7b06b853723995": UUID(uuidString: "5A53E415-D850-4722-ADF3-1FAE7E73F9AB")!,
+        "a27ad9ec12b617ac5f6400a85438303e": UUID(uuidString: "233DAE36-3734-4E2B-8C66-C491B540B4B5")!,
         "5cb34ab1097a193bd6f0d7872f955f7d": UUID(uuidString: "F88B1A0A-E999-423E-88C3-220DF07F6F99")!,
         "a0a7f11e7561a8df259d239ae3fb8b7a": UUID(uuidString: "7EEDB6F5-3FE1-458C-B3A1-E39D72815AAA")!,
         "a520809514c122d93a77f03553d38bb9": UUID(uuidString: "4070AFA4-A4D2-4758-A7E6-6818FDCD0397")!,
@@ -434,15 +434,6 @@ enum PatchPackageCodec {
               !author.unicodeScalars.contains(where: CharacterSet.controlCharacters.contains),
               !project.allBundleIdentifiers.isEmpty else {
             throw PatchPackageError.invalidProject
-        }
-        for groupID in project.declaredAppGroupIdentifiers {
-            guard groupID.utf8.count <= 255,
-                  !groupID.contains("/"),
-                  !groupID.contains("\\"),
-                  !groupID.contains(".."),
-                  !groupID.unicodeScalars.contains(where: CharacterSet.controlCharacters.contains) else {
-                throw PatchPackageError.invalidProject
-            }
         }
         var bundles = Set<String>()
         for suppliedBundleID in project.bundleIdentifiers {

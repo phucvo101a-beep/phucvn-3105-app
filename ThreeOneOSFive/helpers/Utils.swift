@@ -2,155 +2,22 @@ import Foundation
 import UIKit
 import Darwin
 import Combine
-import OSLog
 
 // MARK: - Global logger
 class AppLog: ObservableObject {
     static let shared = AppLog()
     @Published var entries: [String] = []
-
-    private static let maxInMemoryEntries = 2_000
-    private static let maxLogFileBytes: UInt64 = 512 * 1_024
-    private let logger = Logger(
-        subsystem: Bundle.main.bundleIdentifier ?? "com.phucvn.threeoneosfive",
-        category: "runtime"
-    )
-    private let fileQueue = DispatchQueue(label: "com.phucvn.3105.applog.file", qos: .utility)
-
-    var diagnosticsDirectoryURL: URL? {
-        guard let docs = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask).first else {
-            return nil
-        }
-        let dir = docs.appendingPathComponent("3105-Diagnostics", isDirectory: true)
-        try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
-        return dir
-    }
-
-    var sessionLogFileURL: URL? {
-        diagnosticsDirectoryURL?.appendingPathComponent("session-latest.log")
-    }
-
-    var environmentFileURL: URL? {
-        diagnosticsDirectoryURL?.appendingPathComponent("environment.json")
-    }
-
     func append(_ msg: String) {
-        let sanitized = Self.sanitizeForDiagnostics(msg)
-        guard !sanitized.isEmpty else { return }
-
-        let timestamp = Self.isoTimestamp()
-        let fileLine = "[\(timestamp)] \(sanitized)\n"
-        logger.notice("\(sanitized, privacy: .public)")
-
-        fileQueue.async { [weak self] in
-            self?.appendLineToDisk(fileLine)
-        }
-
-        DispatchQueue.main.async {
-            self.entries.append(sanitized)
-            if self.entries.count > Self.maxInMemoryEntries {
-                self.entries.removeFirst(self.entries.count - Self.maxInMemoryEntries)
-            }
-        }
-    }
-
-    func writeDiagnosticsSnapshot(extra: [String: String] = [:]) {
-        let homePath = NSHomeDirectory()
-        let docsPath = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask).first?.path ?? ""
-        let cachesPath = FileManager.default.urls(for: .cachesDirectory, in: .userDomainMask).first?.path ?? ""
-        let fileSharingEnabled = (Bundle.main.object(forInfoDictionaryKey: "UIFileSharingEnabled") as? Bool) ?? false
-        let openInPlaceEnabled = (Bundle.main.object(forInfoDictionaryKey: "LSSupportsOpeningDocumentsInPlace") as? Bool) ?? false
-
-        let ldSnapshot = LocalDevBridge.shared.currentStatusSnapshot
-        let bundleID = Bundle.main.bundleIdentifier ?? ""
-        var payload: [String: Any] = [
-            "generated_at": Self.isoTimestamp(),
-            "bundle_id": bundleID,
-            "bundle_id_is_apple_prefix": bundleID.hasPrefix("com.apple."),
-            "app_version": (Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String) ?? "",
-            "app_build": (Bundle.main.object(forInfoDictionaryKey: "CFBundleVersion") as? String) ?? "",
-            "ios_version": AppInfo.osVersion,
-            "ios_build": AppInfo.osBuild,
-            "machine": AppInfo.displayMachineName,
-            "sandbox_home": homePath,
-            "documents_path": docsPath,
-            "caches_path": cachesPath,
-            "ui_file_sharing_enabled": fileSharingEnabled,
-            "open_documents_in_place": openInPlaceEnabled,
-            "access_mode": ContainerStore.accessModeDescription,
-            "privileged_container_access": ContainerStore.hasPrivilegedContainerAccess(),
-            "kernel_exploit_applicable": ExploitSupportPolicy.supportsKernelExploit(
-                major: AppInfo.versionTuple.major,
-                minor: AppInfo.versionTuple.minor,
-                patch: AppInfo.versionTuple.patch
-            ),
-            "localdev_code": ldSnapshot.code,
-            "localdev_status": ldSnapshot.status,
-            "localdev_message": Self.sanitizeForDiagnostics(ldSnapshot.message)
-        ]
-        for (k, v) in extra {
-            payload[k] = Self.sanitizeForDiagnostics(v)
-        }
-
-        fileQueue.async { [weak self] in
-            guard let url = self?.environmentFileURL,
-                  url.isFileURL,
-                  !url.path.isEmpty,
-                  let data = try? JSONSerialization.data(withJSONObject: payload, options: [.prettyPrinted, .sortedKeys]) else {
-                return
-            }
-            try? data.write(to: url, options: .atomic)
-        }
-    }
-
-    private func appendLineToDisk(_ line: String) {
-        guard let url = sessionLogFileURL,
-              let data = line.data(using: .utf8) else { return }
-
-        let fm = FileManager.default
-        if let attrs = try? fm.attributesOfItem(atPath: url.path),
-           let size = attrs[.size] as? UInt64,
-           size >= Self.maxLogFileBytes,
-           let dir = diagnosticsDirectoryURL {
-            let previousURL = dir.appendingPathComponent("session-previous.log")
-            try? fm.removeItem(at: previousURL)
-            try? fm.moveItem(at: url, to: previousURL)
-        }
-
-        if !fm.fileExists(atPath: url.path) {
-            fm.createFile(atPath: url.path, contents: data, attributes: nil)
-            return
-        }
-
-        guard let handle = try? FileHandle(forWritingTo: url) else { return }
-        defer { try? handle.close() }
-        _ = try? handle.seekToEnd()
-        try? handle.write(contentsOf: data)
-    }
-
-    private static func sanitizeForDiagnostics(_ raw: String) -> String {
-        let trimmed = raw.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !trimmed.isEmpty else { return "" }
-        // Never persist potential license keys or runtime session tickets into shared diagnostics.
-        if trimmed.contains("PHUCVN-") || trimmed.localizedCaseInsensitiveContains("ticket=") {
-            return "[3105] [redacted sensitive diagnostic line]"
-        }
-        return trimmed
-    }
-
-    private static func isoTimestamp() -> String {
-        let formatter = ISO8601DateFormatter()
-        formatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
-        return formatter.string(from: Date())
+        DispatchQueue.main.async { self.entries.append(msg) }
     }
 }
-
 func log(_ msg: String) { AppLog.shared.append("[3105] \(msg)") }
 
 // Retain the pipe for the app's lifetime so stdout/stderr stay redirected.
 private var logCapturePipe: Pipe?
 
-// Redirect stdout/stderr (C printf / NSLog) into the in-app log view and USB diagnostics mirror.
+// Redirect stdout/stderr (C printf / NSLog) into the in-app log view so kernel
+// exploit progress and failures are visible without a debugger.
 func setupLogCapture() {
     guard logCapturePipe == nil else { return }  // already set up
     let pipe = Pipe()
@@ -169,9 +36,9 @@ func setupLogCapture() {
         let data = handle.availableData
         guard !data.isEmpty else { return }
         if let text = String(data: data, encoding: .utf8) {
-            for line in text.components(separatedBy: .newlines) {
-                let trimmed = line.trimmingCharacters(in: .whitespacesAndNewlines)
-                if !trimmed.isEmpty {
+            let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
+            if !trimmed.isEmpty {
+                DispatchQueue.main.async {
                     AppLog.shared.append(trimmed)
                 }
             }
@@ -249,14 +116,11 @@ enum ExploitStatus: Equatable {
 enum AppPaths {
     static var backups: String {
         let u = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first
-            ?? FileManager.default.temporaryDirectory
+            ?? URL(fileURLWithPath: NSTemporaryDirectory(), isDirectory: true)
         let b = u.appendingPathComponent("backups", isDirectory: true)
         try? FileManager.default.createDirectory(at: b, withIntermediateDirectories: true)
         return b.path
     }
 
-    static var backupsURL: URL {
-        ContainerStore.validatedLocalFileURL(fromPath: backups, isDirectory: true)
-            ?? FileManager.default.temporaryDirectory
-    }
+    static var backupsURL: URL { URL(fileURLWithPath: backups, isDirectory: true) }
 }

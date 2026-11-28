@@ -10,7 +10,6 @@ struct AppDataBrowserView: View {
     @State private var apps: [InstalledApp] = []
     @ObservedObject private var localDevBridge = LocalDevBridge.shared
     @State private var appSearchText = ""
-    @State private var accessFilter: AppAccessFilter = .all
     @FocusState private var isAppSearchFocused: Bool
     @State private var isLoading = false
     @State private var isResolving = false
@@ -37,60 +36,19 @@ struct AppDataBrowserView: View {
         self.onOpenLogs = onOpenLogs
     }
 
-    private typealias AppAccessBadge = (title: String, icon: String, color: Color, isSandboxLocked: Bool)
-
-    private var localDevAppByBundleID: [String: LocalDevApp] {
-        var map: [String: LocalDevApp] = [:]
-        map.reserveCapacity(localDevBridge.installedApps.count)
-        for item in localDevBridge.installedApps where map[item.bundle_id] == nil {
-            map[item.bundle_id] = item
-        }
-        return map
-    }
-
-    private func accessBadgeInfo(for app: InstalledApp, devLookup: [String: LocalDevApp]) -> AppAccessBadge {
-        if let devApp = devLookup[app.bundleID] {
-            return (devApp.accessBadgeTitle, devApp.accessBadgeIcon, devApp.accessBadgeColor, devApp.isSandboxLocked)
-        }
-        if ContainerStore.isWithinOwnSandbox(app.containerPath) {
-            return ("Sandbox nội bộ", "checkmark.shield.fill", AppTheme.success, false)
-        }
-        if ContainerStore.hasPrivilegedContainerAccess() {
-            return ("Toàn quyền Container", "lock.open.fill", .green, false)
-        }
-        return ("Bị khóa Sandbox", "lock.fill", .orange, true)
-    }
-
-    private var queryMatchedApps: [InstalledApp] {
+    private var filteredApps: [InstalledApp] {
         let query = appSearchText.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !query.isEmpty else { return apps }
-        let devLookup = localDevAppByBundleID
 
         return apps.filter { app in
-            if app.displayName.localizedStandardContains(query)
+            app.displayName.localizedStandardContains(query)
                 || app.bundleID.localizedStandardContains(query)
-                || app.version.localizedStandardContains(query) {
-                return true
-            }
-            return accessBadgeInfo(for: app, devLookup: devLookup).title.localizedStandardContains(query)
-        }
-    }
-
-    private var filteredApps: [InstalledApp] {
-        let matched = queryMatchedApps
-        let devLookup = localDevAppByBundleID
-        switch accessFilter {
-        case .all:
-            return matched
-        case .accessible:
-            return matched.filter { !accessBadgeInfo(for: $0, devLookup: devLookup).isSandboxLocked }
-        case .sandboxLocked:
-            return matched.filter { accessBadgeInfo(for: $0, devLookup: devLookup).isSandboxLocked }
+                || app.version.localizedStandardContains(query)
         }
     }
 
     private var hasAppSearchQuery: Bool {
-        !appSearchText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || accessFilter != .all
+        !appSearchText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
     }
 
     private var overlayState: AppBrowserOverlayState {
@@ -140,16 +98,6 @@ struct AppDataBrowserView: View {
                         workspaceURL = try? PatchWorkspaceService.documentsRootURL()
                         patchesURL = try? PatchWorkspaceService.patchesRootURL()
                     }
-                    if !hasLoaded && (!localDevBridge.installedApps.isEmpty || localDevBridge.currentStatus.isLive) {
-                        hasLoaded = true
-                        reload()
-                    }
-                }
-                .onChange(of: localDevBridge.currentStatus.isLive) { isLive in
-                    if isLive && !isLoading && !isResolving && apps.count <= 1 {
-                        hasLoaded = true
-                        reload()
-                    }
                 }
                 .navigationDestination(for: FileBrowserDestination.self) { destination in
                     if destination.startPath == destination.containerPath {
@@ -186,29 +134,24 @@ struct AppDataBrowserView: View {
     }
 
     private var appList: some View {
-        let devLookup = localDevAppByBundleID
-        return ScrollView(showsIndicators: false) {
+        ScrollView(showsIndicators: false) {
             LazyVStack(alignment: .leading, spacing: 13) {
                 browserHero
                     .padding(.top, 9)
                     .padding(.bottom, 2)
 
+                LocalDevStatusCard()
+                    .padding(.bottom, 2)
+
+                if !apps.isEmpty {
+                    appSearchField
+                        .padding(.bottom, 2)
+                }
+
                 if horizontalSizeClass == .regular {
                     FilesTabStrip(session: $tabSession)
                         .padding(.bottom, 2)
                 }
-
-                // MARK: - Section 1: Independent Own-Sandbox & USB Diagnostics (always available)
-                VStack(alignment: .leading, spacing: 2) {
-                    Text("DỮ LIỆU NỘI BỘ & HỘP CÁT (SANDBOX)")
-                        .font(.system(size: 10, weight: .heavy, design: .rounded))
-                        .tracking(1.25)
-                        .foregroundStyle(AppTheme.success)
-                    Text("Luôn khả dụng qua API iOS chuẩn — độc lập hoàn toàn với LocalDev & Pairing")
-                        .font(.system(size: 10, weight: .medium))
-                        .foregroundStyle(AppTheme.subduedText)
-                }
-                .padding(.horizontal, 3)
 
                 if let workspaceURL {
                     workspaceCard(workspaceURL)
@@ -216,61 +159,14 @@ struct AppDataBrowserView: View {
 
                 patchesShortcutCard
 
-                sandboxShortcutCard
-
-                if let diagnosticsURL = ContainerStore.ownDiagnosticsURL {
-                    diagnosticsShortcutCard(diagnosticsURL)
-                }
-
-                if !ContainerStore.hasPrivilegedContainerAccess() {
-                    sandboxScopeNoticeCard
-                }
-
-                // MARK: - Section 2: Optional LocalDev / Pairing Tunnel Extension
-                VStack(alignment: .leading, spacing: 2) {
-                    Text("KẾT NỐI MỞ RỘNG LOCALDEV (TÙY CHỌN VPN / PAIRING)")
-                        .font(.system(size: 10, weight: .heavy, design: .rounded))
-                        .tracking(1.25)
-                        .foregroundStyle(AppTheme.accentSoft)
-                    Text("Chỉ cần khi duyệt Documents / container ngoài app; lỗi ở đây không ảnh hưởng Sandbox hay Nhật ký USB")
-                        .font(.system(size: 10, weight: .medium))
-                        .foregroundStyle(AppTheme.subduedText)
-                }
-                .padding(.horizontal, 3)
-                .padding(.top, 8)
-
-                LocalDevStatusCard()
-                    .padding(.bottom, 2)
-
-                sharedMediaShortcutCard
-
-                VStack(alignment: .leading, spacing: 2) {
-                    Text("TRUYỀN TỆP WI-FI LAN (3105 AIRLIFT)")
-                        .font(.system(size: 10, weight: .heavy, design: .rounded))
-                        .tracking(1.25)
-                        .foregroundStyle(AppTheme.accentSoft)
-                    Text("Gửi nhanh .ipa, .3105, Pairing từ trình duyệt PC và tải file đã trích xuất về máy tính")
-                        .font(.system(size: 10, weight: .medium))
-                        .foregroundStyle(AppTheme.subduedText)
-                }
-                .padding(.horizontal, 3)
-                .padding(.top, 2)
-
-                AirliftServerCard()
-                    .padding(.bottom, 2)
+                systemMobileShortcutCard
 
                 appDataScannerSection
 
                 if !apps.isEmpty {
-                    appSearchField
-                        .padding(.top, 2)
-
-                    appAccessFilterBar
-                        .padding(.bottom, 2)
-
                     HStack(alignment: .lastTextBaseline) {
                         VStack(alignment: .leading, spacing: 3) {
-                            Text(hasAppSearchQuery ? "KẾT QUẢ TÌM KIẾM & LỌC" : "ỨNG DỤNG & GAME ĐÃ PHÁT HIỆN")
+                            Text(hasAppSearchQuery ? "KẾT QUẢ TÌM KIẾM" : "ỨNG DỤNG ĐÃ PHÁT HIỆN")
                                 .font(.system(size: 10, weight: .heavy, design: .rounded))
                                 .tracking(1.25)
                                 .foregroundStyle(AppTheme.accentSoft)
@@ -283,13 +179,13 @@ struct AppDataBrowserView: View {
                         Spacer()
                     }
                     .padding(.horizontal, 3)
-                    .padding(.top, 4)
+                    .padding(.top, 6)
 
                     if filteredApps.isEmpty {
                         appSearchEmptyState
                     } else {
                         ForEach(filteredApps) { app in
-                            appNavigationRow(app, badge: accessBadgeInfo(for: app, devLookup: devLookup))
+                            appNavigationRow(app)
                         }
                     }
                 }
@@ -314,8 +210,8 @@ struct AppDataBrowserView: View {
                 .fill(
                     LinearGradient(
                         colors: [
-                            Color(red: 0.19, green: 0.22, blue: 0.28),
-                            Color(red: 0.085, green: 0.105, blue: 0.14),
+                            Color(red: 0.25, green: 0.050, blue: 0.075),
+                            Color(red: 0.11, green: 0.024, blue: 0.038),
                             AppTheme.consoleBackground
                         ],
                         startPoint: .topLeading,
@@ -325,7 +221,7 @@ struct AppDataBrowserView: View {
 
             VStack(alignment: .leading, spacing: 14) {
                 HStack {
-                    StudioEyebrow(text: "PHUCVN  /  DATA STUDIO")
+                    StudioEyebrow(text: "TOBI AIM  /  DATA STUDIO")
                     Spacer(minLength: 8)
                     HStack(spacing: 6) {
                         Circle()
@@ -444,20 +340,15 @@ struct AppDataBrowserView: View {
     }
 
     private var patchesShortcutCard: some View {
-        let validPatchesURL = patchesURL.flatMap {
-            ContainerStore.validatedLocalFileURL(fromPath: $0.path, isDirectory: true)
-        }
-        let destination = validPatchesURL.map { url in
-            FileBrowserDestination(
-                containerPath: url.path,
-                startPath: url.path,
-                title: "Kho bản vá (.3105)",
-                bundleID: nil
-            )
-        }
+        let destination = FileBrowserDestination(
+            containerPath: patchesURL?.path ?? "",
+            startPath: patchesURL?.path ?? "",
+            title: "Kho bản vá (.3105)",
+            bundleID: nil
+        )
 
         return Button {
-            if let destination {
+            if let patchesURL {
                 pushDestination(destination)
             }
         } label: {
@@ -485,38 +376,29 @@ struct AppDataBrowserView: View {
         }
         .buttonStyle(AppPressableStyle())
         .contextMenu {
-            if let destination {
-                openInNewTabButton(destination)
-            }
+            openInNewTabButton(destination)
         }
     }
 
-    private var sandboxShortcutCard: some View {
-        let validSandboxURL = ContainerStore.validatedLocalFileURL(
-            fromPath: ContainerStore.ownSandboxRootURL.path,
-            isDirectory: true
+    private var systemMobileShortcutCard: some View {
+        let mobilePath = "/var/mobile"
+        let destination = FileBrowserDestination(
+            containerPath: mobilePath,
+            startPath: mobilePath,
+            title: "Tệp thiết bị (/var/mobile)",
+            bundleID: nil
         )
-        let destination = validSandboxURL.map { url in
-            FileBrowserDestination(
-                containerPath: url.path,
-                startPath: url.path,
-                title: "Hộp cát ứng dụng (Sandbox)",
-                bundleID: ContainerStore.ownBundleID
-            )
-        }
 
         return Button {
-            if let destination {
-                pushDestination(destination)
-            }
+            pushDestination(destination)
         } label: {
             HStack(spacing: 13) {
                 AppRowIcon(systemName: "internaldrive.fill", tint: AppTheme.silverGlow, symbolSize: 19, frameSize: 45)
                 VStack(alignment: .leading, spacing: 4) {
-                    Text("Hộp cát ứng dụng (Sandbox)")
+                    Text("Tệp thiết bị (/var/mobile)")
                         .font(.system(size: 13, weight: .bold, design: .rounded))
                         .foregroundStyle(.white)
-                    Text("Duyệt Documents, Library & tmp hợp lệ qua API iOS")
+                    Text("Duyệt tệp người dùng và thư mục trên iPhone")
                         .font(.system(size: 10, weight: .medium))
                         .foregroundStyle(AppTheme.subduedText)
                 }
@@ -534,171 +416,8 @@ struct AppDataBrowserView: View {
         }
         .buttonStyle(AppPressableStyle())
         .contextMenu {
-            if let destination {
-                openInNewTabButton(destination)
-            }
-        }
-    }
-
-    private func diagnosticsShortcutCard(_ url: URL) -> some View {
-        let destination = FileBrowserDestination(
-            containerPath: url.path,
-            startPath: url.path,
-            title: "Nhật ký & USB Diagnostics",
-            bundleID: ContainerStore.ownBundleID
-        )
-
-        return Button {
-            AppLog.shared.writeDiagnosticsSnapshot()
-            pushDestination(destination)
-        } label: {
-            HStack(spacing: 13) {
-                AppRowIcon(systemName: "cable.connector", tint: AppTheme.info, symbolSize: 19, frameSize: 45)
-                VStack(alignment: .leading, spacing: 4) {
-                    Text("Nhật ký & USB Diagnostics")
-                        .font(.system(size: 13, weight: .bold, design: .rounded))
-                        .foregroundStyle(.white)
-                    Text("Thư mục Documents/3105-Diagnostics đọc trực tiếp qua USB")
-                        .font(.system(size: 10, weight: .medium))
-                        .foregroundStyle(AppTheme.subduedText)
-                }
-                Spacer()
-                Image(systemName: "arrow.up.right")
-                    .font(.system(size: 11, weight: .bold))
-                    .foregroundStyle(AppTheme.info)
-                    .frame(width: 31, height: 31)
-                    .background(AppTheme.info.opacity(0.10), in: Circle())
-            }
-            .padding(13)
-            .frame(maxWidth: .infinity, alignment: .leading)
-            .background(cardSurface(tint: AppTheme.info))
-            .contentShape(RoundedRectangle(cornerRadius: 21, style: .continuous))
-        }
-        .buttonStyle(AppPressableStyle())
-        .contextMenu {
             openInNewTabButton(destination)
         }
-    }
-
-    private var sharedMediaShortcutCard: some View {
-        let destination = FileBrowserDestination(
-            containerPath: LocalDevVirtualPath.mediaRootPath,
-            startPath: LocalDevVirtualPath.mediaRootPath,
-            title: "Bộ nhớ Media dùng chung (/var/mobile/Media)",
-            bundleID: nil
-        )
-
-        return Button {
-            pushDestination(destination)
-        } label: {
-            HStack(spacing: 13) {
-                AppRowIcon(systemName: "externaldrive.fill.badge.wifi", tint: .cyan, symbolSize: 18, frameSize: 45)
-                VStack(alignment: .leading, spacing: 4) {
-                    Text("Bộ nhớ Media dùng chung (/var/mobile/Media)")
-                        .font(.system(size: 13, weight: .bold, design: .rounded))
-                        .foregroundStyle(.white)
-                    Text("Duyệt riêng afc.shim.remote để kiểm tra & dọn thư mục rác airlift-dir-src-*")
-                        .font(.system(size: 10, weight: .medium))
-                        .foregroundStyle(AppTheme.subduedText)
-                }
-                Spacer()
-                Image(systemName: "arrow.up.right")
-                    .font(.system(size: 11, weight: .bold))
-                    .foregroundStyle(.cyan)
-                    .frame(width: 31, height: 31)
-                    .background(Color.cyan.opacity(0.12), in: Circle())
-            }
-            .padding(13)
-            .frame(maxWidth: .infinity, alignment: .leading)
-            .background(cardSurface(tint: .cyan))
-            .contentShape(RoundedRectangle(cornerRadius: 21, style: .continuous))
-        }
-        .buttonStyle(AppPressableStyle())
-        .contextMenu {
-            openInNewTabButton(destination)
-        }
-    }
-
-    private var appAccessFilterBar: some View {
-        let devLookup = localDevAppByBundleID
-        let matched = queryMatchedApps
-        let accessibleCount = matched.filter { !accessBadgeInfo(for: $0, devLookup: devLookup).isSandboxLocked }.count
-        let lockedCount = matched.count - accessibleCount
-
-        return ScrollView(.horizontal, showsIndicators: false) {
-            HStack(spacing: 8) {
-                accessFilterChip(.all, title: "Tất cả", count: matched.count, tint: AppTheme.accent)
-                accessFilterChip(.accessible, title: "Mở được", count: accessibleCount, tint: AppTheme.success)
-                accessFilterChip(.sandboxLocked, title: "Khóa Sandbox", count: lockedCount, tint: .orange)
-            }
-            .padding(.horizontal, 2)
-        }
-    }
-
-    private func accessFilterChip(
-        _ filter: AppAccessFilter,
-        title: String,
-        count: Int,
-        tint: Color
-    ) -> some View {
-        let isSelected = accessFilter == filter
-        return Button {
-            withAnimation(interfaceAnimation) {
-                accessFilter = filter
-            }
-        } label: {
-            HStack(spacing: 5) {
-                Text(title)
-                    .font(.system(size: 11, weight: .bold, design: .rounded))
-                Text("\(count)")
-                    .font(.system(size: 10, weight: .heavy, design: .monospaced))
-                    .monospacedDigit()
-                    .padding(.horizontal, 5)
-                    .padding(.vertical, 1.5)
-                    .background(
-                        (isSelected ? Color.black.opacity(0.18) : Color.white.opacity(0.10)),
-                        in: Capsule()
-                    )
-            }
-            .foregroundStyle(isSelected ? Color.black : Color.white.opacity(0.88))
-            .padding(.horizontal, 11)
-            .padding(.vertical, 6)
-            .background(
-                isSelected ? tint : AppTheme.elevatedBackground.opacity(0.88),
-                in: Capsule()
-            )
-            .overlay {
-                Capsule().strokeBorder(isSelected ? tint : Color.white.opacity(0.12), lineWidth: 1)
-            }
-        }
-        .buttonStyle(AppPressableStyle())
-    }
-
-    private var sandboxScopeNoticeCard: some View {
-        HStack(alignment: .top, spacing: 11) {
-            Image(systemName: "checkmark.shield.fill")
-                .font(.system(size: 15, weight: .bold))
-                .foregroundStyle(AppTheme.success)
-                .padding(.top, 2)
-
-            VStack(alignment: .leading, spacing: 4) {
-                Text("iOS \(AppInfo.osVersion) · Chế độ Sandbox chuẩn (Non-JB)")
-                    .font(.system(size: 12, weight: .bold, design: .rounded))
-                    .foregroundStyle(.white)
-                Text(
-                    localDevBridge.currentStatus.isLive
-                        ? "LocalDev đã kết nối: hiển thị toàn bộ ứng dụng & game User kèm nhãn quyền truy cập (Toàn quyền / Chỉ Documents / Bị khóa Sandbox)."
-                        : "iOS non-JB chặn app đọc trực tiếp container app khác (đây là cơ chế bảo mật Sandbox, không phải lỗi phiên bản iOS). Hãy dùng Documents, 3105-Diagnostics qua USB hoặc bật LocalDev."
-                )
-                .font(.system(size: 10, weight: .medium))
-                .foregroundStyle(AppTheme.subduedText)
-                .fixedSize(horizontal: false, vertical: true)
-            }
-            Spacer(minLength: 0)
-        }
-        .padding(13)
-        .frame(maxWidth: .infinity, alignment: .leading)
-        .background(cardSurface(tint: AppTheme.success))
     }
 
     private var appDataScannerSection: some View {
@@ -709,11 +428,7 @@ struct AppDataBrowserView: View {
                     Text("Kho dữ liệu ứng dụng")
                         .font(.system(size: 13, weight: .bold, design: .rounded))
                         .foregroundStyle(.white)
-                    Text(
-                        !localDevBridge.isModuleEnabled
-                            ? "LocalDev đang tắt — đang duyệt an toàn trong Hộp cát (Sandbox) của app"
-                            : (apps.isEmpty ? "Quét toàn bộ ứng dụng & game User đã cài trên thiết bị" : "Đã phát hiện \(apps.count) ứng dụng & game trên thiết bị")
-                    )
+                    Text(apps.isEmpty ? "Chỉ quét khi bạn cần mở thư mục Data riêng của app khác" : "Đã phát hiện \(apps.count) vùng dữ liệu ứng dụng")
                         .font(.system(size: 10, weight: .medium))
                         .foregroundStyle(AppTheme.subduedText)
                 }
@@ -747,7 +462,7 @@ struct AppDataBrowserView: View {
                     } else {
                         Image(systemName: apps.isEmpty ? "arrow.triangle.2.circlepath" : "arrow.clockwise")
                             .font(.system(size: 12, weight: .bold))
-                        Text(apps.isEmpty ? "Quét toàn bộ ứng dụng & game" : "Quét lại ứng dụng & game")
+                        Text(apps.isEmpty ? "Bắt đầu quét kho ứng dụng" : "Quét lại danh sách ứng dụng")
                             .font(.system(size: 12, weight: .bold))
                     }
                 }
@@ -806,7 +521,7 @@ struct AppDataBrowserView: View {
     }
 
     @ViewBuilder
-    private func appNavigationRow(_ app: InstalledApp, badge: AppAccessBadge) -> some View {
+    private func appNavigationRow(_ app: InstalledApp) -> some View {
         let destination = FileBrowserDestination(
             containerPath: app.containerPath,
             startPath: app.containerPath,
@@ -815,13 +530,13 @@ struct AppDataBrowserView: View {
         )
 
         if app.containerPath.isEmpty {
-            appCard(app, isAvailable: false, badge: badge)
+            appCard(app, isAvailable: false)
                 .accessibilityHint("Không tìm thấy đường dẫn dữ liệu của ứng dụng này")
         } else {
             Button {
                 pushDestination(destination)
             } label: {
-                appCard(app, isAvailable: true, badge: badge)
+                appCard(app, isAvailable: true)
                     .frame(maxWidth: .infinity, alignment: .leading)
                     .contentShape(RoundedRectangle(cornerRadius: 21, style: .continuous))
             }
@@ -834,11 +549,8 @@ struct AppDataBrowserView: View {
         }
     }
 
-    private func appCard(_ app: InstalledApp, isAvailable: Bool, badge: AppAccessBadge? = nil) -> some View {
-        let resolvedBadge = badge ?? ("Bị khóa Sandbox", "lock.fill", Color.orange, true)
-        let isLocked = !isAvailable || resolvedBadge.isSandboxLocked
-
-        return HStack(spacing: 13) {
+    private func appCard(_ app: InstalledApp, isAvailable: Bool) -> some View {
+        HStack(spacing: 13) {
             BrowserAppIcon(app: app)
                 .frame(width: 47, height: 47)
                 .background(
@@ -872,36 +584,38 @@ struct AppDataBrowserView: View {
                     .lineLimit(1)
                     .truncationMode(.middle)
 
-                HStack(spacing: 6) {
-                    if !app.version.isEmpty {
+                if !app.version.isEmpty {
+                    HStack(spacing: 6) {
                         Text("VERSION  \(app.version)")
                             .font(.system(size: 8, weight: .bold, design: .monospaced))
                             .tracking(0.45)
                             .foregroundStyle(AppTheme.accentSoft.opacity(0.86))
                             .lineLimit(1)
-                    }
 
-                    HStack(spacing: 3) {
-                        Image(systemName: resolvedBadge.icon)
-                            .font(.system(size: 7, weight: .bold))
-                        Text(resolvedBadge.title)
-                            .font(.system(size: 7.5, weight: .bold))
+                        if let devApp = LocalDevBridge.shared.installedApps.first(where: { $0.bundle_id == app.bundleID }) {
+                            Text(devApp.accessBadgeTitle)
+                                .font(.system(size: 7, weight: .bold))
+                                .foregroundStyle(devApp.accessBadgeColor)
+                                .padding(.horizontal, 5)
+                                .padding(.vertical, 1.5)
+                                .background(devApp.accessBadgeColor.opacity(0.12), in: Capsule())
+                        }
                     }
-                    .foregroundStyle(resolvedBadge.color)
-                    .padding(.horizontal, 6)
-                    .padding(.vertical, 2)
-                    .background(resolvedBadge.color.opacity(0.14), in: Capsule())
-                    .overlay {
-                        Capsule().strokeBorder(resolvedBadge.color.opacity(0.28), lineWidth: 0.5)
-                    }
+                } else if let devApp = LocalDevBridge.shared.installedApps.first(where: { $0.bundle_id == app.bundleID }) {
+                    Text(devApp.accessBadgeTitle)
+                        .font(.system(size: 7, weight: .bold))
+                        .foregroundStyle(devApp.accessBadgeColor)
+                        .padding(.horizontal, 5)
+                        .padding(.vertical, 1.5)
+                        .background(devApp.accessBadgeColor.opacity(0.12), in: Capsule())
                 }
             }
 
             Spacer(minLength: 4)
 
-            Image(systemName: isLocked ? "lock.fill" : "chevron.right")
+            Image(systemName: isAvailable ? "chevron.right" : "lock.fill")
                 .font(.system(size: 11, weight: .bold))
-                .foregroundStyle(!isAvailable ? AppTheme.subduedText : (isLocked ? Color.orange : AppTheme.accent))
+                .foregroundStyle(isAvailable ? AppTheme.accent : AppTheme.subduedText)
                 .frame(width: 31, height: 31)
                 .background(Color.white.opacity(0.065), in: Circle())
                 .overlay { Circle().strokeBorder(Color.white.opacity(0.10), lineWidth: 1) }
@@ -909,8 +623,8 @@ struct AppDataBrowserView: View {
         .padding(.horizontal, 13)
         .padding(.vertical, 12)
         .frame(minHeight: 76)
-        .background(cardSurface(tint: isLocked ? Color.orange : AppTheme.accentSoft))
-        .opacity(!isAvailable ? 0.58 : (isLocked ? 0.85 : 1))
+        .background(cardSurface(tint: isAvailable ? AppTheme.accentSoft : AppTheme.subduedText))
+        .opacity(isAvailable ? 1 : 0.58)
     }
 
     private func cardSurface(tint: Color) -> some View {
@@ -924,25 +638,17 @@ struct AppDataBrowserView: View {
     }
 
     private var appSearchEmptyState: some View {
-        let trimmedQuery = appSearchText.trimmingCharacters(in: .whitespacesAndNewlines)
-        return VStack(spacing: 11) {
+        VStack(spacing: 11) {
             Image(systemName: "magnifyingglass")
                 .font(.system(size: 27, weight: .light))
                 .foregroundStyle(AppTheme.accentSoft)
-            Text(
-                trimmedQuery.isEmpty
-                    ? "Không có ứng dụng nào trong nhóm bộ lọc hiện tại."
-                    : language.text("browser.search_apps_no_results", appSearchText)
-            )
+            Text(language.text("browser.search_apps_no_results", appSearchText))
                 .font(.system(size: 12, weight: .semibold))
                 .foregroundStyle(AppTheme.subduedText)
                 .multilineTextAlignment(.center)
 
-            Button(trimmedQuery.isEmpty ? "Hiển thị tất cả" : language.text("browser.clear_search")) {
-                withAnimation(interfaceAnimation) {
-                    appSearchText = ""
-                    accessFilter = .all
-                }
+            Button(language.text("browser.clear_search")) {
+                withAnimation(interfaceAnimation) { appSearchText = "" }
             }
             .font(.system(size: 11, weight: .bold, design: .rounded))
             .foregroundStyle(AppTheme.pageBackground)
@@ -1017,166 +723,119 @@ struct AppDataBrowserView: View {
         errorMessage = nil
         let emptyMessage = language.text("browser.empty")
 
-        let finishWithApps: ([LocalDevApp]) -> Void = { localApps in
-            DispatchQueue.global(qos: .userInitiated).async {
-                let localDevApps: [InstalledApp] = localApps.map { lApp in
-                    let preferredPath: String
-                    if ContainerStore.isWithinOwnSandbox(lApp.container_path ?? "") ||
-                        (ContainerStore.hasPrivilegedContainerAccess() && !(lApp.container_path ?? "").isEmpty) {
-                        preferredPath = lApp.container_path ?? LocalDevVirtualPath.rootPath(bundleID: lApp.bundle_id)
-                    } else {
-                        preferredPath = LocalDevVirtualPath.rootPath(bundleID: lApp.bundle_id)
-                    }
-                    return InstalledApp(
+        if LocalDevBridge.shared.currentStatus.isLive {
+            LocalDevBridge.shared.scanApplications()
+        }
+
+        DispatchQueue.global(qos: .userInitiated).async {
+            var localDevApps: [InstalledApp] = []
+            if !LocalDevBridge.shared.installedApps.isEmpty {
+                localDevApps = LocalDevBridge.shared.installedApps.map { lApp in
+                    InstalledApp(
                         bundleID: lApp.bundle_id,
                         name: lApp.display_name,
-                        containerPath: preferredPath,
+                        containerPath: lApp.container_path ?? "/var/mobile/Containers/Data/Application/\(lApp.bundle_id)",
                         version: lApp.version,
                         icon: nil
                     )
                 }
+            }
 
-                guard ContainerStore.hasPrivilegedContainerAccess() else {
-                    ContainerStore.logSandboxModeNoticeOnce(context: "browser")
-                    let sandboxApps = AppDataCatalogMerger.merge(
-                        identified: [ContainerStore.ownInstalledApp] + localDevApps,
-                        fallback: [],
-                        identifier: { $0.bundleID },
-                        path: { $0.containerPath }
-                    ).filter {
-                        ContainerPresentationPolicy.shouldShow(bundleID: $0.bundleID)
-                    }.sorted {
-                        $0.displayName.localizedCaseInsensitiveCompare($1.displayName) == .orderedAscending
-                    }
+            let bundleMetadata = ContainerStore.applicationBundleMetadataCatalog()
+            let apiApps = ContainerStore.applyingBundleMetadata(
+                to: ContainerStore.installedAppsFromAPI(),
+                catalog: bundleMetadata
+            )
+            let dynamicIdentifiers = ContainerStore.dynamicAppIdentifiers()
+            let mcmApps = ContainerStore.installedAppsFromMCM(
+                identifiers: dynamicIdentifiers,
+                bundleMetadata: bundleMetadata
+            )
+            let filesystemApps = ContainerStore.containersFromFilesystem()
+            let baseIdentifiedApps = mcmApps + apiApps + localDevApps
+            var result = ContainerDiscoveryMerger.merge(
+                enumerated: filesystemApps,
+                identified: baseIdentifiedApps,
+                path: { $0.containerPath }
+            )
+            result.sort { $0.displayName.localizedCaseInsensitiveCompare($1.displayName) == .orderedAscending }
 
-                    DispatchQueue.main.async {
-                        guard requestID == reloadGeneration else { return }
-                        apps = sandboxApps
-                        isLoading = false
-                        isResolving = false
-                        if sandboxApps.isEmpty {
-                            errorMessage = emptyMessage
-                        }
-                        AppLog.shared.writeDiagnosticsSnapshot()
-                    }
-                    return
-                }
+            let preliminary = result.filter {
+                ContainerPresentationPolicy.shouldShow(bundleID: $0.bundleID)
+            }
+            DispatchQueue.main.async {
+                guard requestID == reloadGeneration else { return }
+                apps = preliminary
+                isLoading = false
+            }
 
-                let bundleMetadata = ContainerStore.applicationBundleMetadataCatalog()
-                let apiApps = ContainerStore.applyingBundleMetadata(
-                    to: ContainerStore.installedAppsFromAPI(),
-                    catalog: bundleMetadata
-                )
-                let dynamicIdentifiers = ContainerStore.dynamicAppIdentifiers()
-                let mcmApps = ContainerStore.installedAppsFromMCM(
-                    identifiers: dynamicIdentifiers,
-                    bundleMetadata: bundleMetadata
-                )
-                let filesystemApps = ContainerStore.containersFromFilesystem()
-                let baseIdentifiedApps = mcmApps + apiApps + localDevApps
-                var result = ContainerDiscoveryMerger.merge(
-                    enumerated: filesystemApps,
-                    identified: baseIdentifiedApps,
-                    path: { $0.containerPath }
-                )
-                result.sort { $0.displayName.localizedCaseInsensitiveCompare($1.displayName) == .orderedAscending }
+            let launchServicesIdentifiers = ContainerStore.launchServicesStoreIdentifiers()
+            let mhaIdentifiers = MHAIdentifierCatalog.identifiers(
+                dynamic: dynamicIdentifiers,
+                installed: apiApps.map(\.bundleID),
+                research: ContainerStore.researchAppIdentifiers,
+                custom: bundleMetadata.keys.sorted(),
+                launchServices: launchServicesIdentifiers
+            )
 
-                let preliminary = result.filter {
-                    ContainerPresentationPolicy.shouldShow(bundleID: $0.bundleID)
-                }
-                DispatchQueue.main.async {
-                    guard requestID == reloadGeneration else { return }
-                    apps = preliminary
-                    isLoading = false
-                }
-
-                let launchServicesIdentifiers = ContainerStore.launchServicesStoreIdentifiers()
-                let mhaIdentifiers = MHAIdentifierCatalog.identifiers(
-                    dynamic: dynamicIdentifiers,
-                    installed: apiApps.map(\.bundleID),
-                    research: ContainerStore.researchAppIdentifiers,
-                    custom: bundleMetadata.keys.sorted(),
-                    launchServices: launchServicesIdentifiers
-                )
-
-                let mhaApps = ContainerStore.installedAppsFromMHACandidates(
-                    identifiers: mhaIdentifiers,
-                    bundleMetadata: bundleMetadata
-                ) { discoveredApps in
-                    var progressiveResult = AppDataCatalogMerger.merge(
-                        identified: discoveredApps + baseIdentifiedApps,
-                        fallback: [],
-                        identifier: { $0.bundleID },
-                        path: { $0.containerPath }
-                    )
-                    progressiveResult = progressiveResult.filter {
-                        ContainerPresentationPolicy.shouldShow(bundleID: $0.bundleID)
-                    }
-                    progressiveResult.sort {
-                        $0.displayName.localizedCaseInsensitiveCompare($1.displayName) == .orderedAscending
-                    }
-                    DispatchQueue.main.async {
-                        guard requestID == reloadGeneration else { return }
-                        apps = progressiveResult
-                    }
-                }
-
-                let allKnownApps = mhaApps + baseIdentifiedApps
-                let identifiedPaths = Set(allKnownApps.map {
-                    ContainerDiscoveryMerger.canonicalPath($0.containerPath)
-                })
-                let unmatchedFilesystemApps = filesystemApps.filter {
-                    !identifiedPaths.contains(ContainerDiscoveryMerger.canonicalPath($0.containerPath))
-                }
-                let inferredFilesystemApps = ContainerStore.inferUnidentifiedApps(
-                    in: unmatchedFilesystemApps,
-                    knownApps: allKnownApps,
-                    launchServicesIdentifiers: Set(launchServicesIdentifiers)
-                ).filter {
-                    ContainerPresentationPolicy.shouldShow(bundleID: $0.bundleID)
-                }
-                result = AppDataCatalogMerger.merge(
-                    identified: allKnownApps,
-                    fallback: inferredFilesystemApps,
+            let mhaApps = ContainerStore.installedAppsFromMHACandidates(
+                identifiers: mhaIdentifiers,
+                bundleMetadata: bundleMetadata
+            ) { discoveredApps in
+                var progressiveResult = AppDataCatalogMerger.merge(
+                    identified: discoveredApps + baseIdentifiedApps,
+                    fallback: [],
                     identifier: { $0.bundleID },
                     path: { $0.containerPath }
                 )
-                result = result.filter {
+                progressiveResult = progressiveResult.filter {
                     ContainerPresentationPolicy.shouldShow(bundleID: $0.bundleID)
                 }
-                result.sort { $0.displayName.localizedCaseInsensitiveCompare($1.displayName) == .orderedAscending }
-
+                progressiveResult.sort {
+                    $0.displayName.localizedCaseInsensitiveCompare($1.displayName) == .orderedAscending
+                }
                 DispatchQueue.main.async {
                     guard requestID == reloadGeneration else { return }
-                    apps = result
-                    isLoading = false
-                    isResolving = false
-                    if result.isEmpty {
-                        errorMessage = emptyMessage
-                    }
-                    AppLog.shared.writeDiagnosticsSnapshot()
+                    apps = progressiveResult
+                }
+            }
+
+            let allKnownApps = mhaApps + baseIdentifiedApps
+            let identifiedPaths = Set(allKnownApps.map {
+                ContainerDiscoveryMerger.canonicalPath($0.containerPath)
+            })
+            let unmatchedFilesystemApps = filesystemApps.filter {
+                !identifiedPaths.contains(ContainerDiscoveryMerger.canonicalPath($0.containerPath))
+            }
+            let inferredFilesystemApps = ContainerStore.inferUnidentifiedApps(
+                in: unmatchedFilesystemApps,
+                knownApps: allKnownApps,
+                launchServicesIdentifiers: Set(launchServicesIdentifiers)
+            ).filter {
+                ContainerPresentationPolicy.shouldShow(bundleID: $0.bundleID)
+            }
+            result = AppDataCatalogMerger.merge(
+                identified: allKnownApps,
+                fallback: inferredFilesystemApps,
+                identifier: { $0.bundleID },
+                path: { $0.containerPath }
+            )
+            result = result.filter {
+                ContainerPresentationPolicy.shouldShow(bundleID: $0.bundleID)
+            }
+            result.sort { $0.displayName.localizedCaseInsensitiveCompare($1.displayName) == .orderedAscending }
+
+            DispatchQueue.main.async {
+                guard requestID == reloadGeneration else { return }
+                apps = result
+                isLoading = false
+                isResolving = false
+                if result.isEmpty {
+                    errorMessage = emptyMessage
                 }
             }
         }
-
-        if LocalDevBridge.shared.currentStatusSnapshot.isLive {
-            LocalDevBridge.shared.scanApplications { scannedApps in
-                guard requestID == reloadGeneration else { return }
-                finishWithApps(scannedApps)
-            }
-        } else {
-            // Keep own-Sandbox app discovery completely functional even if LocalDev/Pairing has failed.
-            finishWithApps([])
-        }
     }
-}
-
-private enum AppAccessFilter: String, CaseIterable, Identifiable {
-    case all
-    case accessible
-    case sandboxLocked
-
-    var id: String { rawValue }
 }
 
 private enum AppBrowserOverlayState: Equatable {

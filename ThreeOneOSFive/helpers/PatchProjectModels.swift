@@ -54,8 +54,6 @@ struct PatchProject: Codable, Identifiable, Hashable {
     var bundleIdentifiers: [String]
     var directories: [PatchDirectory]
     var rules: [PatchRule]
-    var appGroupIdentifier: String?
-    var systemAppGroupIdentifier: String?
 
     init(
         id: UUID = UUID(),
@@ -66,9 +64,7 @@ struct PatchProject: Codable, Identifiable, Hashable {
         updatedAt: Date = Date(),
         bundleIdentifiers: [String] = [],
         directories: [PatchDirectory] = [],
-        rules: [PatchRule],
-        appGroupIdentifier: String? = nil,
-        systemAppGroupIdentifier: String? = nil
+        rules: [PatchRule]
     ) {
         self.id = id
         self.name = name
@@ -79,21 +75,12 @@ struct PatchProject: Codable, Identifiable, Hashable {
         self.bundleIdentifiers = bundleIdentifiers
         self.directories = directories
         self.rules = rules
-        self.appGroupIdentifier = appGroupIdentifier
-        self.systemAppGroupIdentifier = systemAppGroupIdentifier
     }
 
     var allBundleIdentifiers: [String] {
         var seen = Set<String>()
         return (bundleIdentifiers + directories.map(\.bundleID) + rules.map(\.bundleID))
             .filter { seen.insert($0).inserted }
-    }
-
-    var declaredAppGroupIdentifiers: [String] {
-        var seen = Set<String>()
-        return [appGroupIdentifier, systemAppGroupIdentifier]
-            .compactMap { $0?.trimmingCharacters(in: .whitespacesAndNewlines) }
-            .filter { !$0.isEmpty && seen.insert($0).inserted }
     }
 
     private enum CodingKeys: String, CodingKey {
@@ -106,10 +93,6 @@ struct PatchProject: Codable, Identifiable, Hashable {
         case bundleIdentifiers
         case directories
         case rules
-        case appGroupIdentifier
-        case systemAppGroupIdentifier
-        case appGroupIdentifierSnake = "app_group_identifier"
-        case systemAppGroupIdentifierSnake = "system_app_group_identifier"
     }
 
     init(from decoder: Decoder) throws {
@@ -129,10 +112,6 @@ struct PatchProject: Codable, Identifiable, Hashable {
             forKey: .directories
         ) ?? []
         rules = try container.decode([PatchRule].self, forKey: .rules)
-        appGroupIdentifier = try container.decodeIfPresent(String.self, forKey: .appGroupIdentifier)
-            ?? (try container.decodeIfPresent(String.self, forKey: .appGroupIdentifierSnake))
-        systemAppGroupIdentifier = try container.decodeIfPresent(String.self, forKey: .systemAppGroupIdentifier)
-            ?? (try container.decodeIfPresent(String.self, forKey: .systemAppGroupIdentifierSnake))
     }
 
     func encode(to encoder: Encoder) throws {
@@ -146,8 +125,6 @@ struct PatchProject: Codable, Identifiable, Hashable {
         try container.encode(bundleIdentifiers, forKey: .bundleIdentifiers)
         try container.encode(directories, forKey: .directories)
         try container.encode(rules, forKey: .rules)
-        try container.encodeIfPresent(appGroupIdentifier, forKey: .appGroupIdentifier)
-        try container.encodeIfPresent(systemAppGroupIdentifier, forKey: .systemAppGroupIdentifier)
     }
 }
 
@@ -274,6 +251,8 @@ enum PatchPackageLimits {
 }
 
 enum PatchPathValidator {
+    private static let applicationRoot = "/private/var/mobile/Containers/Data/Application"
+
     static func canonicalBundleIdentifier(_ rawValue: String) throws -> String {
         let value = rawValue.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !value.isEmpty,
@@ -337,7 +316,9 @@ enum PatchPathValidator {
         let path = try canonicalRelativePath(relativePath)
         let root = canonicalFileURL(containerRoot)
 
-        guard ContainerStore.isApplicationContainerPath(root.path) else {
+        guard root.deletingLastPathComponent().path == applicationRoot,
+              UUID(uuidString: root.lastPathComponent) != nil
+        else {
             throw PatchPackageError.unsafeTargetPath
         }
 
@@ -355,9 +336,7 @@ enum PatchPathValidator {
     }
 
     static func canonicalFileURL(_ url: URL) -> URL {
-        guard url.isFileURL else { return url }
         var path = url.standardizedFileURL.path
-        guard !path.isEmpty, path.hasPrefix("/") else { return url }
         if path == "/var" || path.hasPrefix("/var/") {
             path = "/private" + path
         }

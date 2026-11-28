@@ -9,7 +9,6 @@ struct FileBrowserView: View {
     @Environment(\.horizontalSizeClass) private var horizontalSizeClass
     @EnvironmentObject private var patchDraftCoordinator: PatchDraftCoordinator
     @EnvironmentObject private var fileOperationCoordinator: FileOperationCoordinator
-    @ObservedObject private var backupExtractor = BackupExtractorService.shared
     let containerPath: String
     let title: String
     let bundleID: String?
@@ -20,9 +19,6 @@ struct FileBrowserView: View {
     @State private var searchText = ""
     @FocusState private var isSearchFocused: Bool
     @State private var isLoadingEntries = true
-    @State private var remoteErrorMessage: String?
-    @State private var airliftRouteInfo: AirLiftRouteInfo?
-    @State private var createZipOnBackup = true
     @State private var hasGranted = false
     @State private var pendingReplacementRequest: FileReplacementRequest?
     @State private var replacementRequest: FileReplacementRequest?
@@ -98,34 +94,6 @@ struct FileBrowserView: View {
                 .padding(.horizontal, AppTheme.pageInset)
                 .padding(.top, 12)
                 .padding(.bottom, 5)
-
-            if LocalDevVirtualPath.isMediaPath(currentPath) {
-                HStack(spacing: 6) {
-                    Image(systemName: "externaldrive.fill.badge.wifi")
-                        .font(.system(size: 11, weight: .bold))
-                        .foregroundStyle(.cyan)
-                    Text("AFC Media: /var/mobile/Media (afc.shim.remote)")
-                        .font(.system(size: 10.5, weight: .semibold, design: .monospaced))
-                        .foregroundStyle(AppTheme.subduedText)
-                        .lineLimit(1)
-                    Spacer()
-                }
-                .padding(.horizontal, AppTheme.pageInset)
-                .padding(.bottom, 4)
-            } else if let route = airliftRouteInfo, LocalDevVirtualPath.isLocalDevPath(currentPath) {
-                HStack(spacing: 6) {
-                    Image(systemName: route.fallback ? "arrow.triangle.branch" : "bolt.horizontal.circle.fill")
-                        .font(.system(size: 11, weight: .bold))
-                        .foregroundStyle(route.fallback ? Color.cyan : AppTheme.success)
-                    Text("AirLift: \(route.displayBadgeText)")
-                        .font(.system(size: 10.5, weight: .semibold, design: .monospaced))
-                        .foregroundStyle(AppTheme.subduedText)
-                        .lineLimit(1)
-                    Spacer()
-                }
-                .padding(.horizontal, AppTheme.pageInset)
-                .padding(.bottom, 4)
-            }
 
             List {
                 Section {
@@ -571,14 +539,8 @@ struct FileBrowserView: View {
         } label: {
             Label(language.text("browser.move"), systemImage: "folder")
         }
-        if let shareURL = ContainerStore.validatedLocalFileURL(
-            fromPath: entry.path,
-            isDirectory: entry.isDirectory,
-            requireExists: true
-        ) {
-            ShareLink(item: shareURL) {
-                Label(language.text("browser.share"), systemImage: "square.and.arrow.up")
-            }
+        ShareLink(item: URL(fileURLWithPath: entry.path)) {
+            Label(language.text("browser.share"), systemImage: "square.and.arrow.up")
         }
         Divider()
         if bundleID != nil {
@@ -623,13 +585,7 @@ struct FileBrowserView: View {
     }
 
     private func openDirectoryInNewTab(_ entry: FileEntry) {
-        guard entry.isDirectory, let filesTabSession else { return }
-        let isValidPath = LocalDevVirtualPath.isLocalDevPath(entry.path)
-            || ContainerStore.validatedLocalFileURL(fromPath: entry.path, isDirectory: true) != nil
-        guard isValidPath else {
-            log("filebrowser: ignored openDirectoryInNewTab with invalid path='\(entry.path)'")
-            return
-        }
+        guard let filesTabSession else { return }
         var updatedSession = filesTabSession.wrappedValue
         updatedSession.openTab(
             navigationPath: [
@@ -645,139 +601,13 @@ struct FileBrowserView: View {
     }
 
     private var fileEmptyView: some View {
-        VStack(spacing: 12) {
-            if let remoteErr = remoteErrorMessage, !remoteErr.isEmpty {
-                let isMedia = LocalDevVirtualPath.isMediaPath(currentPath)
-                let isSandboxLocked = !isMedia && remoteErr.localizedCaseInsensitiveContains("SANDBOX_LOCKED")
-                let targetBundleID = isMedia ? "" : (LocalDevVirtualPath.parse(currentPath)?.bundleID ?? bundleID ?? "")
-                let existingDir = targetBundleID.isEmpty ? nil : backupExtractor.existingExtractedDirectory(for: targetBundleID)
-                let isExtractingThis = backupExtractor.isRunning && backupExtractor.activeBundleID == targetBundleID
-
-                Image(systemName: isSandboxLocked ? "lock.shield.fill" : "exclamationmark.triangle.fill")
-                    .font(.system(size: AppTheme.emptyIconSize, weight: .light))
-                    .foregroundStyle(.orange)
-                Text(isSandboxLocked ? "Ứng dụng bị khóa Sandbox bởi iOS" : "Không thể mở thư mục qua LocalDev")
-                    .font(.subheadline.weight(.bold))
-                    .foregroundStyle(.white)
-                    .multilineTextAlignment(.center)
-                Text(
-                    isSandboxLocked
-                        ? "iOS chỉ cho phép HouseArrest đọc dữ liệu của app bật UIFileSharingEnabled hoặc app ký Developer. Game và app App Store thông thường bị khóa container bởi cơ chế bảo mật Sandbox."
-                        : remoteErr
-                )
-                .font(.caption)
+        VStack(spacing: 10) {
+            Image(systemName: "folder")
+                .font(.system(size: AppTheme.emptyIconSize, weight: .light))
+                .foregroundStyle(AppTheme.accentSoft)
+            Text(language.text("browser.empty_folder"))
+                .font(.subheadline.weight(.medium))
                 .foregroundStyle(AppTheme.subduedText)
-                .multilineTextAlignment(.center)
-                .padding(.horizontal, 12)
-
-                if isSandboxLocked && !targetBundleID.isEmpty {
-                    VStack(spacing: 10) {
-                        if isExtractingThis {
-                            VStack(spacing: 6) {
-                                ProgressView()
-                                    .tint(AppTheme.accent)
-                                Text(backupExtractor.statusText)
-                                    .font(.caption.weight(.semibold))
-                                    .foregroundStyle(.white)
-                                    .multilineTextAlignment(.center)
-                                Text("\(backupExtractor.filesReceived) tệp · \(ByteCountFormatter.string(fromByteCount: Int64(backupExtractor.bytesReceived), countStyle: .file))")
-                                    .font(.system(size: 11, design: .monospaced))
-                                    .foregroundStyle(AppTheme.accentSoft)
-                                Button("Hủy trích xuất") {
-                                    backupExtractor.cancel()
-                                }
-                                .font(.caption.weight(.bold))
-                                .foregroundStyle(.white)
-                                .padding(.horizontal, 14)
-                                .padding(.vertical, 7)
-                                .background(Color.red.opacity(0.35), in: Capsule())
-                            }
-                            .padding(12)
-                            .frame(maxWidth: 360)
-                            .background(AppTheme.consoleBackground, in: RoundedRectangle(cornerRadius: 14, style: .continuous))
-                        } else {
-                            Toggle("Đóng gói thêm file .zip trong Documents", isOn: $createZipOnBackup)
-                                .font(.caption.weight(.medium))
-                                .foregroundStyle(AppTheme.subduedText)
-                                .tint(AppTheme.accent)
-                                .frame(maxWidth: 320)
-
-                            Button {
-                                backupExtractor.startExtraction(bundleID: targetBundleID, createZip: createZipOnBackup)
-                            } label: {
-                                HStack(spacing: 7) {
-                                    Image(systemName: "externaldrive.badge.timemachine")
-                                        .font(.system(size: 13, weight: .bold))
-                                    Text("Trích xuất dữ liệu qua Backup (mobilebackup2)")
-                                        .font(.system(size: 12.5, weight: .bold, design: .rounded))
-                                }
-                                .foregroundStyle(.black)
-                                .padding(.horizontal, 16)
-                                .padding(.vertical, 11)
-                                .background(AppTheme.accent, in: Capsule())
-                            }
-                            .buttonStyle(AppPressableStyle())
-                            .disabled(backupExtractor.isRunning)
-                        }
-
-                        if let errMsg = backupExtractor.errorMessage,
-                           backupExtractor.activeBundleID == targetBundleID {
-                            Text(errMsg)
-                                .font(.caption)
-                                .foregroundStyle(.orange)
-                                .multilineTextAlignment(.center)
-                                .padding(.horizontal, 12)
-                        }
-
-                        if let completed = backupExtractor.lastResult,
-                           completed.bundleID == targetBundleID {
-                            VStack(spacing: 6) {
-                                Text(completed.warningMessage ?? "Đã trích xuất \(completed.extractedFileCount) tệp (\(ByteCountFormatter.string(fromByteCount: completed.totalBytes, countStyle: .file)))")
-                                    .font(.caption.weight(.semibold))
-                                    .foregroundStyle(completed.extractedFileCount > 0 ? AppTheme.success : .orange)
-                                    .multilineTextAlignment(.center)
-                                if let zipURL = completed.zipArchiveURL {
-                                    ShareLink(item: zipURL) {
-                                        Label("Chia sẻ / Tải \(zipURL.lastPathComponent)", systemImage: "square.and.arrow.up")
-                                            .font(.caption.weight(.bold))
-                                            .foregroundStyle(.black)
-                                            .padding(.horizontal, 13)
-                                            .padding(.vertical, 7)
-                                            .background(AppTheme.success, in: Capsule())
-                                    }
-                                }
-                            }
-                        }
-
-                        if let openDir = existingDir {
-                            Button {
-                                remoteErrorMessage = nil
-                                currentPath = openDir.path
-                                load()
-                            } label: {
-                                HStack(spacing: 6) {
-                                    Image(systemName: "folder.fill")
-                                    Text("Mở thư mục Backup đã trích xuất")
-                                }
-                                .font(.caption.weight(.bold))
-                                .foregroundStyle(.white)
-                                .padding(.horizontal, 14)
-                                .padding(.vertical, 8)
-                                .background(Color.white.opacity(0.12), in: Capsule())
-                            }
-                            .buttonStyle(AppPressableStyle())
-                        }
-                    }
-                    .padding(.top, 4)
-                }
-            } else {
-                Image(systemName: "folder")
-                    .font(.system(size: AppTheme.emptyIconSize, weight: .light))
-                    .foregroundStyle(AppTheme.accentSoft)
-                Text(language.text("browser.empty_folder"))
-                    .font(.subheadline.weight(.medium))
-                    .foregroundStyle(AppTheme.subduedText)
-            }
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
         .padding()
@@ -889,70 +719,7 @@ struct FileBrowserView: View {
         guard let prompt = namePrompt else { return }
         let requestedName = nameInput
         namePrompt = nil
-
-        if let parsedRemote = LocalDevVirtualPath.parse(currentPath) {
-            let trimmed = requestedName.trimmingCharacters(in: .whitespacesAndNewlines)
-            guard !trimmed.isEmpty, !trimmed.contains("/"), !trimmed.contains("..") else { return }
-            let targetRemote = parsedRemote.remotePath == "/"
-                ? "/\(trimmed)"
-                : "\(parsedRemote.remotePath.trimmingCharacters(in: CharacterSet(charactersIn: "/")).isEmpty ? "" : parsedRemote.remotePath)/\(trimmed)"
-            let remoteService = LocalDevVirtualPath.serviceType(for: currentPath)
-            switch prompt.action {
-            case .createFile:
-                performFileOperation(
-                    activity: language.text("browser.creating"),
-                    operationName: "remote create file"
-                ) {
-                    let res = writeRemoteVirtualFile(
-                        service: remoteService,
-                        bundleID: parsedRemote.bundleID,
-                        path: targetRemote,
-                        data: Data()
-                    )
-                    guard res.success else {
-                        throw NSError(
-                            domain: "com.phucvn.3105",
-                            code: 13,
-                            userInfo: [NSLocalizedDescriptionKey: res.error ?? "Không tạo được tệp từ xa"]
-                        )
-                    }
-                    return targetRemote
-                }
-            case .createFolder:
-                performFileOperation(
-                    activity: language.text("browser.creating"),
-                    operationName: "remote create folder"
-                ) {
-                    let res = LocalDevBridge.shared.createDirectory(
-                        service: remoteService,
-                        bundleID: parsedRemote.bundleID,
-                        path: targetRemote
-                    )
-                    guard res.success else {
-                        throw NSError(
-                            domain: "com.phucvn.3105",
-                            code: 13,
-                            userInfo: [NSLocalizedDescriptionKey: res.error ?? "Không tạo được thư mục từ xa"]
-                        )
-                    }
-                    return targetRemote
-                }
-            case .rename, .archive:
-                operationNotice = FileReplacementNotice(
-                    title: language.text("browser.operation_error_title"),
-                    message: "Tính năng đổi tên / nén ZIP chỉ áp dụng cho thư mục Sandbox cục bộ."
-                )
-            }
-            return
-        }
-
-        guard let directoryURL = ContainerStore.validatedLocalFileURL(
-            fromPath: currentPath,
-            isDirectory: true
-        ) else {
-            log("filebrowser: ignored name prompt action with invalid currentPath='\(currentPath)'")
-            return
-        }
+        let directoryURL = URL(fileURLWithPath: currentPath, isDirectory: true)
 
         switch prompt.action {
         case .createFile:
@@ -980,19 +747,8 @@ struct FileBrowserView: View {
                 activity: language.text("browser.renaming"),
                 operationName: "rename"
             ) {
-                guard let targetURL = ContainerStore.validatedLocalFileURL(
-                    fromPath: entry.path,
-                    isDirectory: entry.isDirectory,
-                    requireExists: true
-                ) else {
-                    throw NSError(
-                        domain: "com.phucvn.3105",
-                        code: 22,
-                        userInfo: [NSLocalizedDescriptionKey: "Đường dẫn tệp không hợp lệ"]
-                    )
-                }
-                return try FileManagerService.renameItem(
-                    at: targetURL,
+                try FileManagerService.renameItem(
+                    at: URL(fileURLWithPath: entry.path),
                     to: requestedName
                 ).path
             }
@@ -1010,22 +766,8 @@ struct FileBrowserView: View {
                     )
                 }
             ) {
-                let targetURLs = selectedEntries.compactMap {
-                    ContainerStore.validatedLocalFileURL(
-                        fromPath: $0.path,
-                        isDirectory: $0.isDirectory,
-                        requireExists: true
-                    )
-                }
-                guard !targetURLs.isEmpty else {
-                    throw NSError(
-                        domain: "com.phucvn.3105",
-                        code: 22,
-                        userInfo: [NSLocalizedDescriptionKey: "Không có tệp hợp lệ để nén"]
-                    )
-                }
-                return try FileManagerService.createZIPArchive(
-                    containing: targetURLs,
+                try FileManagerService.createZIPArchive(
+                    containing: selectedEntries.map { URL(fileURLWithPath: $0.path) },
                     named: requestedName,
                     in: directoryURL
                 ).archiveURL.path
@@ -1042,27 +784,7 @@ struct FileBrowserView: View {
             operationName: "delete"
         ) {
             for entry in targets {
-                if let parsed = LocalDevVirtualPath.parse(entry.path) {
-                    let remoteService = LocalDevVirtualPath.serviceType(for: entry.path)
-                    let res = LocalDevBridge.shared.removePath(
-                        service: remoteService,
-                        bundleID: parsed.bundleID,
-                        path: parsed.remotePath
-                    )
-                    guard res.success else {
-                        throw NSError(
-                            domain: "com.phucvn.3105",
-                            code: 13,
-                            userInfo: [NSLocalizedDescriptionKey: res.error ?? "Không xóa được tệp từ xa"]
-                        )
-                    }
-                } else if let targetURL = ContainerStore.validatedLocalFileURL(
-                    fromPath: entry.path,
-                    isDirectory: entry.isDirectory,
-                    requireExists: true
-                ) {
-                    try FileManagerService.deleteItem(at: targetURL)
-                }
+                try FileManagerService.deleteItem(at: URL(fileURLWithPath: entry.path))
             }
             return targets.map(\.path).joined(separator: ",")
         }
@@ -1093,15 +815,11 @@ struct FileBrowserView: View {
     }
 
     private func prepareTransfer(_ entries: [FileEntry], mode: FileTransferMode) {
-        let validURLs = entries.compactMap {
-            ContainerStore.validatedLocalFileURL(
-                fromPath: $0.path,
-                isDirectory: $0.isDirectory,
-                requireExists: true
-            )
-        }
-        guard !validURLs.isEmpty else { return }
-        fileOperationCoordinator.prepare(validURLs, mode: mode)
+        guard !entries.isEmpty else { return }
+        fileOperationCoordinator.prepare(
+            entries.map { URL(fileURLWithPath: $0.path, isDirectory: $0.isDirectory) },
+            mode: mode
+        )
         isSelecting = false
         selectedEntryIDs.removeAll()
     }
@@ -1124,16 +842,9 @@ struct FileBrowserView: View {
 
     private func beginPaste(_ payload: FileOperationPayload) {
         guard transferSession == nil, activityText == nil else { return }
-        guard let destinationURL = ContainerStore.validatedLocalFileURL(
-            fromPath: currentPath,
-            isDirectory: true
-        ) else {
-            log("filebrowser: ignored paste with invalid destination path='\(currentPath)'")
-            return
-        }
         transferSession = FileTransferSession(
             payload: payload,
-            destinationDirectory: destinationURL
+            destinationDirectory: URL(fileURLWithPath: currentPath, isDirectory: true)
         )
         fileOperationCoordinator.clear()
         log(
@@ -1340,53 +1051,7 @@ struct FileBrowserView: View {
                 message: fileOperationErrorMessage(error)
             )
         case .success(let sourceURLs):
-            let validSourceURLs = sourceURLs.compactMap {
-                ContainerStore.validatedExternalFileURL($0)
-            }
-            if !validSourceURLs.isEmpty,
-               let parsedRemote = LocalDevVirtualPath.parse(currentPath) {
-                let remoteService = LocalDevVirtualPath.serviceType(for: currentPath)
-                activityText = language.text("browser.importing", validSourceURLs.first?.lastPathComponent ?? "")
-                DispatchQueue.global(qos: .userInitiated).async {
-                    var imported = 0
-                    var lastErr: String?
-                    for srcURL in validSourceURLs {
-                        let scoped = srcURL.startAccessingSecurityScopedResource()
-                        defer { if scoped { srcURL.stopAccessingSecurityScopedResource() } }
-                        guard let bytes = try? Data(contentsOf: srcURL) else {
-                            lastErr = "Không đọc được \(srcURL.lastPathComponent)"
-                            continue
-                        }
-                        let base = parsedRemote.remotePath == "/" ? "" : parsedRemote.remotePath
-                        let dest = "\(base)/\(srcURL.lastPathComponent)"
-                        let res = writeRemoteVirtualFile(
-                            service: remoteService,
-                            bundleID: parsedRemote.bundleID,
-                            path: dest,
-                            data: bytes
-                        )
-                        if res.success {
-                            imported += 1
-                        } else {
-                            lastErr = res.error ?? "Ghi tệp AirLift thất bại"
-                        }
-                    }
-                    DispatchQueue.main.async {
-                        activityText = nil
-                        load()
-                        operationNotice = FileReplacementNotice(
-                            title: imported > 0 ? language.text("browser.import_done_title") : language.text("browser.import_error_title"),
-                            message: imported > 0 ? "Đã đưa \(imported) tệp qua AirLift thành công." : (lastErr ?? "Không thể đưa tệp qua AirLift.")
-                        )
-                    }
-                }
-                return
-            }
-            guard !validSourceURLs.isEmpty,
-                  let destinationURL = ContainerStore.validatedLocalFileURL(
-                      fromPath: currentPath,
-                      isDirectory: true
-                  ) else {
+            guard !sourceURLs.isEmpty else {
                 operationNotice = FileReplacementNotice(
                     title: language.text("browser.import_error_title"),
                     message: language.text("browser.error_source_missing")
@@ -1394,10 +1059,10 @@ struct FileBrowserView: View {
                 return
             }
             importSession = FileImportSession(
-                destinationDirectory: destinationURL,
-                sourceURLs: validSourceURLs
+                destinationDirectory: URL(fileURLWithPath: currentPath, isDirectory: true),
+                sourceURLs: sourceURLs
             )
-            log("filebrowser: import session started files=\(validSourceURLs.count)")
+            log("filebrowser: import session started files=\(sourceURLs.count)")
             DispatchQueue.main.async { processNextImport() }
         }
     }
@@ -1475,21 +1140,13 @@ struct FileBrowserView: View {
                 "replace=\(replaceExisting)"
         )
         DispatchQueue.global(qos: .userInitiated).async {
-            guard let validSourceURL = ContainerStore.validatedExternalFileURL(sourceURL) else {
-                log("filebrowser: ignored import with invalid sourceURL")
-                DispatchQueue.main.async {
-                    activityText = nil
-                    recordImportFailure(FileManagerOperationError.sourceMissing, sourceURL: sourceURL)
-                }
-                return
-            }
-            let hasSecurityScope = validSourceURL.startAccessingSecurityScopedResource()
+            let hasSecurityScope = sourceURL.startAccessingSecurityScopedResource()
             defer {
-                if hasSecurityScope { validSourceURL.stopAccessingSecurityScopedResource() }
+                if hasSecurityScope { sourceURL.stopAccessingSecurityScopedResource() }
             }
             do {
                 let result = try FileManagerService.importFile(
-                    validSourceURL,
+                    sourceURL,
                     into: destinationDirectory,
                     replaceExisting: replaceExisting
                 )
@@ -1613,57 +1270,23 @@ struct FileBrowserView: View {
         let shouldGrant = !hasGranted && ContainerAccessPolicy.shouldRequestGrant(isRoot: isRoot)
         hasGranted = true
         isLoadingEntries = true
-        remoteErrorMessage = nil
         let path = currentPath
         let targetBundleID = bundleID
         DispatchQueue.global(qos: .userInitiated).async {
-            if let parsed = LocalDevVirtualPath.parse(path) {
-                let remoteService = LocalDevVirtualPath.serviceType(for: path)
-                let listing = LocalDevBridge.shared.listDirectoryDetailed(
-                    service: remoteService,
-                    bundleID: parsed.bundleID,
-                    path: parsed.remotePath
-                )
-                let remoteErr = listing.success ? nil : listing.error
-                if let err = remoteErr {
-                    log("filebrowser: localdev unavailable \(parsed.bundleID) (\(err))")
+            if shouldGrant {
+                var handle: Int64 = -1
+                if ContainerAccessPolicy.shouldAttemptMCM(bundleID: targetBundleID),
+                   let targetBundleID {
+                    var activationError: NSString?
+                    handle = MCMActivateContainer(2, targetBundleID, false, &activationError)
+                    let detail = activationError.map { String($0) } ?? "none"
+                    log("filebrowser: MCM activate \(targetBundleID) -> \(handle), detail=\(detail)")
                 }
-                let remoteEntries = listing.items
-                    .filter { !$0.name.hasPrefix(".") }
-                    .map { item in
-                        FileEntry(
-                            name: item.name,
-                            path: LocalDevVirtualPath.childPath(parent: path, name: item.name),
-                            isDirectory: item.is_dir,
-                            size: item.is_dir ? -1 : item.size
-                        )
-                    }
-                    .sorted {
-                        if $0.isDirectory != $1.isDirectory { return $0.isDirectory }
-                        return $0.name.localizedCaseInsensitiveCompare($1.name) == .orderedAscending
-                    }
-                DispatchQueue.main.async {
-                    guard currentPath == path else { return }
-                    entries = remoteEntries
-                    airliftRouteInfo = listing.route
-                    remoteErrorMessage = remoteErr
-                    selectedEntryIDs.formIntersection(Set(remoteEntries.map(\.id)))
-                    isLoadingEntries = false
+                if handle < 0 {
+                    handle = ContainerStore.grantContainerAccess(path)
+                    log("filebrowser: traversal grant \(path) -> \(handle)")
                 }
-                return
             }
-
-            if shouldGrant,
-               !ContainerStore.isWithinOwnSandbox(path),
-               ContainerStore.hasPrivilegedContainerAccess(),
-               ContainerAccessPolicy.shouldAttemptMCM(bundleID: targetBundleID),
-               let targetBundleID {
-                var activationError: NSString?
-                let handle = MCMActivateContainer(2, targetBundleID, false, &activationError)
-                let detail = activationError.map { String($0) } ?? "none"
-                log("filebrowser: MCM activate \(targetBundleID) -> \(handle), detail=\(detail)")
-            }
-
             let loadedEntries = ContainerStore.listFiles(at: path)
             DispatchQueue.main.async {
                 guard currentPath == path else { return }
@@ -1672,13 +1295,8 @@ struct FileBrowserView: View {
                 isLoadingEntries = false
             }
             for directory in loadedEntries where directory.isDirectory {
-                guard let dirURL = ContainerStore.validatedLocalFileURL(
-                    fromPath: directory.path,
-                    isDirectory: true,
-                    requireExists: true
-                ) else { continue }
                 let summary = try? FileBrowserMetadataScanner.directorySummary(
-                    at: dirURL
+                    at: URL(fileURLWithPath: directory.path, isDirectory: true)
                 )
                 DispatchQueue.main.async {
                     guard currentPath == path,
@@ -1698,18 +1316,8 @@ struct FileBrowserView: View {
             )
             return
         }
-        guard let itemURL = ContainerStore.validatedLocalFileURL(
-            fromPath: entry.path,
-            isDirectory: entry.isDirectory,
-            requireExists: true
-        ),
-        let containerURL = ContainerStore.validatedLocalFileURL(
-            fromPath: containerPath,
-            isDirectory: true
-        ) else {
-            presentPatchDraftError(.invalidProject)
-            return
-        }
+        let itemURL = URL(fileURLWithPath: entry.path, isDirectory: entry.isDirectory)
+        let containerURL = URL(fileURLWithPath: containerPath, isDirectory: true)
         activityText = language.text("patch.preparing_from_browser")
         let suggestedName = entry.isDirectory
             ? entry.name
@@ -1741,18 +1349,8 @@ struct FileBrowserView: View {
     }
 
     private func extractArchive(_ entry: FileEntry) {
-        guard let archiveURL = ContainerStore.validatedLocalFileURL(
-            fromPath: entry.path,
-            isDirectory: false,
-            requireExists: true
-        ),
-        let directoryURL = ContainerStore.validatedLocalFileURL(
-            fromPath: currentPath,
-            isDirectory: true
-        ) else {
-            log("filebrowser: ignored extractArchive for invalid path='\(entry.path)'")
-            return
-        }
+        let archiveURL = URL(fileURLWithPath: entry.path, isDirectory: false)
+        let directoryURL = URL(fileURLWithPath: currentPath, isDirectory: true)
         performFileOperation(
             activity: language.text("browser.extracting"),
             operationName: "extract ZIP",
@@ -1781,33 +1379,8 @@ struct FileBrowserView: View {
     }
 
     private func requestReplacement(for entry: FileEntry) {
-        if LocalDevVirtualPath.isLocalDevPath(entry.path), !entry.isDirectory {
-            let request = FileReplacementRequest(
-                targetURL: URL(fileURLWithPath: "/"),
-                targetName: entry.name,
-                remoteVirtualPath: entry.path
-            )
-            pendingReplacementRequest = request
-            log("filebrowser: remote replacement requested target=\(entry.name)")
-            DispatchQueue.main.asyncAfter(
-                deadline: .now() + ReplacementPickerPolicy.presentationDelay
-            ) {
-                guard pendingReplacementRequest?.id == request.id else { return }
-                pendingReplacementRequest = nil
-                replacementRequest = request
-            }
-            return
-        }
-        guard let targetURL = ContainerStore.validatedLocalFileURL(
-            fromPath: entry.path,
-            isDirectory: entry.isDirectory,
-            requireExists: true
-        ) else {
-            log("filebrowser: ignored replacement for invalid path='\(entry.path)'")
-            return
-        }
         let request = FileReplacementRequest(
-            targetURL: targetURL,
+            targetURL: URL(fileURLWithPath: entry.path),
             targetName: entry.name
         )
         pendingReplacementRequest = request
@@ -1853,97 +1426,18 @@ struct FileBrowserView: View {
                     "source=\(selection.sourceURL.lastPathComponent)"
             )
             DispatchQueue.global(qos: .userInitiated).async {
-                if let remoteVPath = request.remoteVirtualPath,
-                   let parsedRemote = LocalDevVirtualPath.parse(remoteVPath) {
-                    let remoteService = LocalDevVirtualPath.serviceType(for: remoteVPath)
-                    guard let validSourceURL = ContainerStore.validatedExternalFileURL(selection.sourceURL) else {
-                        DispatchQueue.main.async {
-                            activityText = nil
-                            replacementNotice = FileReplacementNotice(
-                                title: language.text("browser.replace_error_title"),
-                                message: replacementErrorMessage(FileReplacementError.sourceMissing)
-                            )
-                        }
-                        return
-                    }
-                    let scoped = validSourceURL.startAccessingSecurityScopedResource()
-                    defer { if scoped { validSourceURL.stopAccessingSecurityScopedResource() } }
-                    do {
-                        let newData = try Data(contentsOf: validSourceURL)
-                        // Sao lưu bản gốc vào Documents/.DiscardedPatchBackups-<timestamp> trước khi ghi đè
-                        // (nếu bước đọc gốc gặp lỗi, bỏ qua sao lưu và vẫn tiếp tục ghi tệp mới)
-                        let readOrig = LocalDevBridge.shared.readFileOutcome(
-                            service: remoteService,
-                            bundleID: parsedRemote.bundleID,
-                            path: parsedRemote.remotePath
-                        )
-                        if readOrig.success, let origData = readOrig.data {
-                            if let (backupDir, _) = try? AirLiftPatchTransaction.createDiscardedBackupDirectory(
-                                transactionID: UUID()
-                            ) {
-                                let dst = backupDir.appendingPathComponent(selection.targetName)
-                                try? origData.write(to: dst, options: .atomic)
-                            }
-                        } else {
-                            log("[backup-skip] Bỏ qua sao lưu bản gốc cho \(selection.targetName): \(readOrig.error ?? "no original")")
-                        }
-                        let writeRes = writeRemoteVirtualFile(
-                            service: remoteService,
-                            bundleID: parsedRemote.bundleID,
-                            path: parsedRemote.remotePath,
-                            data: newData
-                        )
-                        let sizeStr = ByteCountFormatter.string(fromByteCount: Int64(newData.count), countStyle: .file)
-                        DispatchQueue.main.async {
-                            activityText = nil
-                            load()
-                            replacementNotice = FileReplacementNotice(
-                                title: writeRes.success ? language.text("browser.replace_done_title") : language.text("browser.replace_error_title"),
-                                message: writeRes.success
-                                    ? language.text("browser.replace_done_message", selection.targetName, sizeStr)
-                                    : (writeRes.error ?? "Ghi tệp AirLift thất bại")
-                            )
-                        }
-                    } catch {
-                        DispatchQueue.main.async {
-                            activityText = nil
-                            replacementNotice = FileReplacementNotice(
-                                title: language.text("browser.replace_error_title"),
-                                message: error.localizedDescription
-                            )
-                        }
-                    }
-                    return
-                }
-
-                guard let validSourceURL = ContainerStore.validatedExternalFileURL(selection.sourceURL),
-                      let validTargetURL = ContainerStore.validatedLocalFileURL(
-                          fromPath: selection.targetURL.path,
-                          isDirectory: false,
-                          requireExists: true
-                      ) else {
-                    log("filebrowser: ignored replacement with invalid source or target URL")
-                    DispatchQueue.main.async {
-                        activityText = nil
-                        replacementNotice = FileReplacementNotice(
-                            title: language.text("browser.replace_error_title"),
-                            message: replacementErrorMessage(FileReplacementError.sourceMissing)
-                        )
-                    }
-                    return
-                }
-                let hasSecurityScope = validSourceURL.startAccessingSecurityScopedResource()
+                let hasSecurityScope = selection.sourceURL.startAccessingSecurityScopedResource()
                 log("filebrowser: replacement source access securityScope=\(hasSecurityScope)")
                 defer {
                     if hasSecurityScope {
-                        validSourceURL.stopAccessingSecurityScopedResource()
+                        selection.sourceURL.stopAccessingSecurityScopedResource()
                     }
                 }
                 do {
                     log("filebrowser: replacement copy begin target=\(selection.targetName)")
                     let replacement = try FileReplacementService.replace(
-                        target: validTargetURL,
-                        with: validSourceURL
+                        target: selection.targetURL,
+                        with: selection.sourceURL
                     )
                     let size = ByteCountFormatter.string(
                         fromByteCount: replacement.byteCount,
@@ -1980,18 +1474,6 @@ struct FileBrowserView: View {
                 }
             }
         }
-    }
-
-    private func writeRemoteVirtualFile(
-        service: LocalDevServiceType,
-        bundleID: String,
-        path: String,
-        data: Data
-    ) -> AirLiftWriteOutcome {
-        if service == .houseArrest {
-            return LocalDevBridge.shared.writeFileWithAirLift(bundleID: bundleID, path: path, data: data)
-        }
-        return LocalDevBridge.shared.writeFileOutcome(service: service, bundleID: bundleID, path: path, data: data)
     }
 
     private func replacementErrorMessage(_ error: Error) -> String {
@@ -2077,8 +1559,7 @@ struct FileDocumentPicker: UIViewControllerRepresentable {
             _ controller: UIDocumentPickerViewController,
             didPickDocumentsAt urls: [URL]
         ) {
-            let validURLs = urls.compactMap { ContainerStore.validatedExternalFileURL($0) }
-            onSelection(.success(validURLs))
+            onSelection(.success(urls))
         }
 
         func documentPickerWasCancelled(_ controller: UIDocumentPickerViewController) {
@@ -2356,33 +1837,9 @@ struct FileQuickLookView: View {
             }
         }
         .task(id: file.id) {
-            let filePath = file.path
-            let fileName = file.name
+            let sourceURL = URL(fileURLWithPath: file.path)
             let result = await Task.detached(priority: .userInitiated) {
-                Result<PreparedFilePreview, Error> {
-                    if let parsed = LocalDevVirtualPath.parse(filePath) {
-                        return try FilePreviewService.makeRemotePreviewCopy(
-                            service: LocalDevVirtualPath.serviceType(for: filePath),
-                            bundleID: parsed.bundleID,
-                            remotePath: parsed.remotePath,
-                            fileName: fileName
-                        )
-                    }
-                    guard let localURL = ContainerStore.validatedLocalFileURL(
-                        fromPath: filePath,
-                        isDirectory: false,
-                        requireExists: true
-                    ) else {
-                        throw NSError(
-                            domain: "com.phucvn.3105",
-                            code: 22,
-                            userInfo: [NSLocalizedDescriptionKey: "Đường dẫn xem trước không hợp lệ"]
-                        )
-                    }
-                    return try FilePreviewService.makePreviewCopy(
-                        of: localURL
-                    )
-                }
+                Result { try FilePreviewService.makePreviewCopy(of: sourceURL) }
             }.value
             guard !Task.isCancelled else {
                 if case .success(let prepared) = result {
@@ -2441,36 +1898,6 @@ private enum FilePreviewService {
             throw error
         }
     }
-
-    static func makeRemotePreviewCopy(
-        service: LocalDevServiceType = .houseArrest,
-        bundleID: String,
-        remotePath: String,
-        fileName: String
-    ) throws -> PreparedFilePreview {
-        guard let data = LocalDevBridge.shared.readFile(
-            service: service,
-            bundleID: bundleID,
-            path: remotePath
-        ) else {
-            throw FileManagerOperationError.sourceMissing
-        }
-        let directory = FileManager.default.temporaryDirectory
-            .appendingPathComponent("3105-Preview", isDirectory: true)
-            .appendingPathComponent(UUID().uuidString, isDirectory: true)
-        let destination = directory.appendingPathComponent(fileName)
-        do {
-            try FileManager.default.createDirectory(
-                at: directory,
-                withIntermediateDirectories: true
-            )
-            try data.write(to: destination, options: .atomic)
-            return PreparedFilePreview(fileURL: destination, directoryURL: directory)
-        } catch {
-            try? FileManager.default.removeItem(at: directory)
-            throw error
-        }
-    }
 }
 
 private struct FileQuickLookController: UIViewControllerRepresentable {
@@ -2500,9 +1927,7 @@ private struct FileQuickLookController: UIViewControllerRepresentable {
             self.url = url
         }
 
-        func numberOfPreviewItems(in controller: QLPreviewController) -> Int {
-            (url.isFileURL && !url.path.isEmpty) ? 1 : 0
-        }
+        func numberOfPreviewItems(in controller: QLPreviewController) -> Int { 1 }
 
         func previewController(
             _ controller: QLPreviewController,

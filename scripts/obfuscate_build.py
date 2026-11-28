@@ -38,27 +38,12 @@ SEC_CABI_SYMBOLS = [
 
 LOCALDEV_CABI_SYMBOLS = [
     "localdev_init",
-    "localdev_register_nw_callbacks",
-    "localdev_set_candidates",
     "localdev_import_pairing",
     "localdev_status",
     "localdev_scan_apps",
     "localdev_list_dir",
     "localdev_read_file",
     "localdev_write_file",
-    "localdev_mkdir",
-    "localdev_remove_path",
-    "localdev_fileservice_status",
-    "localdev_fileservice_list",
-    "localdev_fileservice_read",
-    "localdev_fileservice_write",
-    "localdev_fileservice_write_opts",
-    "localdev_fileservice_mkdir",
-    "localdev_fileservice_remove",
-    "localdev_airlift_route_info",
-    "localdev_mb2_extract_app",
-    "localdev_mb2_status",
-    "localdev_mb2_cancel",
     "localdev_free_string",
     "localdev_free_bytes",
 ]
@@ -89,11 +74,12 @@ SWIFT_STRING_TARGET_FILES = [
 ]
 
 SENSITIVE_SWIFT_PATTERNS = (
+    "tobivn.chickenkiller.com",
     "20-10.store",
     "phuciosvn.com",
     "api.php",
     "/api/",
-    "com.phucvn",
+    "com.tobiaim",
     "com.apple.mobile",
     "Frameworks/libsec_core",
     "@executable_path",
@@ -111,7 +97,7 @@ SENSITIVE_SWIFT_PATTERNS = (
     "TICKET_REJECTED",
     "NETWORK_ERROR",
     "CRYPTO_ERROR",
-    "PHUCVN-",
+    "TOBIAIM-",
     "3105PATCH",
     "bplist00",
     "saved_key",
@@ -257,7 +243,7 @@ def run_obfuscation(
     bundle_master_hex: str,
     spki_primary_hex: str = "00" * 32,
     spki_backup_hex: str = "00" * 32,
-    api_host: str = "20-10.store",
+    api_host: str = "tobivn.chickenkiller.com",
     api_path: str = "/api/v3",
     strict: bool = True,
 ) -> Dict:
@@ -498,7 +484,7 @@ def main() -> None:
     parser.add_argument("--bundle-master", default=os.environ.get("SEC_BUNDLE_MASTER_KEY", ""))
     parser.add_argument("--spki-primary", default=os.environ.get("SEC_SPKI_PIN_PRIMARY", "") or ("00" * 32))
     parser.add_argument("--spki-backup", default=os.environ.get("SEC_SPKI_PIN_BACKUP", "") or ("00" * 32))
-    parser.add_argument("--api-host", default=os.environ.get("SEC_API_HOST", "") or "20-10.store")
+    parser.add_argument("--api-host", default=os.environ.get("SEC_API_HOST", "") or "tobivn.chickenkiller.com")
     parser.add_argument("--api-path", default=os.environ.get("SEC_API_PATH", "") or "/api/v3")
     parser.add_argument("--non-strict", action="store_true")
     parser.add_argument("--marker-out", type=Path, default=None)

@@ -8,7 +8,6 @@ struct ContainerMetadata: Equatable {
 enum ContainerResolution: Equatable {
     case resolved(ContainerMetadata)
     case accessFailed(Int64)
-    case sandboxRestricted
     case metadataUnavailable
     case unsupportedIdentifier(String)
 
@@ -18,8 +17,6 @@ enum ContainerResolution: Equatable {
             return "resolved \(metadata.bundleID)"
         case .accessFailed(let code):
             return "access failed (\(code))"
-        case .sandboxRestricted:
-            return "sandbox restricted (skipped)"
         case .metadataUnavailable:
             return "metadata unavailable"
         case .unsupportedIdentifier(let identifier):

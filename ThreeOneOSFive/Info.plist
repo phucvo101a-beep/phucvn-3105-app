@@ -5,7 +5,7 @@
     <key>CFBundleDevelopmentRegion</key>
     <string>vi</string>
     <key>CFBundleDisplayName</key>
-    <string>3105 x PHUCVN</string>
+    <string>Tobi AIM</string>
     <key>CFBundleExecutable</key>
     <string>$(EXECUTABLE_NAME)</string>
     <key>CFBundleIdentifier</key>
@@ -13,7 +13,7 @@
     <key>CFBundleInfoDictionaryVersion</key>
     <string>6.0</string>
     <key>CFBundleName</key>
-    <string>3105 x PHUCVN</string>
+    <string>Tobi AIM</string>
     <key>CFBundlePackageType</key>
     <string>APPL</string>
     <key>CFBundleShortVersionString</key>
@@ -104,28 +104,11 @@
         </dict>
     </array>
     <key>NSLocalNetworkUsageDescription</key>
-    <string>3105 x PHUCVN cần quyền Mạng cục bộ để kết nối dịch vụ LocalDevVPN / USB-WiFi Diagnostics nội bộ (127.0.0.1:62078 / 10.7.0.1:49152) và truyền tệp Wi-Fi LAN (3105 Airlift); Sandbox và Nhật ký USB vẫn hoạt động không cần quyền này.</string>
+    <string>Tobi AIM cần quyền Mạng cục bộ để kết nối dịch vụ LocalDev/Lockdown trên thiết bị phục vụ việc đọc tệp và quản lý bản vá.</string>
     <key>NSBonjourServices</key>
     <array>
         <string>_apple-mobdev2._tcp</string>
         <string>_remotepairing._tcp</string>
-        <string>_remoted._tcp</string>
-        <string>_lockdown._tcp</string>
-        <string>_localdev._tcp</string>
-        <string>_3105airlift._tcp</string>
-        <string>_remotepairing-pairable-host._tcp</string>
-    </array>
-    <key>UIBackgroundModes</key>
-    <array>
-        <string>audio</string>
-    </array>
-    <key>LSApplicationQueriesSchemes</key>
-    <array>
-        <string>localdev</string>
-        <string>localdevvpn</string>
-        <string>stos</string>
-        <string>stosvpn</string>
-        <string>wireguard</string>
     </array>
     <key>LSSupportsOpeningDocumentsInPlace</key>
     <true/>
@@ -136,9 +119,9 @@
     <key>LSRequiresIPhoneOS</key>
     <true/>
     <key>NSPhotoLibraryUsageDescription</key>
-    <string>3105 x PHUCVN cần quyền truy cập ảnh để quản lý hình nền.</string>
+    <string>Tobi AIM cần quyền truy cập ảnh để quản lý hình nền.</string>
     <key>NSDocumentsFolderUsageDescription</key>
-    <string>3105 x PHUCVN cần quyền truy cập tài liệu.</string>
+    <string>Tobi AIM cần quyền truy cập tài liệu.</string>
     <key>UIApplicationSceneManifest</key>
     <dict>
         <key>UIApplicationSupportsMultipleScenes</key>

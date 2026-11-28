@@ -496,31 +496,18 @@ struct CleanerView: View {
                         ContainerPresentationPolicy.shouldShow(bundleID: $0)
                     },
                     activateContainer: { application in
-                        if application.bundleID == ContainerStore.ownBundleID {
-                            return ContainerStore.ownSandboxRootURL.path
-                        }
-                        guard ContainerStore.hasPrivilegedContainerAccess() else {
-                            return nil
-                        }
-                        var activationError: NSString?
+                    var activationError: NSString?
                         return MCMActivateContainerPath(
-                            2,
+                        2,
                             application.bundleID,
-                            false,
-                            &activationError
+                        false,
+                        &activationError
                         )
                     },
                     isValidContainerPath: ContainerStore.isApplicationContainerPath,
                     usageForContainer: { containerPath in
-                        guard let containerURL = ContainerStore.validatedLocalFileURL(
-                            fromPath: containerPath,
-                            isDirectory: true,
-                            requireExists: true
-                        ) else {
-                            return nil
-                        }
-                        return try? LimitedCleanerService.scan(
-                            containerURL: containerURL,
+                        try? LimitedCleanerService.scan(
+                            containerURL: URL(fileURLWithPath: containerPath, isDirectory: true),
                             rootValidator: { ContainerStore.isApplicationContainerPath($0.path) }
                         )
                     }
@@ -542,23 +529,10 @@ struct CleanerView: View {
                 publish()
             }
 
-            let ownApp = ContainerStore.ownInstalledApp
-            guard ContainerStore.hasPrivilegedContainerAccess() else {
-                ContainerStore.logSandboxModeNoticeOnce(context: "cleaner")
-                scanNewApps([ownApp])
-                publish(force: true)
-                DispatchQueue.main.async {
-                    guard scanID == requestID else { return }
-                    isScanning = false
-                    log("cleaner: sandbox scan complete bundles=\(processedCount) reclaimableApps=\(discoveredRecords.count)")
-                }
-                return
-            }
-
             let apiApps = ContainerStore.installedAppsFromAPI()
             let dynamicIdentifiers = ContainerStore.dynamicAppIdentifiers()
             let mcmApps = ContainerStore.installedAppsFromMCM(identifiers: dynamicIdentifiers)
-            scanNewApps([ownApp] + apiApps + mcmApps)
+            scanNewApps(apiApps + mcmApps)
 
             let launchServicesIdentifiers = ContainerStore.launchServicesStoreIdentifiers()
             let candidates = MHAIdentifierCatalog.identifiers(
@@ -610,19 +584,9 @@ struct CleanerView: View {
                     continue
                 }
 
-                guard let containerURL = ContainerStore.validatedLocalFileURL(
-                    fromPath: containerPath,
-                    isDirectory: true,
-                    requireExists: true
-                ) else {
-                    unavailableApps += 1
-                    log("cleaner: invalid container path for \(record.app.bundleID)")
-                    continue
-                }
-
                 do {
                     let result = try LimitedCleanerService.clean(
-                        containerURL: containerURL,
+                        containerURL: URL(fileURLWithPath: containerPath, isDirectory: true),
                         rootValidator: { ContainerStore.isApplicationContainerPath($0.path) }
                     )
                     updatedUsage[record.id] = result.after

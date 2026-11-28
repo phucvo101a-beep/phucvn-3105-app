@@ -51,7 +51,7 @@ fn load_runtime_config() -> Result<(ServerKeyMaterial, Storage), String> {
             "../.env",
             ".env",
             "serverkey/.env",
-            "/etc/phucvn3105/.env",
+            "/etc/tobiaim3105/.env",
         ] {
             if Path::new(candidate).exists() {
                 load_env_file(Path::new(candidate), &mut env_map);

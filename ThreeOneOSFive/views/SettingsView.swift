@@ -43,7 +43,7 @@ struct SettingsView: View {
                         SettingsValueRow(
                             symbol: "person.crop.circle.fill",
                             title: "Tác giả / Phát triển",
-                            value: "PHUCVN"
+                            value: "Tobi AIM"
                         )
                     }
 
@@ -191,14 +191,6 @@ struct SettingsView: View {
                                 )
                         }
                         .padding(.vertical, 8)
-
-                        SettingsRowDivider()
-
-                        SettingsValueRow(
-                            symbol: "lock.shield.fill",
-                            title: "Chế độ truy cập dữ liệu",
-                            value: ContainerStore.accessModeDescription
-                        )
                     }
 
                     SettingsGroup(title: "CÔNG CỤ VÀ BẢO TRÌ") {
@@ -326,7 +318,7 @@ struct SettingsView: View {
                         .font(.system(size: 8, weight: .bold, design: .rounded))
                         .tracking(1.2)
                         .foregroundStyle(AppTheme.subduedText)
-                    Text("3105 × PHUCVN")
+                    Text("Tobi AIM")
                         .font(.system(size: 12, weight: .bold, design: .rounded))
                         .foregroundStyle(.white)
                 }
@@ -341,7 +333,7 @@ struct SettingsView: View {
         .padding(18)
         .background(
             LinearGradient(
-                colors: [Color(red: 0.14, green: 0.16, blue: 0.20), AppTheme.consoleBackground],
+                colors: [Color(red: 0.21, green: 0.045, blue: 0.065), AppTheme.consoleBackground],
                 startPoint: .topLeading,
                 endPoint: .bottomTrailing
             ),
@@ -354,7 +346,7 @@ struct SettingsView: View {
 
     private var footer: some View {
         VStack(spacing: 6) {
-            Text("3105 × PHUCVN")
+            Text("3105 × Tobi Aim")
                 .font(.system(size: 10, weight: .heavy, design: .rounded))
                 .tracking(1.75)
                 .foregroundStyle(AppTheme.accentSoft.opacity(0.8))

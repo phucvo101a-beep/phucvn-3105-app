@@ -7,9 +7,9 @@
     RewriteRule ^api/ci/register/?$ api_v2.php?action=ci_register_build [QSA,L]
 
     # Deny access to dotfiles, backups, SQL, JSON, logs, Composer/Rust/git internals & legacy /api/*.php
-    RewriteRule ^(\.env|\.git|\.htaccess|composer\.(json|lock)|schema_addon\.sql) - [F,L]
+    RewriteRule ^(\.env(\.example)?|\.git|\.htaccess|DEPLOY_KEYS\.txt|nginx\.conf\.example|composer\.(json|lock)|schema_addon\.sql) - [F,L,NC]
     RewriteRule ^(data|lib|api)/ - [F,L]
-    RewriteRule \.(json|sql|bak|old|orig|zip|tar|gz|log|lock|md)$ - [F,L,NC]
+    RewriteRule \.(json|sql|bak|old|orig|zip|tar|gz|log|lock|md|txt|example)$ - [F,L,NC]
 
     # Allow real safe entry files (admin.php, api_v2.php, index.php, assets)
     RewriteCond %{REQUEST_FILENAME} -f [OR]
@@ -17,7 +17,7 @@
     RewriteRule ^ - [L]
 </IfModule>
 
-<FilesMatch "(^\.|(\.(json|sql|env|bak|old|zip|log|lock|sh|py|rs|toml)$))">
+<FilesMatch "(^\.|(\.(json|sql|env|bak|old|zip|log|lock|sh|py|rs|toml|txt|example)$))">
     <IfModule mod_authz_core.c>
         Require all denied
     </IfModule>

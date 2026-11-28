@@ -21,7 +21,6 @@ struct PatchProjectsView: View {
     @State private var showImporter = false
     @State private var showWallpaperImporter = false
     @State private var showCleaner = false
-    @State private var showIpaPatcher = false
     @StateObject private var proxyManager = ProxyManager.shared
     @ObservedObject private var keyAuth = KeyAuthManager.shared
     @State private var selectedModCategory: ProxyModCategory = .aim
@@ -145,16 +144,6 @@ struct PatchProjectsView: View {
                             .listRowBackground(AppTheme.consoleBackground)
                             .listRowSeparator(.hidden)
                             .listRowInsets(EdgeInsets(top: 6, leading: 18, bottom: 6, trailing: 18))
-
-                        ipaFileSharingRow
-                            .listRowBackground(AppTheme.consoleBackground)
-                            .listRowSeparator(.hidden)
-                            .listRowInsets(EdgeInsets(top: 6, leading: 18, bottom: 6, trailing: 18))
-
-                        AirliftServerCard()
-                            .listRowBackground(Color.clear)
-                            .listRowSeparator(.hidden)
-                            .listRowInsets(EdgeInsets(top: 6, leading: 18, bottom: 6, trailing: 18))
                     }
 
                     Section("PROXY") {
@@ -274,9 +263,6 @@ struct PatchProjectsView: View {
             }
             .sheet(isPresented: $showCleaner) {
                 CleanerView()
-            }
-            .sheet(isPresented: $showIpaPatcher) {
-                IpaFileSharingToolView()
             }
             .sheet(isPresented: $showProxyManager) {
                 ProxyManagerView()
@@ -401,31 +387,6 @@ struct PatchProjectsView: View {
                         .font(.body.weight(.semibold))
                         .foregroundStyle(.primary)
                     Text(language.text("repository.cleaner_subtitle"))
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                }
-                Spacer()
-                Image(systemName: "chevron.right")
-                    .font(.caption.weight(.semibold))
-                    .foregroundStyle(.tertiary)
-                    .accessibilityHidden(true)
-            }
-            .contentShape(Rectangle())
-        }
-        .buttonStyle(.plain)
-    }
-
-    private var ipaFileSharingRow: some View {
-        Button {
-            showIpaPatcher = true
-        } label: {
-            HStack(spacing: 12) {
-                AppRowIcon(systemName: "doc.badge.gearshape.fill", tint: AppTheme.accentSoft)
-                VStack(alignment: .leading, spacing: 3) {
-                    Text("Mở khóa File Sharing cho IPA (Chuẩn bị ký chứng chỉ)")
-                        .font(.body.weight(.semibold))
-                        .foregroundStyle(.primary)
-                    Text("Bật UIFileSharingEnabled & LSSupportsOpeningDocumentsInPlace trong Info.plist trước khi ký")
                         .font(.caption)
                         .foregroundStyle(.secondary)
                 }
@@ -1256,15 +1217,6 @@ private struct PatchProjectDetailView: View {
                         messageArgument: privateErrorArgument(for: error)
                     )
                 }
-            } catch let airliftError as AirLiftPatchError {
-                await MainActor.run {
-                    isWorking = false
-                    actionAlert = PatchStoreAlert(
-                        titleKey: "common.failed",
-                        messageKey: "patch.error.airlift_detail",
-                        messageArgument: airliftError.localizedDescription
-                    )
-                }
             } catch {
                 await MainActor.run {
                     isWorking = false
@@ -1294,15 +1246,6 @@ private struct PatchProjectDetailView: View {
                         titleKey: "common.failed",
                         messageKey: privateErrorKey(for: error),
                         messageArgument: privateErrorArgument(for: error)
-                    )
-                }
-            } catch let airliftError as AirLiftPatchError {
-                await MainActor.run {
-                    isWorking = false
-                    actionAlert = PatchStoreAlert(
-                        titleKey: "common.failed",
-                        messageKey: "patch.error.airlift_detail",
-                        messageArgument: airliftError.localizedDescription
                     )
                 }
             } catch {
@@ -1366,15 +1309,6 @@ private struct PatchProjectDetailView: View {
                         messageArgument: privateErrorArgument(for: error)
                     )
                 }
-            } catch let airliftError as AirLiftPatchError {
-                await MainActor.run {
-                    isWorking = false
-                    actionAlert = PatchStoreAlert(
-                        titleKey: "common.failed",
-                        messageKey: "patch.error.airlift_detail",
-                        messageArgument: airliftError.localizedDescription
-                    )
-                }
             } catch {
                 await MainActor.run {
                     isWorking = false
@@ -1409,15 +1343,6 @@ private struct PatchProjectDetailView: View {
                         messageArgument: privateErrorArgument(for: error)
                     )
                 }
-            } catch let airliftError as AirLiftPatchError {
-                await MainActor.run {
-                    isWorking = false
-                    actionAlert = PatchStoreAlert(
-                        titleKey: "common.failed",
-                        messageKey: "patch.error.airlift_detail",
-                        messageArgument: airliftError.localizedDescription
-                    )
-                }
             } catch {
                 await MainActor.run {
                     isWorking = false
@@ -1450,15 +1375,6 @@ private struct PatchProjectDetailView: View {
                         titleKey: "common.failed",
                         messageKey: privateErrorKey(for: error),
                         messageArgument: privateErrorArgument(for: error)
-                    )
-                }
-            } catch let airliftError as AirLiftPatchError {
-                await MainActor.run {
-                    isWorking = false
-                    actionAlert = PatchStoreAlert(
-                        titleKey: "common.failed",
-                        messageKey: "patch.error.airlift_detail",
-                        messageArgument: airliftError.localizedDescription
                     )
                 }
             } catch {
@@ -1513,14 +1429,14 @@ private struct PatchActivityView: UIViewControllerRepresentable {
 class ProxyManager: ObservableObject {
     static let shared = ProxyManager()
 
-    private let enabledKey = "PHUCVN_PROXY_ENABLED"
-    private let hostKey = "PHUCVN_PROXY_HOST"
-    private let portKey = "PHUCVN_PROXY_PORT"
-    private let typeKey = "PHUCVN_PROXY_TYPE"
-    private let userKey = "PHUCVN_PROXY_USERNAME"
-    private let passKey = "PHUCVN_PROXY_PASSWORD"
-    private let bypassAntiCheatKey = "PHUCVN_PROXY_BYPASS_AC"
-    private let optimizePingKey = "PHUCVN_PROXY_OPTIMIZE_PING"
+    private let enabledKey = "TOBIAIM_PROXY_ENABLED"
+    private let hostKey = "TOBIAIM_PROXY_HOST"
+    private let portKey = "TOBIAIM_PROXY_PORT"
+    private let typeKey = "TOBIAIM_PROXY_TYPE"
+    private let userKey = "TOBIAIM_PROXY_USERNAME"
+    private let passKey = "TOBIAIM_PROXY_PASSWORD"
+    private let bypassAntiCheatKey = "TOBIAIM_PROXY_BYPASS_AC"
+    private let optimizePingKey = "TOBIAIM_PROXY_OPTIMIZE_PING"
 
     @Published var isEnabled: Bool {
         didSet { UserDefaults.standard.set(isEnabled, forKey: enabledKey) }
@@ -1548,14 +1464,14 @@ class ProxyManager: ObservableObject {
     }
 
     init() {
-        self.isEnabled = UserDefaults.standard.bool(forKey: "PHUCVN_PROXY_ENABLED")
-        self.host = UserDefaults.standard.string(forKey: "PHUCVN_PROXY_HOST") ?? ""
-        self.port = UserDefaults.standard.string(forKey: "PHUCVN_PROXY_PORT") ?? "8080"
-        self.proxyType = UserDefaults.standard.string(forKey: "PHUCVN_PROXY_TYPE") ?? "HTTP"
-        self.username = UserDefaults.standard.string(forKey: "PHUCVN_PROXY_USERNAME") ?? ""
-        self.password = UserDefaults.standard.string(forKey: "PHUCVN_PROXY_PASSWORD") ?? ""
-        self.bypassAntiCheat = UserDefaults.standard.object(forKey: "PHUCVN_PROXY_BYPASS_AC") as? Bool ?? true
-        self.optimizePing = UserDefaults.standard.object(forKey: "PHUCVN_PROXY_OPTIMIZE_PING") as? Bool ?? true
+        self.isEnabled = UserDefaults.standard.bool(forKey: "TOBIAIM_PROXY_ENABLED")
+        self.host = UserDefaults.standard.string(forKey: "TOBIAIM_PROXY_HOST") ?? ""
+        self.port = UserDefaults.standard.string(forKey: "TOBIAIM_PROXY_PORT") ?? "8080"
+        self.proxyType = UserDefaults.standard.string(forKey: "TOBIAIM_PROXY_TYPE") ?? "HTTP"
+        self.username = UserDefaults.standard.string(forKey: "TOBIAIM_PROXY_USERNAME") ?? ""
+        self.password = UserDefaults.standard.string(forKey: "TOBIAIM_PROXY_PASSWORD") ?? ""
+        self.bypassAntiCheat = UserDefaults.standard.object(forKey: "TOBIAIM_PROXY_BYPASS_AC") as? Bool ?? true
+        self.optimizePing = UserDefaults.standard.object(forKey: "TOBIAIM_PROXY_OPTIMIZE_PING") as? Bool ?? true
     }
 
     func testConnection(completion: @escaping (Bool, String) -> Void) {
@@ -1987,7 +1903,7 @@ struct ProxyModPreset: Identifiable {
             id: UUID(uuidString: "16A78656-EE0A-41F9-B0FA-5F9F44973BBE") ?? UUID(),
             category: .chams,
             name: "ANTENA",
-            fileName: "Antena_PhucVN_FFVN.3105",
+            fileName: "Antena_TobiAim_FFVN.3105",
             iconName: "antenna.radiowaves.left.and.right",
             subtitle: "Antena định vị vị trí người chơi • Free Fire",
             detailDescription: "Hiển thị cột Antena định vị vị trí đối thủ từ khoảng cách xa trên bản đồ Free Fire."
@@ -1996,7 +1912,7 @@ struct ProxyModPreset: Identifiable {
             id: UUID(uuidString: "DFC0AF84-76EF-49AF-9945-E8307FAE5C2B") ?? UUID(),
             category: .aim,
             name: "DRAG 85%",
-            fileName: "AimDrag_85_PhucVN_FFVN.3105",
+            fileName: "AimDrag_85_TobiAim_FFVN.3105",
             iconName: "scope",
             subtitle: "Hỗ trợ kéo tâm Aim Drag 85% • Free Fire",
             detailDescription: "Tối ưu hóa độ nhạy và hỗ trợ thao tác kéo tâm chuẩn xác 85% khi giao tranh trong Free Fire."
@@ -2005,7 +1921,7 @@ struct ProxyModPreset: Identifiable {
             id: UUID(uuidString: "B8192D12-7013-4420-8073-794D00FB4200") ?? UUID(),
             category: .chams,
             name: "CHAMS",
-            fileName: "DinhVi_Chams_PhucVN_FFVN.3105",
+            fileName: "DinhVi_Chams_TobiAim_FFVN.3105",
             iconName: "eye.fill",
             subtitle: "Định vị Chams xuyên vật thể • Free Fire",
             detailDescription: "Làm nổi bật màu sắc mô hình nhân vật đối thủ xuyên qua các chướng ngại vật trong Free Fire."
@@ -2014,7 +1930,7 @@ struct ProxyModPreset: Identifiable {
             id: UUID(uuidString: "855F300E-A213-45B6-8A14-D1EFA8D0F7AE") ?? UUID(),
             category: .chams,
             name: "DINHVI SUNG KEO",
-            fileName: "DinhVi_Sung_PhucVN_FFVN.3105",
+            fileName: "DinhVi_Sung_TobiAim_FFVN.3105",
             iconName: "cross.circle.fill",
             subtitle: "Định vị súng và bom keo • Free Fire",
             detailDescription: "Hiển thị vị trí trang bị vũ khí, súng và bom keo trên bản đồ Free Fire."
@@ -2023,7 +1939,7 @@ struct ProxyModPreset: Identifiable {
             id: UUID(uuidString: "C0CA95DF-CD18-4F4A-A3CD-56DA11324716") ?? UUID(),
             category: .aim,
             name: "AIM NECK",
-            fileName: "Aim_Neck_PhucVN_FFVN.3105",
+            fileName: "Aim_Neck_TobiAim_FFVN.3105",
             iconName: "person.crop.circle.badge.checkmark",
             subtitle: "Hỗ trợ ghim tâm Aim Neck • Free Fire",
             detailDescription: "Tối ưu hóa độ nhạy và hỗ trợ ghim tâm vào vùng cổ đối thủ khi giao tranh trong Free Fire."
@@ -2032,7 +1948,7 @@ struct ProxyModPreset: Identifiable {
             id: UUID(uuidString: "5A53E415-D850-4722-ADF3-1FAE7E73F9AB") ?? UUID(),
             category: .aim,
             name: "AIM NECK ANTENA",
-            fileName: "AimNeck_Antena_PhucVN_FFVN.3105",
+            fileName: "AimNeck_Antena_TobiAim_FFVN.3105",
             iconName: "antenna.radiowaves.left.and.right",
             subtitle: "Hỗ trợ ghim tâm Aim Neck & Antena • Free Fire",
             detailDescription: "Kết hợp ghim tâm vùng cổ (Aim Neck) và cột Antena định vị vị trí đối thủ tầm xa trong Free Fire."
@@ -2041,7 +1957,7 @@ struct ProxyModPreset: Identifiable {
             id: UUID(uuidString: "233DAE36-3734-4E2B-8C66-C491B540B4B5") ?? UUID(),
             category: .aim,
             name: "AIM DRAG ANTENA",
-            fileName: "AimDrag_85_Antena_PhucVN_FFVN.3105",
+            fileName: "AimDrag_85_Antena_TobiAim_FFVN.3105",
             iconName: "scope",
             subtitle: "Hỗ trợ kéo tâm Aim Drag 85% & Antena • Free Fire",
             detailDescription: "Kết hợp trợ lực kéo tâm 85% (Aim Drag) và cột Antena định vị đối thủ tầm xa trong Free Fire."
@@ -2165,8 +2081,6 @@ struct ProxyModPresetDetailView: View {
     @State private var alertTitle = ""
     @State private var alertMessage = ""
     @State private var showAlert = false
-    @State private var alertOffersReauth = false
-    @State private var alertReauthReason: String? = nil
     @State private var showApplyConfirm = false
     @State private var showRestoreConfirm = false
     @State private var statusToggle = false
@@ -2379,14 +2293,7 @@ struct ProxyModPresetDetailView: View {
             Text("Bạn có chắc muốn khôi phục lại dữ liệu gốc của Free Fire cho tính năng \(mod.name)?")
         }
         .alert(alertTitle, isPresented: $showAlert) {
-            if alertOffersReauth {
-                Button("Xác thực lại Key") {
-                    keyAuth.presentGatekeeper(reason: alertReauthReason)
-                }
-                Button("Đóng", role: .cancel) {}
-            } else {
-                Button("OK") {}
-            }
+            Button("OK") {}
         } message: {
             Text(alertMessage)
         }
@@ -2395,46 +2302,19 @@ struct ProxyModPresetDetailView: View {
     private func applyMod() {
         guard !isWorking else { return }
         if isMaintenance {
-            alertOffersReauth = false
             alertTitle = "File mod đang bảo trì"
             alertMessage = maintenanceMessage
             showAlert = true
             return
         }
+        guard let ticket = KeyAuthManager.shared.activeVerifiedTicket else {
+            alertTitle = "Yêu cầu xác thực"
+            alertMessage = "Phiên bản quyền không hợp lệ hoặc đã hết hạn. Vui lòng xác thực lại Key."
+            showAlert = true
+            return
+        }
         isWorking = true
-        alertOffersReauth = false
-        Task {
-            var resolvedTicket = await MainActor.run { KeyAuthManager.shared.activeVerifiedTicket }
-            if resolvedTicket == nil {
-                let reauth = await KeyAuthManager.shared.revalidateSessionOnDemand()
-                if let fresh = reauth.ticket {
-                    resolvedTicket = fresh
-                } else {
-                    let detail = reauth.failureReason ?? "Phiên bản quyền không hợp lệ hoặc đã hết hạn."
-                    await MainActor.run {
-                        isWorking = false
-                        alertOffersReauth = true
-                        alertReauthReason = detail
-                        alertTitle = "Yêu cầu xác thực"
-                        alertMessage = "\(detail) Vui lòng xác thực lại Key."
-                        showAlert = true
-                    }
-                    return
-                }
-            }
-            guard let ticket = resolvedTicket else {
-                await MainActor.run {
-                    isWorking = false
-                    alertOffersReauth = true
-                    alertReauthReason = "Phiên bản quyền không hợp lệ hoặc đã hết hạn."
-                    alertTitle = "Yêu cầu xác thực"
-                    alertMessage = "Phiên bản quyền không hợp lệ hoặc đã hết hạn. Vui lòng xác thực lại Key."
-                    showAlert = true
-                }
-                return
-            }
-
-            await Task.detached(priority: .userInitiated) {
+        Task.detached(priority: .userInitiated) {
             do {
                 guard let data = mod.loadData() else {
                     await MainActor.run {
@@ -2461,15 +2341,8 @@ struct ProxyModPresetDetailView: View {
                     isWorking = false
                     statusToggle.toggle()
                     onModified()
-                    alertTitle = "Apply thành công"
-                    alertMessage = "Đã áp dụng \(mod.name) thành công (đã sao lưu bản gốc vào .DiscardedPatchBackups và hoàn tất settle check)!"
-                    showAlert = true
-                }
-            } catch let airliftError as AirLiftPatchError {
-                await MainActor.run {
-                    isWorking = false
-                    alertTitle = "Không thể áp dụng"
-                    alertMessage = airliftError.localizedDescription
+                    alertTitle = "Thành công"
+                    alertMessage = "Đã áp dụng \(mod.name) vào Free Fire thành công!"
                     showAlert = true
                 }
             } catch let error as PatchPackageError {
@@ -2498,7 +2371,6 @@ struct ProxyModPresetDetailView: View {
                     showAlert = true
                 }
             }
-            }.value
         }
     }
 

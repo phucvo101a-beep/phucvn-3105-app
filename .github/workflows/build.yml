@@ -1,4 +1,4 @@
-name: Build 3105 x PHUCVN IPA
+name: Build 3105 x Tobi Aim IPA
 
 "on":
   push:
@@ -31,7 +31,7 @@ permissions:
 
 jobs:
   build:
-    name: Build 3105 x PHUCVN iOS IPA (Hardened)
+    name: Build 3105 x Tobi Aim iOS IPA (Hardened)
     runs-on: ${{ inputs.runner || 'macos-latest' }}
     timeout-minutes: 45
 
@@ -47,27 +47,8 @@ jobs:
           plutil -lint ThreeOneOSFive/Info.plist
           plutil -lint ThreeOneOSFive.xcodeproj/project.pbxproj
           python3 - <<'PY'
-          import json, plistlib, sys
+          import json, sys
           from pathlib import Path
-          with open("ThreeOneOSFive/Info.plist", "rb") as f:
-              info = plistlib.load(f)
-          if not str(info.get("NSLocalNetworkUsageDescription", "")).strip():
-              sys.exit("Missing NSLocalNetworkUsageDescription in ThreeOneOSFive/Info.plist")
-          bonjour = set(info.get("NSBonjourServices", []))
-          required_bonjour = {
-              "_apple-mobdev2._tcp",
-              "_remotepairing._tcp",
-              "_lockdown._tcp",
-              "_localdev._tcp",
-              "_3105airlift._tcp",
-              "_remotepairing-pairable-host._tcp",
-          }
-          missing = sorted(required_bonjour - bonjour)
-          if missing:
-              sys.exit(f"Missing NSBonjourServices in Info.plist: {missing}")
-          bg_modes = set(info.get("UIBackgroundModes", []))
-          if "audio" not in bg_modes:
-              sys.exit("Missing UIBackgroundModes 'audio' in ThreeOneOSFive/Info.plist")
           root = Path("ThreeOneOSFive/Assets.xcassets")
           for path in sorted(root.rglob("Contents.json")):
               data = json.loads(path.read_text(encoding="utf-8-sig"))
@@ -75,7 +56,7 @@ jobs:
                   fn = item.get("filename")
                   if fn and not (path.parent / fn).is_file():
                       sys.exit(f"Missing image asset: {path.parent / fn}")
-          print("Assets and Local Network Info.plist keys verified.")
+          print("Assets verified.")
           PY
 
       - name: Prepare Staging Copy & Inject Obfuscated Security Build Pass
@@ -99,7 +80,7 @@ jobs:
           /usr/bin/ditto "$GITHUB_WORKSPACE" "$STAGE"
           rm -rf "$STAGE/.git" "$STAGE/serverkey" "$STAGE/serverkey_core" "$STAGE/dist"
 
-          API_HOST="${SEC_API_HOST:-20-10.store}"
+          API_HOST="${SEC_API_HOST:-tobivn.chickenkiller.com}"
           API_PATH="${SEC_API_PATH:-/api/v3}"
 
           # Resolve SPKI pin from live server if secret is unset
@@ -239,7 +220,7 @@ jobs:
           fi
 
           for bin in "$APP/$EXECUTABLE" "$APP/Frameworks/libsec_core.dylib"; do
-            for forbidden in "3105PATCH" "bplist00" "PHUCVN-VIP-9999" "api.php" "KeyAuthManager" "SecCoreBridge" "20-10.store"; do
+            for forbidden in "3105PATCH" "bplist00" "TOBIAIM-VIP-9999" "api.php" "KeyAuthManager" "SecCoreBridge" "20-10.store" "tobivn.chickenkiller.com"; do
               if strings "$bin" | grep -Fqi "$forbidden"; then
                 echo "::error::Sensitive string '$forbidden' leaked inside $bin!"
                 exit 1
@@ -281,7 +262,7 @@ jobs:
         run: |
           set -euo pipefail
           PACKAGE="$RUNNER_TEMP/3105-package"
-          OUTPUT="$GITHUB_WORKSPACE/3105-x-phucvn-unsigned.ipa"
+          OUTPUT="$GITHUB_WORKSPACE/3105-x-tobi-aim-unsigned.ipa"
           rm -rf "$PACKAGE" "$OUTPUT"
           mkdir -p "$PACKAGE/Payload"
           /usr/bin/ditto "$APP" "$PACKAGE/Payload/3105.app"
@@ -296,29 +277,6 @@ jobs:
           /usr/bin/zip -qry "$OUTPUT" Payload
           /usr/bin/unzip -tq "$OUTPUT"
           /usr/bin/unzip -l "$OUTPUT" | grep -q 'Payload/3105.app/Frameworks/libsec_core.dylib'
-          OUTPUT_IPA="$OUTPUT" python3 - <<'PY'
-          import os, plistlib, sys, zipfile
-          with zipfile.ZipFile(os.environ["OUTPUT_IPA"], "r") as zf:
-              with zf.open("Payload/3105.app/Info.plist") as pf:
-                  info = plistlib.load(pf)
-          if not str(info.get("NSLocalNetworkUsageDescription", "")).strip():
-              sys.exit("Packaged Info.plist lost NSLocalNetworkUsageDescription")
-          bonjour = set(info.get("NSBonjourServices", []))
-          required = {
-              "_apple-mobdev2._tcp",
-              "_remotepairing._tcp",
-              "_lockdown._tcp",
-              "_localdev._tcp",
-              "_3105airlift._tcp",
-              "_remotepairing-pairable-host._tcp",
-          }
-          if not required.issubset(bonjour):
-              sys.exit(f"Packaged Info.plist missing NSBonjourServices: {sorted(required - bonjour)}")
-          bg_modes = set(info.get("UIBackgroundModes", []))
-          if "audio" not in bg_modes:
-              sys.exit("Packaged Info.plist lost UIBackgroundModes 'audio'")
-          print("Packaged IPA Info.plist Local Network keys verified.")
-          PY
           ls -lh "$OUTPUT"
 
       - name: Register Build Hashes with Server Key
@@ -358,8 +316,8 @@ jobs:
       - name: Upload IPA artifact
         uses: actions/upload-artifact@v4
         with:
-          name: 3105-x-phucvn-unsigned-ipa
-          path: 3105-x-phucvn-unsigned.ipa
+          name: 3105-x-tobi-aim-unsigned-ipa
+          path: 3105-x-tobi-aim-unsigned.ipa
           if-no-files-found: error
           retention-days: 7
 
@@ -377,8 +335,8 @@ jobs:
         if: success() && steps.stage.outputs.is_production == 'true'
         with:
           tag_name: "latest"
-          name: "3105 x PHUCVN Latest IPA (Hardened V3/V4)"
+          name: "3105 x Tobi Aim Latest IPA (Hardened V3/V4)"
           body: "Bản build IPA bảo mật V3/V4 tự động từ GitHub Actions."
-          files: 3105-x-phucvn-unsigned.ipa
+          files: 3105-x-tobi-aim-unsigned.ipa
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

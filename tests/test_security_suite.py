@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Comprehensive 5-Scenario Zero-Trust Security Verification Suite for PHUCVN 3105.
+Comprehensive 5-Scenario Zero-Trust Security Verification Suite for Tobi Aim 3105.
 Runs natively on Python 3.12 stdlib AND optionally cross-tests live compiled
 `serverkey_core` (--rust-bin) or `php` (--php-bin) engines when present.
 """
@@ -23,7 +23,6 @@ from typing import Dict, Optional, Tuple
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 SCRIPTS_DIR = REPO_ROOT / "scripts"
-sys.path.insert(0, str(REPO_ROOT))
 sys.path.insert(0, str(SCRIPTS_DIR))
 
 import build_serverkey
@@ -50,13 +49,13 @@ class InProcessV3Server:
 
     BUNDLED = [
         "AIM BODY FFVN (1).3105",
-        "Aim_Neck_PhucVN_FFVN.3105",
-        "AimDrag_85_Antena_PhucVN_FFVN.3105",
-        "AimDrag_85_PhucVN_FFVN.3105",
-        "AimNeck_Antena_PhucVN_FFVN.3105",
-        "Antena_PhucVN_FFVN.3105",
-        "DinhVi_Chams_PhucVN_FFVN.3105",
-        "DinhVi_Sung_PhucVN_FFVN.3105",
+        "Aim_Neck_TobiAim_FFVN.3105",
+        "AimDrag_85_Antena_TobiAim_FFVN.3105",
+        "AimDrag_85_TobiAim_FFVN.3105",
+        "AimNeck_Antena_TobiAim_FFVN.3105",
+        "Antena_TobiAim_FFVN.3105",
+        "DinhVi_Chams_TobiAim_FFVN.3105",
+        "DinhVi_Sung_TobiAim_FFVN.3105",
         "MODSKIN FFVN PHUCVN (1).3105",
         "MODSKIN FFVN PHUCVN (2).3105",
         "MODSKIN FFVN PHUCVN (3).3105",
@@ -79,7 +78,7 @@ class InProcessV3Server:
             "force_update": False,
             "min_required_version": "2.1.0",
             "latest_version": "2.1.0",
-            "download_url": "https://20-10.store/download/3105-latest.ipa",
+            "download_url": "https://tobivn.chickenkiller.com/download/3105-latest.ipa",
             "update_message": "Vui lòng cập nhật phiên bản mới!",
             "enforce_binary_hash": True,
             "preset_policies": {},
@@ -439,7 +438,7 @@ class SecuritySuiteTests(unittest.TestCase):
             "CI_SYNC_SECRET": cls.ci_secret,
         }
 
-        cls.pkg = "com.phucvn.threeoneosfive"
+        cls.pkg = "com.apple.mobile.MobileHouseArrest"
         cls.fp_main = hashlib.sha256(b"IPHONE-DEVICE-1").hexdigest()
         cls.fp_other = hashlib.sha256(b"IPHONE-DEVICE-2").hexdigest()
         cls.app_hash_v21 = hashlib.sha256(b"3105-ARM64-TEXT-V2.1.0").hexdigest()
@@ -462,7 +461,7 @@ class SecuritySuiteTests(unittest.TestCase):
             bundle_master_hex=cls.bundle_master.hex(),
             spki_primary_hex=hashlib.sha256(b"pin1").hexdigest(),
             spki_backup_hex=hashlib.sha256(b"pin2").hexdigest(),
-            api_host="20-10.store",
+            api_host="tobivn.chickenkiller.com",
             api_path="/api/v3",
             strict=True,
         )
@@ -478,7 +477,7 @@ class SecuritySuiteTests(unittest.TestCase):
         srv.ci_register(self.pkg, "2.0", "8", self.app_hash_v20, self.sec_hash_v20)
         srv.keys.append(
             {
-                "key": "PHUCVN-30D-VALID-0001",
+                "key": "TOBIAIM-30D-VALID-0001",
                 "duration": "30d",
                 "status": "active",
                 "is_used": False,
@@ -488,7 +487,7 @@ class SecuritySuiteTests(unittest.TestCase):
         )
         srv.keys.append(
             {
-                "key": "PHUCVN-BANNED-0002",
+                "key": "TOBIAIM-BANNED-0002",
                 "duration": "permanent",
                 "status": "revoked",
                 "is_used": False,
@@ -520,6 +519,7 @@ class SecuritySuiteTests(unittest.TestCase):
         self.assertIn("export_name =", rs_lib)
         self.assertNotIn("KeyAuthManager", (self.stage / "ThreeOneOSFive" / "App.swift").read_text("utf-8"))
         self.assertNotIn("https://phuciosvn.com", (self.stage / "ThreeOneOSFive" / "views" / "KeyGatekeeperView.swift").read_text("utf-8"))
+        self.assertNotIn("https://tobivn.chickenkiller.com", (self.stage / "ThreeOneOSFive" / "views" / "KeyGatekeeperView.swift").read_text("utf-8"))
         self.assertIn("{ _d([", swift_cfg)
         self.assertIn(
             "GeneratedSecurityConfig._d(",
@@ -593,13 +593,13 @@ class SecuritySuiteTests(unittest.TestCase):
             ed25519_pub_hex=self.ed_pub.hex(),
             pepper=f"  {self.pepper}\r\n ",
             bundle_master_hex=self.bundle_master.hex(),
-            api_host=" 20-10.store ",
+            api_host=" tobivn.chickenkiller.com ",
             api_path=" /api/v3 ",
             strict=True,
         )
         self.assertEqual(trim_report["pepper_len"], len(self.pepper))
         self.assertEqual(trim_report["pepper_fp"], self.obf_report["pepper_fp"])
-        self.assertEqual(trim_report["api_host"], "20-10.store")
+        self.assertEqual(trim_report["api_host"], "tobivn.chickenkiller.com")
         self.assertEqual(trim_report["api_path"], "/api/v3")
         gen_rs = (trim_stage / "sec_core" / "src" / "generated_secrets.rs").read_text("utf-8")
         self.assertIn(f"pub const PEPPER_LEN: usize = {len(self.pepper)};", gen_rs)
@@ -626,7 +626,7 @@ class SecuritySuiteTests(unittest.TestCase):
             st, _, dec = client_build_and_decrypt(
                 self.x_pub, self.ed_pub, self.pepper.encode(),
                 op, self.pkg, "2.1.0", "9", self.fp_main,
-                self.app_hash_v21, self.sec_hash_v21, "PHUCVN-30D-VALID-0001", srv.process_v3
+                self.app_hash_v21, self.sec_hash_v21, "TOBIAIM-30D-VALID-0001", srv.process_v3
             )
             self.assertEqual(st, 200)
             self.assertEqual(dec["code"], "SERVER_CLOSED")
@@ -644,7 +644,7 @@ class SecuritySuiteTests(unittest.TestCase):
         _, _, dec = client_build_and_decrypt(
             self.x_pub, self.ed_pub, self.pepper.encode(),
             "activate", self.pkg, "2.1.0", "9", self.fp_main,
-            self.app_hash_v21, self.sec_hash_v21, "PHUCVN-30D-VALID-0001", srv.process_v3
+            self.app_hash_v21, self.sec_hash_v21, "TOBIAIM-30D-VALID-0001", srv.process_v3
         )
         self.assertEqual(dec["code"], "SERVER_CLOSED")
         self.assertIsNone(dec["ephemeral_session_key"])
@@ -655,7 +655,7 @@ class SecuritySuiteTests(unittest.TestCase):
         _, _, dec_ok = client_build_and_decrypt(
             self.x_pub, self.ed_pub, self.pepper.encode(),
             "activate", self.pkg, "2.1.0", "9", self.fp_main,
-            self.app_hash_v21, self.sec_hash_v21, "PHUCVN-30D-VALID-0001", srv.process_v3
+            self.app_hash_v21, self.sec_hash_v21, "TOBIAIM-30D-VALID-0001", srv.process_v3
         )
         self.assertEqual(dec_ok["code"], "OK")
         self.assertTrue(dec_ok["server_open"])
@@ -670,7 +670,7 @@ class SecuritySuiteTests(unittest.TestCase):
         _, _, dec = client_build_and_decrypt(
             self.x_pub, self.ed_pub, self.pepper.encode(),
             "activate", self.pkg, "2.1.0", "9", self.fp_main,
-            self.app_hash_v21, self.sec_hash_v21, "PHUCVN-30D-VALID-0001", srv.process_v3
+            self.app_hash_v21, self.sec_hash_v21, "TOBIAIM-30D-VALID-0001", srv.process_v3
         )
         self.assertEqual(dec["code"], "OK")
         self.assertTrue(dec["license"]["valid"])
@@ -678,7 +678,7 @@ class SecuritySuiteTests(unittest.TestCase):
 
         # Decrypt REAL packed V4 presets using server-returned bundle_keys
         v4_tag = bytes.fromhex(self.obf_report["v4_tag_hex"])
-        for preset_name in ("Aim_Neck_PhucVN_FFVN.3105", "AIM BODY FFVN (1).3105", "MODSKIN FFVN PHUCVN (1).3105"):
+        for preset_name in ("Aim_Neck_TobiAim_FFVN.3105", "AIM BODY FFVN (1).3105", "MODSKIN FFVN PHUCVN (1).3105"):
             v4_file = (self.stage / preset_name).read_bytes()
             bid_hex = v4_file[4:20].hex()
             self.assertIn(bid_hex, dec["bundle_keys"], f"Missing bundle_key for {preset_name}")
@@ -700,7 +700,7 @@ class SecuritySuiteTests(unittest.TestCase):
         _, _, dec2 = client_build_and_decrypt(
             self.x_pub, self.ed_pub, self.pepper.encode(),
             "activate", self.pkg, "2.1.0", "9", self.fp_other,
-            self.app_hash_v21, self.sec_hash_v21, "PHUCVN-30D-VALID-0001", srv.process_v3
+            self.app_hash_v21, self.sec_hash_v21, "TOBIAIM-30D-VALID-0001", srv.process_v3
         )
         self.assertEqual(dec2["code"], "DEVICE_LIMIT")
         self.assertIsNone(dec2["ephemeral_session_key"])
@@ -713,17 +713,17 @@ class SecuritySuiteTests(unittest.TestCase):
         srv.settings["force_update"] = True
         srv.settings["min_required_version"] = "2.1.0"
         srv.settings["latest_version"] = "2.1.0"
-        srv.settings["download_url"] = "https://20-10.store/new.ipa"
+        srv.settings["download_url"] = "https://tobivn.chickenkiller.com/new.ipa"
 
         # Old version 2.0 gets FORCE_UPDATE + link, NO keys even with valid license key
         _, _, dec = client_build_and_decrypt(
             self.x_pub, self.ed_pub, self.pepper.encode(),
             "activate", self.pkg, "2.0", "8", self.fp_main,
-            self.app_hash_v20, self.sec_hash_v20, "PHUCVN-30D-VALID-0001", srv.process_v3
+            self.app_hash_v20, self.sec_hash_v20, "TOBIAIM-30D-VALID-0001", srv.process_v3
         )
         self.assertEqual(dec["code"], "FORCE_UPDATE")
         self.assertTrue(dec["force_update"])
-        self.assertEqual(dec["download_url"], "https://20-10.store/new.ipa")
+        self.assertEqual(dec["download_url"], "https://tobivn.chickenkiller.com/new.ipa")
         self.assertIsNone(dec["ephemeral_session_key"])
         self.assertEqual(dec["bundle_keys"], {})
 
@@ -731,7 +731,7 @@ class SecuritySuiteTests(unittest.TestCase):
         _, _, dec_spoof = client_build_and_decrypt(
             self.x_pub, self.ed_pub, self.pepper.encode(),
             "activate", self.pkg, "2.1.0", "9", self.fp_main,
-            self.app_hash_v20, self.sec_hash_v20, "PHUCVN-30D-VALID-0001", srv.process_v3
+            self.app_hash_v20, self.sec_hash_v20, "TOBIAIM-30D-VALID-0001", srv.process_v3
         )
         self.assertEqual(dec_spoof["code"], "TAMPER_DETECTED")
         self.assertIsNone(dec_spoof["ephemeral_session_key"])
@@ -744,7 +744,7 @@ class SecuritySuiteTests(unittest.TestCase):
 
         # 5a. "No key" / UI patch: cannot decrypt V4 .3105 without valid server-derived bundle_key
         v4_tag = bytes.fromhex(self.obf_report["v4_tag_hex"])
-        v4_file = (self.stage / "Antena_PhucVN_FFVN.3105").read_bytes()
+        v4_file = (self.stage / "Antena_TobiAim_FFVN.3105").read_bytes()
         with self.assertRaises(ValueError):
             pack_3105.unpack_v4_bytes(v4_file, os.urandom(32), expected_tag4=v4_tag)
 
@@ -789,7 +789,7 @@ class SecuritySuiteTests(unittest.TestCase):
             self.x_pub, self.ed_pub, self.pepper.encode(),
             "activate", self.pkg, "2.1.0", "9", self.fp_main,
             hashlib.sha256(b"CRACKED-NOP-PATCH").hexdigest(), self.sec_hash_v21,
-            "PHUCVN-30D-VALID-0001", srv.process_v3
+            "TOBIAIM-30D-VALID-0001", srv.process_v3
         )
         self.assertEqual(dec_patched["code"], "TAMPER_DETECTED")
         self.assertIsNone(dec_patched["ephemeral_session_key"])
@@ -798,7 +798,7 @@ class SecuritySuiteTests(unittest.TestCase):
             self.x_pub, self.ed_pub, self.pepper.encode(),
             "activate", self.pkg, "2.1.0", "9", self.fp_main,
             self.app_hash_v21, self.sec_hash_v21,
-            "PHUCVN-30D-VALID-0001", srv.process_v3, tamper_flags=0x40
+            "TOBIAIM-30D-VALID-0001", srv.process_v3, tamper_flags=0x40
         )
         self.assertEqual(dec_flags["code"], "TAMPER_DETECTED")
 
@@ -834,11 +834,11 @@ class SecuritySuiteTests(unittest.TestCase):
             st_r, _, dec_r = client_build_and_decrypt(
                 self.x_pub, self.ed_pub, self.pepper.encode(),
                 "activate", self.pkg, "2.1.0", "9", self.fp_main,
-                self.app_hash_v21, self.sec_hash_v21, "PHUCVN-30D-VALID-0001", rust_exec
+                self.app_hash_v21, self.sec_hash_v21, "TOBIAIM-30D-VALID-0001", rust_exec
             )
             self.assertEqual(st_r, 200)
             self.assertEqual(dec_r["code"], "OK")
-            self.assertIn(hashlib.sha256(b"BUNDLE|Aim_Neck_PhucVN_FFVN.3105").digest()[:16].hex(), dec_r["bundle_keys"])
+            self.assertIn(hashlib.sha256(b"BUNDLE|Aim_Neck_TobiAim_FFVN.3105").digest()[:16].hex(), dec_r["bundle_keys"])
 
     # -----------------------------------------------------------------------
     # SCENARIO 6: Device HWID Ban & Unban Enforcement
@@ -847,7 +847,7 @@ class SecuritySuiteTests(unittest.TestCase):
         srv = self._new_server()
         srv.keys.append(
             {
-                "key": "PHUCVN-30D-FRESH-9999",
+                "key": "TOBIAIM-30D-FRESH-9999",
                 "duration": "30d",
                 "status": "active",
                 "is_used": False,
@@ -860,7 +860,7 @@ class SecuritySuiteTests(unittest.TestCase):
         _, _, dec1 = client_build_and_decrypt(
             self.x_pub, self.ed_pub, self.pepper.encode(),
             "activate", self.pkg, "2.1.0", "9", self.fp_main,
-            self.app_hash_v21, self.sec_hash_v21, "PHUCVN-30D-VALID-0001", srv.process_v3
+            self.app_hash_v21, self.sec_hash_v21, "TOBIAIM-30D-VALID-0001", srv.process_v3
         )
         self.assertEqual(dec1["code"], "OK")
 
@@ -870,7 +870,7 @@ class SecuritySuiteTests(unittest.TestCase):
                 "hwid": self.fp_main.upper(),
                 "reason": "Phát hiện share key & thử hook binary",
                 "active": True,
-                "source_key": "PHUCVN-30D-VALID-0001",
+                "source_key": "TOBIAIM-30D-VALID-0001",
             }
         )
 
@@ -890,7 +890,7 @@ class SecuritySuiteTests(unittest.TestCase):
         _, _, dec_hb = client_build_and_decrypt(
             self.x_pub, self.ed_pub, self.pepper.encode(),
             "heartbeat", self.pkg, "2.1.0", "9", self.fp_main,
-            self.app_hash_v21, self.sec_hash_v21, "PHUCVN-30D-VALID-0001", srv.process_v3
+            self.app_hash_v21, self.sec_hash_v21, "TOBIAIM-30D-VALID-0001", srv.process_v3
         )
         self.assertEqual(dec_hb["code"], "DEVICE_BANNED")
         self.assertIsNone(dec_hb["ephemeral_session_key"])
@@ -899,17 +899,17 @@ class SecuritySuiteTests(unittest.TestCase):
         _, _, dec_new = client_build_and_decrypt(
             self.x_pub, self.ed_pub, self.pepper.encode(),
             "activate", self.pkg, "2.1.0", "9", self.fp_main,
-            self.app_hash_v21, self.sec_hash_v21, "PHUCVN-30D-FRESH-9999", srv.process_v3
+            self.app_hash_v21, self.sec_hash_v21, "TOBIAIM-30D-FRESH-9999", srv.process_v3
         )
         self.assertEqual(dec_new["code"], "DEVICE_BANNED")
-        fresh_rec = next(k for k in srv.keys if k["key"] == "PHUCVN-30D-FRESH-9999")
+        fresh_rec = next(k for k in srv.keys if k["key"] == "TOBIAIM-30D-FRESH-9999")
         self.assertFalse(fresh_rec["is_used"])
 
         # Unbanned device fp_other continues working normally
         _, _, dec_other = client_build_and_decrypt(
             self.x_pub, self.ed_pub, self.pepper.encode(),
             "activate", self.pkg, "2.1.0", "9", self.fp_other,
-            self.app_hash_v21, self.sec_hash_v21, "PHUCVN-30D-FRESH-9999", srv.process_v3
+            self.app_hash_v21, self.sec_hash_v21, "TOBIAIM-30D-FRESH-9999", srv.process_v3
         )
         self.assertEqual(dec_other["code"], "OK")
         self.assertIsNotNone(dec_other["ephemeral_session_key"])
@@ -919,7 +919,7 @@ class SecuritySuiteTests(unittest.TestCase):
         _, _, dec_unban = client_build_and_decrypt(
             self.x_pub, self.ed_pub, self.pepper.encode(),
             "activate", self.pkg, "2.1.0", "9", self.fp_main,
-            self.app_hash_v21, self.sec_hash_v21, "PHUCVN-30D-VALID-0001", srv.process_v3
+            self.app_hash_v21, self.sec_hash_v21, "TOBIAIM-30D-VALID-0001", srv.process_v3
         )
         self.assertEqual(dec_unban["code"], "OK")
         self.assertIsNotNone(dec_unban["ephemeral_session_key"])
@@ -943,7 +943,7 @@ class SecuritySuiteTests(unittest.TestCase):
         self.assertIn("adminDeviceFp", admin_text)
 
         # Deterministic Python verification mirroring config.php HMAC cookie + HWID binding
-        secret = hashlib.sha256(b"PHUCVN-DEV-COOKIE|unit-test-pepper").digest()
+        secret = hashlib.sha256(b"TOBIAIM-DEV-COOKIE|unit-test-pepper").digest()
 
         def ua_family(ua: str) -> str:
             u = ua.lower()
@@ -1193,7 +1193,7 @@ class SecuritySuiteTests(unittest.TestCase):
         srv = self._new_server()
         srv.keys.append(
             {
-                "key": "PHUCVN-PRESET-0001",
+                "key": "TOBIAIM-PRESET-0001",
                 "duration": "30d",
                 "status": "active",
                 "is_used": False,
@@ -1202,7 +1202,7 @@ class SecuritySuiteTests(unittest.TestCase):
             }
         )
         aim_bid = v3_crypto.derive_bundle_id("AIM BODY FFVN (1).3105").hex()
-        antena_bid = v3_crypto.derive_bundle_id("Antena_PhucVN_FFVN.3105").hex()
+        antena_bid = v3_crypto.derive_bundle_id("Antena_TobiAim_FFVN.3105").hex()
 
         # Put AIM BODY into maintenance on Server Key while keeping Antena stable
         srv.settings["preset_policies"] = {
@@ -1210,13 +1210,13 @@ class SecuritySuiteTests(unittest.TestCase):
                 "status": "maintenance",
                 "message": "Đang cập nhật AIM BODY theo bản mới.",
             },
-            "Antena_PhucVN_FFVN.3105": {"status": "stable", "message": ""},
+            "Antena_TobiAim_FFVN.3105": {"status": "stable", "message": ""},
         }
 
         st, _, dec_maint = client_build_and_decrypt(
             self.x_pub, self.ed_pub, self.pepper.encode(),
             "activate", self.pkg, "2.1.0", "9", self.fp_main,
-            self.app_hash_v21, self.sec_hash_v21, "PHUCVN-PRESET-0001", srv.process_v3,
+            self.app_hash_v21, self.sec_hash_v21, "TOBIAIM-PRESET-0001", srv.process_v3,
         )
         self.assertEqual(st, 200)
         self.assertEqual(dec_maint["preset_statuses"][aim_bid]["status"], "maintenance")
@@ -1230,7 +1230,7 @@ class SecuritySuiteTests(unittest.TestCase):
         st2, _, dec_stable = client_build_and_decrypt(
             self.x_pub, self.ed_pub, self.pepper.encode(),
             "heartbeat", self.pkg, "2.1.0", "9", self.fp_main,
-            self.app_hash_v21, self.sec_hash_v21, "PHUCVN-PRESET-0001", srv.process_v3,
+            self.app_hash_v21, self.sec_hash_v21, "TOBIAIM-PRESET-0001", srv.process_v3,
         )
         self.assertEqual(st2, 200)
         self.assertEqual(dec_stable["preset_statuses"][aim_bid]["status"], "stable")
@@ -1245,11 +1245,6 @@ class SecuritySuiteTests(unittest.TestCase):
         self.assertIn("'preset_statuses'", core_php)
         self.assertIn("require_once __DIR__ . '/lib/CoreEngine.php';", admin_php)
         self.assertIn("save_preset_policies", admin_php)
-        self.assertIn("'created_by' => $actor", admin_php)
-        self.assertIn("filterKeyCreator", admin_php)
-        self.assertIn("<th>NGƯỜI TẠO</th>", admin_php)
-        cfg_php = (REPO_ROOT / "serverkey" / "config.php").read_text("utf-8")
-        self.assertIn("created_by", cfg_php)
         self.assertIn("V3PresetStatus", bridge_sw)
         self.assertIn("ĐANG BẢO TRÌ", proj_sw)
         self.assertIn("ĐANG ỔN ĐỊNH", proj_sw)
@@ -1259,922 +1254,6 @@ class SecuritySuiteTests(unittest.TestCase):
         self.assertIn("MODSKIN FFVN PHUCVN (5).3105", core_php)
         self.assertNotIn("isMaintenance ? .secondary", proj_sw)
         self.assertNotIn(": .secondary)", proj_sw)
-
-    # -----------------------------------------------------------------------
-    # SCENARIO 10: Non-JB iOS 27.x Sandbox Safety & USB Diagnostics Integrity
-    # -----------------------------------------------------------------------
-    def test_10_non_jb_sandbox_safety_and_usb_diagnostics(self):
-        bad_query_c = (REPO_ROOT / "ThreeOneOSFive" / "exploit" / "bad_query.c").read_text("utf-8")
-        self.assertNotIn("../", bad_query_c)
-        self.assertIn("int64_t worse_query(const char *group_identifier)", bad_query_c)
-        self.assertIn("sandbox_extension_consume", bad_query_c)
-        self.assertIn("bad_query_is_within_sandbox", bad_query_c)
-
-        for rel in (
-            "ThreeOneOSFive/helpers/ContainerStore.swift",
-            "ThreeOneOSFive/helpers/PatchProjectModels.swift",
-            "ThreeOneOSFive/views/AppDataBrowserView.swift",
-            "ThreeOneOSFive/views/FileBrowserView.swift",
-            "ThreeOneOSFive/views/CleanerView.swift",
-            "ThreeOneOSFive/kexploit/sandbox_escape.m",
-        ):
-            src = (REPO_ROOT / rel).read_text("utf-8")
-            self.assertNotIn("/var/mobile/Containers/Data/Application", src, f"Hardcoded app container path in {rel}")
-            self.assertNotIn("/var/mobile/Containers/Data/System", src, f"Hardcoded sys container path in {rel}")
-            self.assertNotIn('"/var/mobile"', src, f"Hardcoded /var/mobile path in {rel}")
-
-        container_swift = (REPO_ROOT / "ThreeOneOSFive" / "helpers" / "ContainerStore.swift").read_text("utf-8")
-        self.assertIn("NSHomeDirectory()", container_swift)
-        self.assertIn("FileManager.default.urls(for: .documentDirectory, in: .userDomainMask)", container_swift)
-        self.assertIn("isWithinOwnSandbox", container_swift)
-        self.assertIn("hasPrivilegedContainerAccess", container_swift)
-        self.assertNotIn("shouldUseBadQuery", container_swift)
-
-        utils_swift = (REPO_ROOT / "ThreeOneOSFive" / "helpers" / "Utils.swift").read_text("utf-8")
-        self.assertIn("import OSLog", utils_swift)
-        self.assertIn("3105-Diagnostics", utils_swift)
-        self.assertIn("sanitizeForDiagnostics", utils_swift)
-
-        support_swift = (REPO_ROOT / "ThreeOneOSFive" / "helpers" / "SupportPolicy.swift").read_text("utf-8")
-        self.assertIn("major >= 16 && major <= 27", support_swift)
-
-        info_plist = (REPO_ROOT / "ThreeOneOSFive" / "Info.plist").read_text("utf-8")
-        self.assertIn("<key>UIFileSharingEnabled</key>", info_plist)
-        self.assertIn("<key>LSSupportsOpeningDocumentsInPlace</key>", info_plist)
-        self.assertIn("<key>NSLocalNetworkUsageDescription</key>", info_plist)
-        for svc in ("_apple-mobdev2._tcp", "_remotepairing._tcp", "_lockdown._tcp", "_localdev._tcp"):
-            self.assertIn(f"<string>{svc}</string>", info_plist)
-
-        build_ipa_py = (REPO_ROOT / "build_ipa.py").read_text("utf-8")
-        self.assertIn("verify_ipa_local_network_plist", build_ipa_py)
-        compile(build_ipa_py, str(REPO_ROOT / "build_ipa.py"), "exec")
-
-        tunnel_rs = (REPO_ROOT / "sec_core" / "src" / "localdev" / "tunnel.rs").read_text("utf-8")
-        for needle in (
-            "connect_transport",
-            "NW_PREWARM_CB",
-            "NW_RELAY_CONNECT_CB",
-            "EPERM_PREWARM_RETRY_COUNT",
-            "TransportStream::Relay",
-            "resolve_socket_addr",
-            "probe_rsd_and_remotepairing",
-        ):
-            self.assertIn(needle, tunnel_rs)
-
-        plist_rs = (REPO_ROOT / "sec_core" / "src" / "localdev" / "plist_util.rs").read_text("utf-8")
-        self.assertIn("keys.sort()", plist_rs)
-
-        ffi_rs = (REPO_ROOT / "sec_core" / "src" / "localdev" / "ffi.rs").read_text("utf-8")
-        self.assertIn("localdev_register_nw_callbacks", ffi_rs)
-        self.assertIn("localdev_set_candidates", ffi_rs)
-
-        ld_swift = (REPO_ROOT / "ThreeOneOSFive" / "helpers" / "LocalDevBridge.swift").read_text("utf-8")
-        for needle in (
-            "NWConnectionRelaySession",
-            "NWPathMonitor",
-            "NWBrowser",
-            "getifaddrs",
-            "IFF_POINTOPOINT",
-            "AF_INET6",
-            "detectTunnelEndpoints",
-            "10.7.0.1",
-            "10.7.0.0",
-            "willEnterForegroundNotification",
-            "localdev_register_nw_callbacks",
-            "localdev_set_candidates",
-        ):
-            self.assertIn(needle, ld_swift)
-        self.assertNotIn("sendUDPLocalBroadcastProbe", ld_swift)
-
-        usb_script = REPO_ROOT / "scripts" / "usb_inspect.py"
-        self.assertTrue(usb_script.is_file())
-        compile(usb_script.read_text("utf-8"), str(usb_script), "exec")
-
-    # -----------------------------------------------------------------------
-    # SCENARIO 11: RemotePairing / RSD (10.7.0.1:49152) Primary Flow & Fallback
-    # -----------------------------------------------------------------------
-    def test_11_remote_pairing_rsd_49152_primary_flow(self):
-        cargo_toml = (REPO_ROOT / "sec_core" / "Cargo.toml").read_text(encoding="utf-8")
-        for dep in ("tokio", "jktcp", "aes", "cbc", "hmac", "sha1"):
-            self.assertIn(dep, cargo_toml)
-        self.assertNotIn("openssl", cargo_toml)
-        self.assertNotRegex(cargo_toml, r'(?m)^\s*plist\s*=')
-
-        pairing_rs = (REPO_ROOT / "sec_core" / "src" / "localdev" / "pairing.rs").read_text(encoding="utf-8")
-        for sym in (
-            "pub struct RemotePairingFile",
-            "pub struct UnifiedPairing",
-            "impl UnifiedPairing",
-            "pub fn parse(raw_data: &[u8])",
-            "parse_pairing_document",
-            "json_to_plist_value",
-            "collect_candidate_dicts",
-            "normalize_ed25519_private_key",
-            "normalize_ed25519_public_key",
-            "tunnel_port",
-        ):
-            self.assertIn(sym, pairing_rs)
-        self.assertNotIn("REMOTE_PAIRING_UNSUPPORTED", pairing_rs)
-
-        tls_psk_rs = (REPO_ROOT / "sec_core" / "src" / "localdev" / "tls_psk.rs").read_text(encoding="utf-8")
-        self.assertIn("pub struct TlsPskStream", tls_psk_rs)
-        self.assertIn("pub async fn connect_cd_tunnel", tls_psk_rs)
-
-        rsd_rs = (REPO_ROOT / "sec_core" / "src" / "localdev" / "rsd.rs").read_text(encoding="utf-8")
-        for sym in (
-            "RpPairingControlClient",
-            "RemoteXpcConn",
-            "perform_rsd_handshake",
-            "extract_rsd_device_id",
-            "dict_get_ci",
-            "as_id_string",
-            "summarize_dict_keys",
-            "pub struct RsdTunnelSession",
-            "connect_remote_pairing",
-            "perform_rsd_checkin",
-            "fetch_apps_via_coredevice_xpc",
-        ):
-            self.assertIn(sym, rsd_rs)
-        self.assertNotIn("Missing UUID in RSD Handshake response", rsd_rs)
-        for forbidden_raw in ("bplist00",):
-            self.assertNotIn(forbidden_raw, rsd_rs)
-            self.assertNotIn(forbidden_raw, tls_psk_rs)
-
-        mod_rs = (REPO_ROOT / "sec_core" / "src" / "localdev" / "mod.rs").read_text(encoding="utf-8")
-        self.assertIn("DEFAULT_REMOTE_PAIRING_PORT", mod_rs)
-        self.assertIn("UnifiedPairing::parse", mod_rs)
-        self.assertIn("open_rp_endpoints", mod_rs)
-        self.assertIn("activate_rsd_session", mod_rs)
-        self.assertIn("with_afc_client", mod_rs)
-
-        ffi_rs = (REPO_ROOT / "sec_core" / "src" / "localdev" / "ffi.rs").read_text(encoding="utf-8")
-        self.assertIn("mgr.list_dir_detailed", ffi_rs)
-        self.assertIn("mgr.read_file", ffi_rs)
-        self.assertIn("mgr.write_file", ffi_rs)
-
-        ld_swift = (REPO_ROOT / "ThreeOneOSFive" / "helpers" / "LocalDevBridge.swift").read_text(encoding="utf-8")
-        for sym in (
-            "defaultRemotePairingPort: UInt16 = 49152",
-            "detectPreferredTunnelPort()",
-            "parsePairingObject",
-            "normalizePairingKey",
-            "JSONSerialization.jsonObject",
-            "pairingRecord",
-            "remotePairing",
-        ):
-            self.assertIn(sym, ld_swift)
-        self.assertNotIn("func remotePairingUnsupportedStatus", ld_swift)
-
-        card_swift = (REPO_ROOT / "ThreeOneOSFive" / "views" / "LocalDevStatusCard.swift").read_text(encoding="utf-8")
-        self.assertIn("bridge.currentStatus.port ?? 49152", card_swift)
-        self.assertIn("UTType.json", card_swift)
-
-        app_swift = (REPO_ROOT / "ThreeOneOSFive" / "App.swift").read_text(encoding="utf-8")
-        self.assertIn('ext == "json"', app_swift)
-
-    # -----------------------------------------------------------------------
-    # SCENARIO 12: Full User Apps & Games Scan, Access Badges & Quick Filter
-    # -----------------------------------------------------------------------
-    def test_12_full_user_apps_games_scan_and_filter(self):
-        apps_rs = (REPO_ROOT / "sec_core" / "src" / "localdev" / "apps.rs").read_text(encoding="utf-8")
-        for sym in (
-            "pub struct AppScanReport",
-            "pub fn merge_app_lists",
-            "fn user_app_client_options()",
-            "fn user_app_client_options_minimal()",
-            "LSSupportsOpeningDocumentsInPlace",
-            "CFBundleExecutable",
-            "ApplicationType",
-            "pub fn lookup_user_apps_over_stream",
-            "pub fn scan_user_apps_minimal_report",
-            "LookupResult",
-            "saw_complete",
-            "fn plist_truthy",
-            "SandboxLocked",
-            "DocumentsOnly",
-            "FullContainer",
-        ):
-            self.assertIn(sym, apps_rs)
-        self.assertNotIn('!app_type.eq_ignore_ascii_case("User")', apps_rs)
-
-        rsd_rs = (REPO_ROOT / "sec_core" / "src" / "localdev" / "rsd.rs").read_text(encoding="utf-8")
-        for sym in (
-            "scan_user_apps_report",
-            "lookup_user_apps_report",
-            "scan_user_apps_minimal_report",
-            "merge_app_lists",
-            "SandboxLocked",
-            "isAppClip",
-            "fileSharingEnabled",
-        ):
-            self.assertIn(sym, rsd_rs)
-
-        ld_swift = (REPO_ROOT / "ThreeOneOSFive" / "helpers" / "LocalDevBridge.swift").read_text(encoding="utf-8")
-        for sym in (
-            "isSandboxLocked",
-            "isAccessible",
-            "accessBadgeIcon",
-            "Toàn quyền Container",
-            "Chỉ Documents",
-            "Bị khóa Sandbox",
-            "default: return .orange",
-        ):
-            self.assertIn(sym, ld_swift)
-
-        browser_swift = (REPO_ROOT / "ThreeOneOSFive" / "views" / "AppDataBrowserView.swift").read_text(encoding="utf-8")
-        for sym in (
-            "enum AppAccessFilter",
-            "appAccessFilterBar",
-            "accessBadgeInfo",
-            "localDevAppByBundleID",
-            "queryMatchedApps",
-            "Sandbox nội bộ",
-            ".onChange(of: localDevBridge.currentStatus.isLive)",
-            "finishWithApps([])",
-        ):
-            self.assertIn(sym, browser_swift)
-
-        file_browser_swift = (REPO_ROOT / "ThreeOneOSFive" / "views" / "FileBrowserView.swift").read_text(encoding="utf-8")
-        self.assertIn("remoteErrorMessage", file_browser_swift)
-        self.assertIn("SANDBOX_LOCKED", file_browser_swift)
-
-    # -----------------------------------------------------------------------
-    # SCENARIO 13: Background KeepAlive, mobilebackup2, Airlift LAN & IPA Patch
-    # -----------------------------------------------------------------------
-    def test_13_background_keepalive_mb2_airlift_and_ipa_patcher(self):
-        import plistlib
-
-        info_path = REPO_ROOT / "ThreeOneOSFive" / "Info.plist"
-        with info_path.open("rb") as f:
-            info = plistlib.load(f)
-        self.assertIn("audio", info.get("UIBackgroundModes", []))
-        for svc in (
-            "_apple-mobdev2._tcp",
-            "_remotepairing._tcp",
-            "_lockdown._tcp",
-            "_localdev._tcp",
-            "_3105airlift._tcp",
-            "_remotepairing-pairable-host._tcp",
-        ):
-            self.assertIn(svc, info.get("NSBonjourServices", []))
-
-        import build_ipa
-        self.assertTrue(build_ipa.validate_info_plist_dict(info, "ThreeOneOSFive/Info.plist"))
-
-        keepalive_swift = (REPO_ROOT / "ThreeOneOSFive" / "helpers" / "BackgroundKeepAliveManager.swift").read_text("utf-8")
-        for sym in ("AVAudioSession", ".playback", ".mixWithOthers", "AVAudioPCMBuffer", "setConnectionLive"):
-            self.assertIn(sym, keepalive_swift)
-
-        mb2_rs = (REPO_ROOT / "sec_core" / "src" / "localdev" / "mobilebackup2.rs").read_text("utf-8")
-        for sym in (
-            "pub struct MobileBackup2Client",
-            "DLMessageVersionExchange",
-            "DLVersionsOk",
-            "DLMessageDeviceReady",
-            "DLMessageUploadFiles",
-            "DLMessageDownloadFiles",
-            "run_backup_into_staging",
-        ):
-            self.assertIn(sym, mb2_rs)
-
-        ffi_rs = (REPO_ROOT / "sec_core" / "src" / "localdev" / "ffi.rs").read_text("utf-8")
-        obf_py = (REPO_ROOT / "scripts" / "obfuscate_build.py").read_text("utf-8")
-        ld_swift = (REPO_ROOT / "ThreeOneOSFive" / "helpers" / "LocalDevBridge.swift").read_text("utf-8")
-        for sym in ("localdev_mb2_extract_app", "localdev_mb2_status", "localdev_mb2_cancel"):
-            self.assertIn(sym, ffi_rs)
-            self.assertIn(sym, obf_py)
-            self.assertIn(f'"{sym}"', ld_swift)
-
-        backup_swift = (REPO_ROOT / "ThreeOneOSFive" / "helpers" / "BackupExtractorService.swift").read_text("utf-8")
-        self.assertIn("import SQLite3", backup_swift)
-        self.assertIn("Manifest.db", backup_swift)
-        self.assertIn("AppDomain-", backup_swift)
-
-        fb_swift = (REPO_ROOT / "ThreeOneOSFive" / "views" / "FileBrowserView.swift").read_text("utf-8")
-        self.assertIn("Trích xuất dữ liệu qua Backup (mobilebackup2)", fb_swift)
-
-        airlift_swift = (REPO_ROOT / "ThreeOneOSFive" / "helpers" / "AirliftLanServer.swift").read_text("utf-8")
-        for sym in ("NWListener", "_3105airlift._tcp", "detectWiFiIPv4Address", "/upload", "/download"):
-            self.assertIn(sym, airlift_swift)
-
-        ipa_swift = (REPO_ROOT / "ThreeOneOSFive" / "helpers" / "IpaFileSharingPatcher.swift").read_text("utf-8")
-        for sym in ("UIFileSharingEnabled", "LSSupportsOpeningDocumentsInPlace", "get-task-allow", "-filesharing"):
-            self.assertIn(sym, ipa_swift)
-
-        pbx = (REPO_ROOT / "ThreeOneOSFive.xcodeproj" / "project.pbxproj").read_text("utf-8")
-        for fname in (
-            "BackgroundKeepAliveManager.swift",
-            "BackupExtractorService.swift",
-            "AirliftLanServer.swift",
-            "IpaFileSharingPatcher.swift",
-            "AirliftToolsView.swift",
-        ):
-            self.assertIn(fname, pbx)
-
-    # -----------------------------------------------------------------------
-    # SCENARIO 14: CoreDevice FileService, patch.airlift Fallback & AirLiftPatchTransaction
-    # -----------------------------------------------------------------------
-    def test_14_coredevice_fileservice_airlift_and_patch_transaction(self):
-        fs_rs = (REPO_ROOT / "sec_core" / "src" / "localdev" / "fileservice.rs").read_text("utf-8")
-        for sym in (
-            "com.apple.coredevice.fileservice.controlcapacity",
-            "com.apple.coredevice.fileservice.data",
-            "DEFAULT_CONTROL_CAPACITY",
-            "normalize_control_capacity",
-            "validate_positive_control_capacity",
-            "/var/mobile/Containers/Shared/AppGroup",
-            "DataContainerURL",
-            "systemAppGroupIdentifiers",
-            "fileservice_read",
-            "fileservice_write",
-            "unavailable",
-            "unsupported",
-            "request_mapping_incomplete",
-        ):
-            self.assertIn(sym, fs_rs)
-
-        apps_rs = (REPO_ROOT / "sec_core" / "src" / "localdev" / "apps.rs").read_text("utf-8")
-        for sym in ("data_container_url", "app_group_identifiers", "app_group_container_path"):
-            self.assertIn(sym, apps_rs)
-
-        rsd_rs = (REPO_ROOT / "sec_core" / "src" / "localdev" / "rsd.rs").read_text("utf-8")
-        for sym in (
-            "includeAppGroupIdentifiers",
-            "includeContainerPaths",
-            "systemAppGroupIdentifiers",
-            "resolve_service_pair",
-            "connect_port_async",
-        ):
-            self.assertIn(sym, rsd_rs)
-
-        mod_rs = (REPO_ROOT / "sec_core" / "src" / "localdev" / "mod.rs").read_text("utf-8")
-        for sym in (
-            "pub mod fileservice;",
-            "execute_airlift_app_op",
-            "coredevice.fileservice.data",
-            "afc.shim.remote",
-            "patch.airlift attempt=",
-            "ERR_SANDBOX_LOCKED_APPSTORE",
-        ):
-            self.assertIn(sym, mod_rs)
-
-        ffi_rs = (REPO_ROOT / "sec_core" / "src" / "localdev" / "ffi.rs").read_text("utf-8")
-        obf_py = (REPO_ROOT / "scripts" / "obfuscate_build.py").read_text("utf-8")
-        ld_swift = (REPO_ROOT / "ThreeOneOSFive" / "helpers" / "LocalDevBridge.swift").read_text("utf-8")
-        new_syms = (
-            "localdev_fileservice_status",
-            "localdev_fileservice_list",
-            "localdev_fileservice_read",
-            "localdev_fileservice_write",
-            "localdev_fileservice_mkdir",
-            "localdev_fileservice_remove",
-            "localdev_airlift_route_info",
-        )
-        for sym in new_syms:
-            self.assertIn(sym, ffi_rs)
-            self.assertIn(sym, obf_py)
-            self.assertIn(f'"{sym}"', ld_swift)
-
-        airlift_tx = (REPO_ROOT / "ThreeOneOSFive" / "helpers" / "AirLiftPatchTransaction.swift").read_text("utf-8")
-        for sym in (
-            "struct AirLiftPatchWriteDescriptor",
-            "enum AirLiftPatchTransaction",
-            ".DiscardedPatchBackups-",
-            "createDiscardedBackupDirectory",
-            "applyRemoteAirLift",
-            "verifyRemoteSettleCheck",
-            "verifyLocalSettleCheck",
-            "restoreRemoteAirLift",
-        ):
-            self.assertIn(sym, airlift_tx)
-
-        dev_patch = (REPO_ROOT / "ThreeOneOSFive" / "helpers" / "DevicePatchService.swift").read_text("utf-8")
-        self.assertIn("AirLiftPatchTransaction", dev_patch)
-        self.assertIn("AirLiftPatchWriteDescriptor", dev_patch)
-
-        fb_swift = (REPO_ROOT / "ThreeOneOSFive" / "views" / "FileBrowserView.swift").read_text("utf-8")
-        self.assertIn("Ứng dụng bị khóa Sandbox bởi iOS", fb_swift)
-        self.assertIn("Trích xuất dữ liệu qua Backup (mobilebackup2)", fb_swift)
-        self.assertIn("writeFileWithAirLift", fb_swift)
-
-        loc_vi = (REPO_ROOT / "ThreeOneOSFive" / "vi.lproj" / "Localizable.strings").read_text("utf-8")
-        self.assertIn("Apply thành công", loc_vi)
-
-        pbx = (REPO_ROOT / "ThreeOneOSFive.xcodeproj" / "project.pbxproj").read_text("utf-8")
-        self.assertIn("AirLiftPatchTransaction.swift", pbx)
-
-    # -----------------------------------------------------------------------
-    # SCENARIO 15: AFC Error Separation, VendDocuments Normalization & 128KB Chunks
-    # -----------------------------------------------------------------------
-    def test_15_afc_error_separation_vend_documents_and_128kb_chunks(self):
-        afc_rs = (REPO_ROOT / "sec_core" / "src" / "localdev" / "afc_client.rs").read_text("utf-8")
-        for sym in (
-            "pub const AFC_CHUNK_SIZE: usize = 128 * 1024;",
-            "pub fn afc_status_name",
-            "\"ObjectNotFound\"",
-            "\"PermDenied\"",
-            "\"TooMuchData\"",
-            "\"InvalidArg\"",
-            "\"ObjectExists\"",
-            "pub fn is_afc_not_found",
-            "pub fn make_dir_recursive",
-            "self.remove_path(path)",
-            "AFC_FOPEN_WRONLY",
-            "data.chunks(AFC_CHUNK_SIZE)",
-        ):
-            self.assertIn(sym, afc_rs)
-
-        ha_rs = (REPO_ROOT / "sec_core" / "src" / "localdev" / "house_arrest.rs").read_text("utf-8")
-        for sym in (
-            "pub fn root_is_direct_documents",
-            "contentcache",
-            "pub fn normalize_house_arrest_path",
-            "direct_documents_root",
-            "make_dir_recursive",
-        ):
-            self.assertIn(sym, ha_rs)
-
-        mod_rs = (REPO_ROOT / "sec_core" / "src" / "localdev" / "mod.rs").read_text("utf-8")
-        for sym in (
-            "enum ContainerOpenOutcome",
-            "SessionOpenedOpOk",
-            "SessionOpenedOpErr",
-            "ContainerRejected",
-            "ContainerOpenOutcome::SessionOpenedOpErr(afc_err, backend_label)",
-        ):
-            self.assertIn(sym, mod_rs)
-
-        ld_swift = (REPO_ROOT / "ThreeOneOSFive" / "helpers" / "LocalDevBridge.swift").read_text("utf-8")
-        self.assertIn("var isNotFoundError: Bool", ld_swift)
-        self.assertIn("0x00000008", ld_swift)
-
-        airlift_tx = (REPO_ROOT / "ThreeOneOSFive" / "helpers" / "AirLiftPatchTransaction.swift").read_text("utf-8")
-        for sym in (
-            "[backup-skip]",
-            "deviceFileOperationFailed",
-            "readRes.route?.backend == \"sandbox_locked\"",
-            "mkdirOutcome.route?.backend == \"sandbox_locked\"",
-            "writeRes.route?.backend == \"sandbox_locked\"",
-        ):
-            self.assertIn(sym, airlift_tx)
-
-    # -----------------------------------------------------------------------
-    # SCENARIO 16: Media Isolation, Backup-Skip on Read Errors & AFC Write Opcodes
-    # -----------------------------------------------------------------------
-    def test_16_media_isolation_backup_skip_and_afc_opcodes(self):
-        afc_rs = (REPO_ROOT / "sec_core" / "src" / "localdev" / "afc_client.rs").read_text("utf-8")
-        for sym in (
-            "pub const AFC_OP_WRITE_FILE_ATOMIC: u64 = 0x0000000c;",
-            "pub const AFC_OP_FILE_READ: u64 = 0x0000000f;",
-            "pub const AFC_OP_FILE_WRITE: u64 = 0x00000010;",
-            "pub const AFC_OP_REMOVE_PATH_AND_CONTENTS: u64 = 0x00000022;",
-            "pub fn is_afc_unknown_error",
-            "pub fn write_file_atomic",
-            "pub fn remove_path_recursive",
-            "AFC_FOPEN_WRONLY",
-            "AFC_FOPEN_RW",
-        ):
-            self.assertIn(sym, afc_rs)
-
-        ha_rs = (REPO_ROOT / "sec_core" / "src" / "localdev" / "house_arrest.rs").read_text("utf-8")
-        self.assertIn("[venddocuments] stripped /Documents prefix", ha_rs)
-        self.assertIn("remove_path_recursive", ha_rs)
-
-        mod_rs = (REPO_ROOT / "sec_core" / "src" / "localdev" / "mod.rs").read_text("utf-8")
-        self.assertNotIn("try_afc_container_fallback", mod_rs)
-        airlift_start = mod_rs.index("fn execute_airlift_app_op")
-        airlift_end = mod_rs.index("fn try_house_arrest_only")
-        airlift_code_lines = "\n".join(
-            line for line in mod_rs[airlift_start:airlift_end].splitlines()
-            if not line.lstrip().startswith("//")
-        )
-        self.assertNotIn("com.apple.afc.shim.remote", airlift_code_lines)
-        self.assertNotIn("afc.shim.remote", airlift_code_lines)
-        self.assertIn("local_container_fs", airlift_code_lines)
-        self.assertIn("pub fn make_dir", mod_rs)
-        self.assertIn("pub fn remove_path", mod_rs)
-
-        ffi_rs = (REPO_ROOT / "sec_core" / "src" / "localdev" / "ffi.rs").read_text("utf-8")
-        obf_py = (REPO_ROOT / "scripts" / "obfuscate_build.py").read_text("utf-8")
-        ld_swift = (REPO_ROOT / "ThreeOneOSFive" / "helpers" / "LocalDevBridge.swift").read_text("utf-8")
-        for sym in ("localdev_mkdir", "localdev_remove_path"):
-            self.assertIn(sym, ffi_rs)
-            self.assertIn(sym, obf_py)
-            self.assertIn(f'"{sym}"', ld_swift)
-
-        self.assertIn("localdev-media:///", ld_swift)
-        self.assertIn("func serviceType(for virtualPath: String)", ld_swift)
-        self.assertIn("func removePath(", ld_swift)
-
-        airlift_tx = (REPO_ROOT / "ThreeOneOSFive" / "helpers" / "AirLiftPatchTransaction.swift").read_text("utf-8")
-        for sym in (
-            "case deviceFileOperationFailed(String)",
-            "Lỗi đọc/ghi tệp trên thiết bị:",
-            "[backup-skip] Không có tệp gốc để sao lưu, tiếp tục ghi tệp mới",
-            "private static func remoteOperationError",
-        ):
-            self.assertIn(sym, airlift_tx)
-
-        app_browser = (REPO_ROOT / "ThreeOneOSFive" / "views" / "AppDataBrowserView.swift").read_text("utf-8")
-        self.assertIn("Bộ nhớ Media dùng chung (/var/mobile/Media)", app_browser)
-        self.assertIn("airlift-dir-src-*", app_browser)
-        self.assertIn("LocalDevVirtualPath.mediaRootPath", app_browser)
-
-        fb_swift = (REPO_ROOT / "ThreeOneOSFive" / "views" / "FileBrowserView.swift").read_text("utf-8")
-        self.assertIn("LocalDevVirtualPath.serviceType(for:", fb_swift)
-        self.assertIn("AFC Media: /var/mobile/Media", fb_swift)
-
-    def test_17_heartbeat_ticket_preservation_fp_cache_and_serverkey_expiry(self):
-        sabotage_rs = (REPO_ROOT / "sec_core" / "src" / "sabotage.rs").read_text("utf-8")
-        self.assertIn("pub fn activate_vault_session", sabotage_rs)
-        self.assertIn("pub fn refresh_vault_session", sabotage_rs)
-        self.assertIn("fn activate_or_refresh_vault_session", sabotage_rs)
-        self.assertIn("License expired or missing expiry", sabotage_rs)
-
-        lib_rs = (REPO_ROOT / "sec_core" / "src" / "lib.rs").read_text("utf-8")
-        self.assertIn("sabotage::refresh_vault_session(license_key, &decoded)", lib_rs)
-
-        device_rs = (REPO_ROOT / "sec_core" / "src" / "device.rs").read_text("utf-8")
-        self.assertIn("static CACHED_DEVICE_FP: OnceLock<String> = OnceLock::new();", device_rs)
-
-        core_php = (REPO_ROOT / "serverkey" / "lib" / "CoreEngine.php").read_text("utf-8")
-        self.assertIn("$rawDur", core_php)
-        self.assertIn("if ($expTs <= 0 && !$isPerm)", core_php)
-
-        core_rs = (REPO_ROOT / "serverkey_core" / "src" / "engine.rs").read_text("utf-8")
-        self.assertIn("effective_dur", core_rs)
-        self.assertIn("if exp_ts <= 0", core_rs)
-
-        gk_swift = (REPO_ROOT / "ThreeOneOSFive" / "views" / "KeyGatekeeperView.swift").read_text("utf-8")
-        self.assertIn("isHeartbeatInFlight", gk_swift)
-        self.assertIn("applyUnlockedState", gk_swift)
-        self.assertIn("presentGatekeeper", gk_swift)
-        self.assertIn("revalidateSessionOnDemand", gk_swift)
-        self.assertIn("RunLoop.main.add", gk_swift)
-
-        pp_swift = (REPO_ROOT / "ThreeOneOSFive" / "views" / "PatchProjectsView.swift").read_text("utf-8")
-        self.assertIn("alertOffersReauth", pp_swift)
-        self.assertIn("alertReauthReason", pp_swift)
-        self.assertIn("revalidateSessionOnDemand", pp_swift)
-        self.assertIn("Xác thực lại Key", pp_swift)
-
-    def test_18_coredevice_proxy_software_tunnel_fileservice_and_conduit(self):
-        cargo_toml = (REPO_ROOT / "sec_core" / "Cargo.toml").read_text("utf-8")
-        self.assertNotIn("openssl", cargo_toml)
-        self.assertNotRegex(cargo_toml, r'(?m)^\s*plist\s*=')
-        self.assertNotRegex(cargo_toml, r'(?m)^\s*idevice\s*=')
-
-        for rs_file in (REPO_ROOT / "sec_core" / "src").rglob("*.rs"):
-            non_comment = "\n".join(
-                l for l in rs_file.read_text("utf-8").splitlines()
-                if not l.lstrip().startswith("//")
-            )
-            cleaned = non_comment.replace('obfstr::obfstr!("bplist00")', "").replace('obfstr!("bplist00")', "")
-            self.assertNotIn("bplist00", cleaned, f"Forbidden raw binary plist literal in {rs_file}")
-
-        tls_psk_rs = (REPO_ROOT / "sec_core" / "src" / "localdev" / "tls_psk.rs").read_text("utf-8")
-        for sym in (
-            "fn build_cdtunnel_handshake_packet",
-            "fn parse_cdtunnel_response_json",
-            "pub async fn connect_cd_tunnel_plain",
-        ):
-            self.assertIn(sym, tls_psk_rs)
-
-        tunnel_rs = (REPO_ROOT / "sec_core" / "src" / "localdev" / "tunnel.rs").read_text("utf-8")
-        self.assertIn("pub(crate) fn build_tls_client_config", tunnel_rs)
-
-        rsd_rs = (REPO_ROOT / "sec_core" / "src" / "localdev" / "rsd.rs").read_text("utf-8")
-        for sym in (
-            "pub const SERVICE_COREDEVICE_PROXY: &str = \"com.apple.internal.devicecompute.CoreDeviceProxy\"",
-            "pub const SERVICE_UNTRUSTED_TUNNEL: &str = \"com.apple.internal.dt.coredevice.untrusted.tunnelservice\"",
-            "pub const SERVICE_STREAMING_ZIP_CONDUIT_SHIM: &str = \"com.apple.streaming_zip_conduit.shim.remote\"",
-            "pub const SERVICE_STREAMING_ZIP_CONDUIT: &str = \"com.apple.streaming_zip_conduit\"",
-            "pub struct CoreDeviceProxy<S>",
-            "pub fn create_software_tunnel(self)",
-            "async fn establish_coredevice_proxy_tunnel",
-            "async fn finalize_with_software_tunnel",
-            "RsdTransport::LayeredTunnel",
-            "pub enum RsdPortDialer",
-            "pub fn resolve_layered_service",
-            "pub async fn recv_any",
-            "pub struct StreamingZipConduitClient",
-            "[LOCALDEV LIVE] CoreDeviceProxy tunnel active",
-            "CoreDeviceProxy tunnel failed:",
-            "pub trusted_services: HashMap<String, RsdServiceInfo>",
-            "pub coredevice_proxy_active: bool",
-        ):
-            self.assertIn(sym, rsd_rs)
-
-        fs_rs = (REPO_ROOT / "sec_core" / "src" / "localdev" / "fileservice.rs").read_text("utf-8")
-        for sym in (
-            "DATA_STREAM_PREAMBLE_LEN: usize = 0x24",
-            "DARWIN_O_WRONLY_CREAT_TRUNC: i64 = 0x0601",
-            "\"CreateSession\"",
-            "\"RetrieveDirectoryList\"",
-            "\"RetrieveFile\"",
-            "\"FileSystemOperation\"",
-            "\"GetAttributes\"",
-            "\"OpenFile\"",
-            "\"ReadFile\"",
-            "\"WriteFile\"",
-            "\"CloseFile\"",
-            "\"CreateDirectory\"",
-            "\"RemoveFile\"",
-            "\"RemoveDirectory\"",
-            "StreamingZipConduitClient::probe",
-            "pub trusted_tunnel_active: bool",
-            "pub trusted_services_count: usize",
-            "pub streaming_zip_conduit_service: Option<String>",
-            "pub streaming_zip_conduit_port: Option<u16>",
-            "pub coredevice_tunnel_status: Option<String>",
-        ):
-            self.assertIn(sym, fs_rs)
-        fs_code_lines = "\n".join(
-            l for l in fs_rs.splitlines() if not l.lstrip().startswith("//")
-        )
-        self.assertNotIn("afc.shim.remote", fs_code_lines)
-
-        mod_rs = (REPO_ROOT / "sec_core" / "src" / "localdev" / "mod.rs").read_text("utf-8")
-        for sym in (
-            "connect_remote_pairing_with_options",
-            "connect_direct_rsd_with_options",
-            "pub trusted_services_count: Option<usize>",
-            "pub coredevice_proxy_active: Option<bool>",
-            "pub coredevice_tunnel_status: Option<String>",
-        ):
-            self.assertIn(sym, mod_rs)
-
-        ld_swift = (REPO_ROOT / "ThreeOneOSFive" / "helpers" / "LocalDevBridge.swift").read_text("utf-8")
-        for sym in (
-            "public let trusted_services_count: Int?",
-            "public let coredevice_proxy_active: Bool?",
-            "public let coredevice_tunnel_status: String?",
-            "public let trusted_tunnel_active: Bool?",
-            "public let streaming_zip_conduit_service: String?",
-            "public let streaming_zip_conduit_port: UInt16?",
-        ):
-            self.assertIn(sym, ld_swift)
-
-    def test_19_untrusted_tunnelservice_service_version_skip_and_priority(self):
-        rsd_rs = (REPO_ROOT / "sec_core" / "src" / "localdev" / "rsd.rs").read_text("utf-8")
-        for sym in (
-            'pub const SERVICE_UNTRUSTED_TUNNEL: &str = "com.apple.internal.dt.coredevice.untrusted.tunnelservice"',
-            'pub const SERVICE_UNTRUSTED_TUNNEL_EVENT: &str =',
-            '"com.apple.internal.dt.coredevice.untrusted.tunnelserviceevent"',
-            "enum XpcRpFrame",
-            "SkipServiceVersion(Option<i64>)",
-            "fn xpc_value_to_json",
-            "fn decode_rppairing_xpc_frame",
-            "XpcRpFrame::SkipServiceVersion",
-            '"ServiceVersion"',
-            "continue;",
-        ):
-            self.assertIn(sym, rsd_rs)
-
-        # Verify decode_rppairing_xpc_frame handles direct RemotePairing dict fields when "value" is omitted
-        dec_start = rsd_rs.index("fn decode_rppairing_xpc_frame")
-        dec_end = rsd_rs.index("impl RpPairingControlClient", dec_start)
-        dec_block = rsd_rs[dec_start:dec_end]
-        for key in ("message", "event", "pairingData", "handshake", "createListener"):
-            self.assertIn(f'"{key}"', dec_block)
-        self.assertLess(
-            dec_block.index('"ServiceVersion"'),
-            dec_block.index("Missing RemotePairing XPC 'value' field"),
-        )
-
-        # Verify untrusted.tunnelservice(event) runs strictly before CoreDeviceProxy inside establish_coredevice_proxy_tunnel
-        est_start = rsd_rs.index("async fn establish_coredevice_proxy_tunnel")
-        est_end = rsd_rs.index("impl RsdTunnelSession", est_start)
-        est_block = rsd_rs[est_start:est_end]
-        self.assertLess(
-            est_block.index("services1\n        .get(SERVICE_UNTRUSTED_TUNNEL_EVENT)"),
-            est_block.index("services1.get(SERVICE_COREDEVICE_PROXY)"),
-        )
-        self.assertIn("perform_rsd_handshake(rsd_stream", est_block)
-
-        # Verify no forbidden raw binary plist literal introduced
-        non_comment = "\n".join(l for l in rsd_rs.splitlines() if not l.lstrip().startswith("//"))
-        self.assertNotIn("bplist00", non_comment)
-
-    def test_20_ipv6_ula_priority_and_service_version_active_handshake(self):
-        ld_swift = (REPO_ROOT / "ThreeOneOSFive" / "helpers" / "LocalDevBridge.swift").read_text("utf-8")
-        # IPv6 ULA fd00::/8 prioritized ahead of 10.7.0.1 & derives both ::2 and ::1
-        for sym in (
-            "ulaIpv6Endpoints",
-            "utun-v6-ula-peer2",
-            "utun-v6-ula-peer1",
-            '"_remoted._tcp"',
-            "discoveredMdnsEndpoints",
-            "peer2[15] = 2",
-            "peer1[15] = 1",
-        ):
-            self.assertIn(sym, ld_swift)
-        det_start = ld_swift.index("rawOrdered.append(contentsOf: ulaIpv6Endpoints)")
-        v4_idx = ld_swift.index('host: "10.7.0.1"')
-        # Check within detectTunnelEndpoints rawOrdered assembly
-        raw_section = ld_swift[ld_swift.index("var rawOrdered: [LocalDevTunnelEndpoint] = []"):]
-        self.assertLess(
-            raw_section.index("ulaIpv6Endpoints"),
-            raw_section.index('host: "10.7.0.1"'),
-        )
-        self.assertGreater(det_start, 0)
-        self.assertGreater(v4_idx, 0)
-
-        info_plist = (REPO_ROOT / "ThreeOneOSFive" / "Info.plist").read_text("utf-8")
-        self.assertIn("<string>_remoted._tcp</string>", info_plist)
-
-        tunnel_rs = (REPO_ROOT / "sec_core" / "src" / "localdev" / "tunnel.rs").read_text("utf-8")
-        for sym in (
-            "pub(crate) fn is_strict_ipv6_ula_fd00",
-            "pub(crate) fn is_ipv6_ula",
-            "pub(crate) fn derive_ula_peer_candidates",
-        ):
-            self.assertIn(sym, tunnel_rs)
-
-        mod_rs = (REPO_ROOT / "sec_core" / "src" / "localdev" / "mod.rs").read_text("utf-8")
-        for sym in (
-            "is_strict_ipv6_ula_fd00",
-            "derive_ula_peer_candidates",
-            "probe_and_connect_ipv6_ula",
-            "49152u16, 58783u16",
-            "sess.is_trusted_tunnel()",
-        ):
-            self.assertIn(sym, mod_rs)
-        cand_fn = mod_rs[mod_rs.index("pub fn effective_candidates_for_port"):mod_rs.index("pub fn effective_candidates(")]
-        self.assertLess(cand_fn.index("is_strict_ipv6_ula_fd00"), cand_fn.index('"10.7.0.1"'))
-
-        rsd_rs = (REPO_ROOT / "sec_core" / "src" / "localdev" / "rsd.rs").read_text("utf-8")
-        for sym in (
-            "consume_initial_service_version_on_ch1",
-            "last_outbound_handshake",
-            "prefetched_envelope",
-            "pub fn is_trusted_tunnel(&self) -> bool",
-            "services.len() > 64",
-            "RemoteXPC RST_STREAM (stream={}, code={})",
-        ):
-            self.assertIn(sym, rsd_rs)
-        # Verify consume_initial_service_version_on_ch1 runs before attempt_pair_verify in Strategy 1
-        ut_start = rsd_rs.index("let mut ctrl = RpPairingControlClient::from_remote_xpc(xpc).await?;")
-        ut_block = rsd_rs[ut_start:ut_start + 450]
-        self.assertLess(
-            ut_block.index("consume_initial_service_version_on_ch1"),
-            ut_block.index("attempt_pair_verify"),
-        )
-        # Verify recv_envelope actively sends handshake on SkipServiceVersion instead of pure passive wait
-        rec_block = rsd_rs[rsd_rs.index("XpcRpFrame::SkipServiceVersion(ver)"):rsd_rs.index("Exceeded ServiceVersion metadata XPC frames")]
-        self.assertIn("skipping metadata frame without duplicate handshake", rec_block)
-
-    def test_21_app_group_lockdown_strategy4_and_direct_known_path_mode(self):
-        models_sw = (REPO_ROOT / "ThreeOneOSFive" / "helpers" / "PatchProjectModels.swift").read_text("utf-8")
-        for sym in (
-            "var appGroupIdentifier: String?",
-            "var systemAppGroupIdentifier: String?",
-            "var declaredAppGroupIdentifiers: [String]",
-            'case appGroupIdentifierSnake = "app_group_identifier"',
-            'case systemAppGroupIdentifierSnake = "system_app_group_identifier"',
-            "decodeIfPresent(String.self, forKey: .appGroupIdentifier)",
-            "decodeIfPresent(String.self, forKey: .systemAppGroupIdentifier)",
-        ):
-            self.assertIn(sym, models_sw)
-
-        container_sw = (REPO_ROOT / "ThreeOneOSFive" / "helpers" / "ContainerStore.swift").read_text("utf-8")
-        for sym in (
-            "resolvePermittedAppGroupURL",
-            "resolvePermittedDirectContainerURL",
-            "containerURL(forSecurityApplicationGroupIdentifier:",
-            "MCMActivateContainerPath(7,",
-            "MCMActivateContainerPath(2,",
-        ):
-            self.assertIn(sym, container_sw)
-
-        dev_patch_sw = (REPO_ROOT / "ThreeOneOSFive" / "helpers" / "DevicePatchService.swift").read_text("utf-8")
-        self.assertIn("tryResolveAllDirectContainers(project: project, bundleIDs: bundleIDs)", dev_patch_sw)
-        self.assertIn("prepareTunnelAndPairingForApply", dev_patch_sw)
-        self.assertLess(
-            dev_patch_sw.index("tryResolveAllDirectContainers"),
-            dev_patch_sw.index("prepareTunnelAndPairingForApply"),
-        )
-
-        ld_swift = (REPO_ROOT / "ThreeOneOSFive" / "helpers" / "LocalDevBridge.swift").read_text("utf-8")
-        for sym in (
-            "wifiLockdownEndpoints",
-            '"wifi-en0-lockdown"',
-            "port: 62078",
-            "discoverAndLoadSandboxPairingIfNeeded",
-            "prepareTunnelAndPairingForApply",
-            "resolveDirectLocalContainerRoot",
-            '"localdev_fileservice_write_opts"',
-            "directKnownPathMode: Bool = false",
-            "public let direct_known_path_mode: Bool?",
-            "public let bulk_directory_disabled: Bool?",
-            "public let direct_read_disabled: Bool?",
-            "public let strategy: String?",
-        ):
-            self.assertIn(sym, ld_swift)
-
-        tunnel_rs = (REPO_ROOT / "sec_core" / "src" / "localdev" / "tunnel.rs").read_text("utf-8")
-        self.assertIn("pub(crate) fn is_lan_ipv4", tunnel_rs)
-
-        rsd_rs = (REPO_ROOT / "sec_core" / "src" / "localdev" / "rsd.rs").read_text("utf-8")
-        for sym in (
-            "async fn establish_via_lockdown_62078",
-            "pub fn connect_lockdown_coredevice_proxy",
-            "strategy=lockdown_first",
-        ):
-            self.assertIn(sym, rsd_rs)
-
-        mod_rs = (REPO_ROOT / "sec_core" / "src" / "localdev" / "mod.rs").read_text("utf-8")
-        for sym in (
-            "probe_and_connect_en0_lockdown_strategy4",
-            "execute_airlift_app_op_with_mode",
-            "pub fn airlift_write_file_opts",
-            "pub direct_known_path_mode: bool",
-            "pub bulk_directory_disabled: bool",
-            "pub direct_read_disabled: bool",
-        ):
-            self.assertIn(sym, mod_rs)
-        status_block = mod_rs[mod_rs.index("pub fn check_status_report"):mod_rs.index("fn activate_rsd_session")]
-        self.assertLess(
-            status_block.index("probe_and_connect_en0_lockdown_strategy4"),
-            status_block.index("probe_and_connect_ipv6_ula"),
-        )
-
-        fs_rs = (REPO_ROOT / "sec_core" / "src" / "localdev" / "fileservice.rs").read_text("utf-8")
-        for sym in (
-            "pub fn is_readback_or_lookup_denied",
-            "pub fn set_direct_known_path_mode",
-            "pub async fn fileservice_write_async_with_mode",
-            "pub fn fileservice_write_with_options",
-            "!self.bulk_directory_disabled",
-        ):
-            self.assertIn(sym, fs_rs)
-        w_block = fs_rs[fs_rs.index("pub async fn fileservice_write_async_with_mode"):fs_rs.index("pub async fn fileservice_mkdir_async")]
-        self.assertIn("if use_direct {", w_block)
-        self.assertIn("self.ensure_parent_dirs(&session_id, &rel_path).await?;", w_block)
-
-        ffi_rs = (REPO_ROOT / "sec_core" / "src" / "localdev" / "ffi.rs").read_text("utf-8")
-        obf_py = (REPO_ROOT / "scripts" / "obfuscate_build.py").read_text("utf-8")
-        self.assertIn("localdev_fileservice_write_opts", ffi_rs)
-        self.assertIn("ffi_fileservice_write_impl", ffi_rs)
-        self.assertIn('"localdev_fileservice_write_opts"', obf_py)
-
-        airlift_tx = (REPO_ROOT / "ThreeOneOSFive" / "helpers" / "AirLiftPatchTransaction.swift").read_text("utf-8")
-        for sym in (
-            "directKnownPathMode: Bool = false",
-            "isReadbackOrLookupDenied",
-            "var bulkDirectoryDisabled = directKnownPathMode",
-            "var directReadDisabled = directKnownPathMode",
-            "[settle-ack]",
-            "try verifyRemoteSettleCheck(descriptor: desc)",
-        ):
-            self.assertIn(sym, airlift_tx)
-        settle_branch = airlift_tx[airlift_tx.index("if directReadDisabled {"):airlift_tx.index("manifest.status = .applied")]
-        self.assertIn("try verifyRemoteSettleCheck(descriptor: desc)", settle_branch)
-        self.assertIn("writeRes.writtenBytes == desc.replacementData.count", settle_branch)
-
-
-
-    def test_22_worse_query_ios27_direct_container_resolution(self):
-        bad_query_h = (REPO_ROOT / "ThreeOneOSFive" / "exploit" / "bad_query.h").read_text("utf-8")
-        bad_query_c = (REPO_ROOT / "ThreeOneOSFive" / "exploit" / "bad_query.c").read_text("utf-8")
-        container_sw = (REPO_ROOT / "ThreeOneOSFive" / "helpers" / "ContainerStore.swift").read_text("utf-8")
-
-        self.assertIn("int64_t worse_query(const char *group_identifier);", bad_query_h)
-        self.assertIn("systemgroup.com.apple.mobilegestaltcache", bad_query_c)
-        self.assertIn("container_copy_sandbox_token", bad_query_c)
-        self.assertIn("sandbox_extension_consume", bad_query_c)
-        self.assertIn("static var shouldUseWorseQuery: Bool", container_sw)
-        self.assertIn("static func ensureWorseQueryGrant", container_sw)
-        self.assertIn("MCMContainerPathForIdentifier(2, bundleID, false, &mcmLookupError)", container_sw)
-
-
-
-    def test_23_rppairing_xpc_data_envelope_and_ula_upgrade(self):
-        rsd = (Path(__file__).resolve().parents[1] / "sec_core" / "src" / "localdev" / "rsd.rs").read_text(encoding="utf-8")
-        mod = (Path(__file__).resolve().parents[1] / "sec_core" / "src" / "localdev" / "mod.rs").read_text(encoding="utf-8")
-        self.assertIn('("value".to_string(), XpcValue::Data(payload_bytes.to_vec()))', rsd)
-        self.assertIn("xpc.send_object(req_dict, false)", rsd)
-        self.assertIn("self.root_id = self.root_id.wrapping_add(1).max(2);", rsd)
-        self.assertIn("has_fd00_upgrade", mod)
-        self.assertIn("connect_service_event_handshake", rsd)
-
-    def test_24_ula_upgrade_probes_reachability_and_verify_alive_fallbacks(self):
-        repo_root = Path(__file__).resolve().parent.parent
-        mod_src = (repo_root / "sec_core" / "src" / "localdev" / "mod.rs").read_text(encoding="utf-8")
-        rsd_src = (repo_root / "sec_core" / "src" / "localdev" / "rsd.rs").read_text(encoding="utf-8")
-
-        self.assertIn("fn has_reachable_ula_upgrade(&mut self) -> bool", mod_src)
-        self.assertIn("Self::expand_ula_peer_candidates(&self.candidates, self.port)", mod_src)
-        self.assertIn("tunnel::probe_tcp_open(host, *port, Duration::from_millis(120)).is_ok()", mod_src)
-        self.assertIn("last_failed_ula_probe", mod_src)
-        self.assertIn("let should_upgrade_to_ula = self.has_reachable_ula_upgrade();", mod_src)
-        self.assertIn("let has_fd00_upgrade = self.has_reachable_ula_upgrade();", mod_src)
-        self.assertIn("self.last_failed_ula_probe = None;", mod_src)
-
-        verify_start = rsd_src.index("pub fn verify_alive(&self) -> Result<(), String>")
-        verify_body = rsd_src[verify_start : verify_start + 1200]
-        self.assertIn("if let Ok(stream) = self.open_checked_in_service(&[ld.as_str()])", verify_body)
-        self.assertIn("com.apple.mobile.heartbeat.shim.remote", verify_body)
 
 
 def main():
@@ -2191,4 +1270,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-

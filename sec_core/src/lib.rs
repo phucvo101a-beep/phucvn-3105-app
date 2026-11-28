@@ -210,15 +210,11 @@ fn execute_v3_exchange_flattened(op: &str, license_key: &str) -> Result<String, 
                 let mut ticket = Zeroizing::new(String::new());
                 if op == obfstr!("activate") || op == obfstr!("heartbeat") {
                     if decoded.server_open && !decoded.force_update && decoded.license.valid {
-                        let vault_res = if op == obfstr!("heartbeat") {
-                            sabotage::refresh_vault_session(license_key, &decoded)
-                        } else {
-                            sabotage::activate_vault_session(license_key, &decoded)
-                        };
-                        *ticket = vault_res.map_err(|e| {
-                            sabotage::wipe_vault(false);
-                            ExchangeFailure::Crypto(e)
-                        })?;
+                        *ticket = sabotage::activate_vault_session(license_key, &decoded)
+                            .map_err(|e| {
+                                sabotage::wipe_vault(false);
+                                ExchangeFailure::Crypto(e)
+                            })?;
                     } else {
                         sabotage::wipe_vault(false);
                     }

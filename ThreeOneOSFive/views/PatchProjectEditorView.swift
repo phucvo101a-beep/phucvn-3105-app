@@ -261,9 +261,7 @@ struct PatchProjectEditorView: View {
             updatedAt: Date(),
             bundleIdentifiers: bundleIdentifiers,
             directories: directories,
-            rules: rules,
-            appGroupIdentifier: existingProject?.appGroupIdentifier,
-            systemAppGroupIdentifier: existingProject?.systemAppGroupIdentifier
+            rules: rules
         )
         do {
             try PatchPackageCodec.validate(project)
@@ -407,14 +405,7 @@ struct PatchRuleEditorView: View {
     }
 
     private func importFile(_ result: Result<[URL], Error>) {
-        guard case .success(let urls) = result,
-              let rawURL = urls.first,
-              let url = ContainerStore.validatedExternalFileURL(rawURL) else {
-            if case .success = result {
-                validationMessageKey = "patch.error.invalid_project"
-            }
-            return
-        }
+        guard case .success(let urls) = result, let url = urls.first else { return }
         isImporting = true
         validationMessageKey = nil
         DispatchQueue.global(qos: .userInitiated).async {

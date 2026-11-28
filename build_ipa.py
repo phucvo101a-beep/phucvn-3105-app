@@ -3,19 +3,7 @@ import sys
 import os
 import time
 import subprocess
-import plistlib
-import zipfile
 from pathlib import Path
-
-REQUIRED_BONJOUR_SERVICES = (
-    "_apple-mobdev2._tcp",
-    "_remotepairing._tcp",
-    "_lockdown._tcp",
-    "_localdev._tcp",
-    "_3105airlift._tcp",
-    "_remotepairing-pairable-host._tcp",
-)
-REQUIRED_BACKGROUND_MODES = ("audio",)
 
 # Setup colorama for Windows terminal
 try:
@@ -39,15 +27,15 @@ except Exception:
     import json
     USE_REQUESTS = False
 
-REPO_OWNER = "phucvoipa"
-REPO_NAME = "phucvn-3105"
+REPO_OWNER = "phucvo101a-beep"
+REPO_NAME = "trongaim-3105-app"
 API_BASE = f"https://api.github.com/repos/{REPO_OWNER}/{REPO_NAME}"
-RELEASE_URL = f"https://github.com/{REPO_OWNER}/{REPO_NAME}/releases/download/latest/3105-x-phucvn-unsigned.ipa"
+RELEASE_URL = f"https://github.com/{REPO_OWNER}/{REPO_NAME}/releases/download/latest/3105-x-tobi-aim-unsigned.ipa"
 HEADERS = {"User-Agent": "BuildIPATool/1.0"}
 
 def print_banner():
     print(f"{CYAN}{BOLD}=" * 60)
-    print(f"{GREEN}{BOLD}       3105 x PHUCVN - TỰ ĐỘNG THEO DÕI & TẢI BUILD IPA")
+    print(f"{GREEN}{BOLD}       3105 x Tobi Aim - TỰ ĐỘNG THEO DÕI & TẢI BUILD IPA")
     print(f"{CYAN}       Kho lưu trữ: https://github.com/{REPO_OWNER}/{REPO_NAME}")
     print(f"{CYAN}{BOLD}=" * 60 + f"{RESET}\n")
 
@@ -78,61 +66,6 @@ def get_latest_run():
         print(f"{RED}[!] Lỗi khi lấy thông tin build: {e}{RESET}")
     return None
 
-def validate_info_plist_dict(plist_data: dict, source_label: str) -> bool:
-    """Verify NSLocalNetworkUsageDescription, required NSBonjourServices, and UIBackgroundModes are intact."""
-    desc = str(plist_data.get("NSLocalNetworkUsageDescription", "")).strip()
-    bonjour = plist_data.get("NSBonjourServices", [])
-    if not isinstance(bonjour, list):
-        bonjour = []
-    bg_modes = plist_data.get("UIBackgroundModes", [])
-    if not isinstance(bg_modes, list):
-        bg_modes = []
-    missing_services = [svc for svc in REQUIRED_BONJOUR_SERVICES if svc not in bonjour]
-    missing_bg = [m for m in REQUIRED_BACKGROUND_MODES if m not in bg_modes]
-    if not desc or missing_services or missing_bg:
-        print(f"{RED}[!] {source_label} thiếu cấu hình Mạng cục bộ / Chạy ngầm:{RESET}")
-        if not desc:
-            print(f"{RED}    - Thiếu key NSLocalNetworkUsageDescription{RESET}")
-        if missing_services:
-            print(f"{RED}    - Thiếu NSBonjourServices: {', '.join(missing_services)}{RESET}")
-        if missing_bg:
-            print(f"{RED}    - Thiếu UIBackgroundModes: {', '.join(missing_bg)}{RESET}")
-        return False
-    print(f"{GREEN}[OK] {source_label} giữ đủ NSLocalNetworkUsageDescription, {len(REQUIRED_BONJOUR_SERVICES)} NSBonjourServices & UIBackgroundModes(audio){RESET}")
-    return True
-
-
-def verify_local_source_info_plist() -> None:
-    local_plist = Path(__file__).resolve().parent / "ThreeOneOSFive" / "Info.plist"
-    if not local_plist.is_file():
-        return
-    try:
-        with local_plist.open("rb") as f:
-            plist_data = plistlib.load(f)
-        validate_info_plist_dict(plist_data, "ThreeOneOSFive/Info.plist")
-    except Exception as e:
-        print(f"{YELLOW}[!] Không thể kiểm tra ThreeOneOSFive/Info.plist: {e}{RESET}")
-
-
-def verify_ipa_local_network_plist(ipa_path: Path) -> bool:
-    """Inspect packaged/downloaded IPA without mutating Info.plist to ensure local-network keys survive."""
-    try:
-        with zipfile.ZipFile(ipa_path, "r") as zf:
-            info_candidates = [
-                name for name in zf.namelist()
-                if name.startswith("Payload/") and name.endswith(".app/Info.plist")
-            ]
-            if not info_candidates:
-                print(f"{YELLOW}[!] Không tìm thấy Payload/*.app/Info.plist trong {ipa_path.name}{RESET}")
-                return False
-            with zf.open(info_candidates[0], "r") as pf:
-                plist_data = plistlib.load(pf)
-            return validate_info_plist_dict(plist_data, f"{ipa_path.name}:{info_candidates[0]}")
-    except Exception as e:
-        print(f"{YELLOW}[!] Lỗi kiểm tra Info.plist trong IPA: {e}{RESET}")
-        return False
-
-
 def download_file(url, target_path):
     print(f"{CYAN}[+] Đang tải file IPA từ Release...{RESET}")
     try:
@@ -153,7 +86,6 @@ def download_file(url, target_path):
                                 mb_total = total_size / (1024 * 1024)
                                 print(f"\r    [{bar}] {percent}% ({mb_done:.1f}MB / {mb_total:.1f}MB)", end="", flush=True)
                 print(f"\n{GREEN}[OK] Tải file IPA thành công!{RESET}")
-                verify_ipa_local_network_plist(Path(target_path))
                 return True
             elif res.status_code == 404:
                 print(f"\n{YELLOW}[!] Bản Release chưa sẵn sàng, đang chuyển sang link Actions...{RESET}")
@@ -173,7 +105,6 @@ def open_folder(path):
 
 def main():
     print_banner()
-    verify_local_source_info_plist()
 
     print(f"{YELLOW}[+] Đang kiểm tra tiến trình build trên GitHub Actions...{RESET}")
     last_run = get_latest_run()
@@ -182,7 +113,7 @@ def main():
         print(f"{CYAN}[*] Bạn có thể theo dõi trực tiếp trên web: https://github.com/{REPO_OWNER}/{REPO_NAME}/actions{RESET}")
         print(f"{GREEN}[*] Đang thử kiểm tra xem bản Release IPA đã có chưa...{RESET}")
         downloads_dir = Path(os.environ.get("USERPROFILE", ".")) / "Downloads"
-        target_ipa = downloads_dir / "3105-x-phucvn-unsigned.ipa"
+        target_ipa = downloads_dir / "3105-x-tobi-aim-unsigned.ipa"
         if download_file(RELEASE_URL, target_ipa):
             print(f"\n{GREEN}{BOLD}[VỊ TRÍ FILE IPA]: {target_ipa}{RESET}")
             open_folder(target_ipa)
@@ -233,7 +164,7 @@ def main():
                 print("=" * 60)
 
                 downloads_dir = Path(os.environ.get("USERPROFILE", ".")) / "Downloads"
-                target_ipa = downloads_dir / "3105-x-phucvn-unsigned.ipa"
+                target_ipa = downloads_dir / "3105-x-tobi-aim-unsigned.ipa"
 
                 success = download_file(RELEASE_URL, target_ipa)
                 if success:

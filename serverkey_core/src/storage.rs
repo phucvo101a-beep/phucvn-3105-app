@@ -338,8 +338,6 @@ pub struct LicenseKeyRecord {
     #[serde(default = "default_status")]
     pub status: String,
     #[serde(default)]
-    pub ban_reason: String,
-    #[serde(default)]
     pub bound_packages: Vec<String>,
     #[serde(flatten)]
     pub extra: Map<String, Value>,
