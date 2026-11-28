@@ -36,6 +36,7 @@ dist/
 serverkey_core/target/
 sec_core/target/
 serverkey/data/*.lock
+serverkey/data/.device_hmac_key
 serverkey/data/api_nonces.json
 serverkey/data/rate_limits.json
 serverkey/data/login_limits.json

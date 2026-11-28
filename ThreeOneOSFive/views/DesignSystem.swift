@@ -8,17 +8,17 @@ enum AppBrand {
 }
 
 enum AppTheme {
-    // Crimson / Obsidian palette for PHUCVN IPA DEV.
-    static let accent = Color(red: 0.94, green: 0.16, blue: 0.21)
-    static let accentSoft = Color(red: 0.98, green: 0.44, blue: 0.47)
-    static let accentDeep = Color(red: 0.58, green: 0.06, blue: 0.10)
-    static let pageBackground = Color(red: 0.025, green: 0.008, blue: 0.012)
-    static let consoleBackground = Color(red: 0.070, green: 0.022, blue: 0.030)
-    static let elevatedBackground = Color(red: 0.125, green: 0.038, blue: 0.050)
-    static let subduedText = Color(red: 0.80, green: 0.67, blue: 0.69)
-    static let hairline = Color(red: 0.94, green: 0.22, blue: 0.26).opacity(0.18)
-    static let silverGlow = Color(red: 1.00, green: 0.24, blue: 0.28)
-    static let info = Color(red: 0.98, green: 0.48, blue: 0.42)
+    // Obsidian / Ice-Silver palette matched to PHUCVN IPA DEV artwork.
+    static let accent = Color(red: 0.78, green: 0.82, blue: 0.87)
+    static let accentSoft = Color(red: 0.64, green: 0.69, blue: 0.75)
+    static let accentDeep = Color(red: 0.46, green: 0.51, blue: 0.58)
+    static let pageBackground = Color(red: 0.047, green: 0.053, blue: 0.066)
+    static let consoleBackground = Color(red: 0.082, green: 0.092, blue: 0.110)
+    static let elevatedBackground = Color(red: 0.125, green: 0.141, blue: 0.168)
+    static let subduedText = Color(red: 0.63, green: 0.67, blue: 0.73)
+    static let hairline = Color(red: 0.76, green: 0.81, blue: 0.88).opacity(0.18)
+    static let silverGlow = Color(red: 0.90, green: 0.93, blue: 0.96)
+    static let info = Color(red: 0.71, green: 0.77, blue: 0.85)
     static let success = Color(red: 0.36, green: 0.84, blue: 0.62)
     static let warning = Color(red: 0.98, green: 0.70, blue: 0.32)
     static let danger = Color(red: 1.00, green: 0.30, blue: 0.34)

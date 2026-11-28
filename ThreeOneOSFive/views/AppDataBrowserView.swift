@@ -210,8 +210,8 @@ struct AppDataBrowserView: View {
                 .fill(
                     LinearGradient(
                         colors: [
-                            Color(red: 0.25, green: 0.050, blue: 0.075),
-                            Color(red: 0.11, green: 0.024, blue: 0.038),
+                            Color(red: 0.185, green: 0.210, blue: 0.245),
+                            Color(red: 0.105, green: 0.120, blue: 0.145),
                             AppTheme.consoleBackground
                         ],
                         startPoint: .topLeading,

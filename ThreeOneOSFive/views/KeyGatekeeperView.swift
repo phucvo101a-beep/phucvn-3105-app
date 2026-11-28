@@ -556,7 +556,7 @@ struct SecurityLockoutView: View {
                                     Text("TẢI PHIÊN BẢN MỚI NGAY")
                                 }
                                 .font(.system(size: 14, weight: .heavy, design: .rounded))
-                                .foregroundStyle(.white)
+                                .foregroundStyle(AppTheme.pageBackground)
                                 .frame(maxWidth: .infinity)
                                 .padding(.vertical, 14)
                                 .background(
@@ -701,14 +701,14 @@ struct KeyGatekeeperView: View {
                         } label: {
                             HStack(spacing: 8) {
                                 if keyAuth.isVerifying {
-                                    ProgressView().tint(.white)
+                                    ProgressView().tint(AppTheme.pageBackground)
                                 } else {
                                     Image(systemName: "checkmark.shield.fill")
                                 }
                                 Text(keyAuth.isVerifying ? "ĐANG MÃ HÓA & XÁC THỰC..." : "KÍCH HOẠT BẢN QUYỀN")
                             }
                             .font(.system(size: 14, weight: .heavy, design: .rounded))
-                            .foregroundStyle(.white)
+                            .foregroundStyle(AppTheme.pageBackground)
                             .frame(maxWidth: .infinity)
                             .padding(.vertical, 14)
                             .background(

@@ -165,9 +165,9 @@ struct HomeDashboardView: View {
                 .fill(
                     LinearGradient(
                         colors: [
-                            Color(red: 0.26, green: 0.050, blue: 0.080),
-                            Color(red: 0.12, green: 0.025, blue: 0.040),
-                            Color(red: 0.045, green: 0.010, blue: 0.016)
+                            Color(red: 0.19, green: 0.215, blue: 0.250),
+                            Color(red: 0.11, green: 0.125, blue: 0.148),
+                            Color(red: 0.052, green: 0.060, blue: 0.072)
                         ],
                         startPoint: .topLeading,
                         endPoint: .bottomTrailing
@@ -378,7 +378,7 @@ struct HomeDashboardView: View {
             .padding(15)
             .background(
                 LinearGradient(
-                    colors: [Color(red: 0.18, green: 0.040, blue: 0.055), AppTheme.consoleBackground],
+                    colors: [Color(red: 0.145, green: 0.165, blue: 0.195), AppTheme.consoleBackground],
                     startPoint: .topLeading,
                     endPoint: .bottomTrailing
                 ),

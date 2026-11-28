@@ -224,7 +224,7 @@ private struct StudioTabBar: View {
                             .lineLimit(1)
                             .minimumScaleFactor(0.8)
                     }
-                    .foregroundStyle(isSelected ? Color.white : AppTheme.subduedText)
+                    .foregroundStyle(isSelected ? AppTheme.pageBackground : AppTheme.subduedText)
                     .frame(maxWidth: .infinity)
                     .frame(height: 58)
                     .background {

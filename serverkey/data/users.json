@@ -1,18 +1,1 @@
-[
-    {
-        "id": "u1",
-        "username": "qdaimmo",
-        "password": "$argon2id$v=19$m=65536,t=4,p=1$S3dxNzB4bTZXNmMwNkhrSg$k4AyBC2QZiiP2gn6J3FA4W2eTdBCLoAdpwYFrIhkCIk",
-        "role": "admin",
-        "hwid": "DEV-059FF78F8475D58F42483ED3FEBA",
-        "device_fp_hash": "fba6e74301cbc27799ad195d09dc05f4e9405820e0d3c2c4be2e4da7921c4290",
-        "device_label": "iPhone • Safari",
-        "active_session_token": "5dcd90f87d8312fdcd52b869caea111a790562c7f2fdc05faa65612ebfef7bd0",
-        "active_ua_hash": "f8950e737df0646e783fc2e0ae53f809fa0bf81a035e215bcf582cbe0af4597c",
-        "is_active": true,
-        "expiry_date": "permanent",
-        "last_login": "2026-11-28 11:33:26",
-        "last_ip": "2.2.2.2",
-        "is_hwid_blocked": false
-    }
-]
+[]
