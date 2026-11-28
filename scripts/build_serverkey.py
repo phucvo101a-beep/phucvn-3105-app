@@ -28,7 +28,7 @@ def pack_php_file(src: Path, dst: Path) -> None:
     joined = "'\n    .'".join(chunks)
     packed = (
         "<?php\n"
-        "// Protected Tobi Aim 3105 Security Module (Packed Artifact)\n"
+        "// Protected PHUCVN 3105 Security Module (Packed Artifact)\n"
         "$__p3105 = '"
         + joined
         + "';\n"

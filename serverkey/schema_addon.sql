@@ -1,4 +1,4 @@
--- Tobi AIM Security Schema V3
+-- PHUCVN Security Schema V3
 -- Supports Replay Protection, Rate Limits, Kill-Switch Policies, Force Update & Binary Build Manifests
 
 CREATE TABLE IF NOT EXISTS `api_nonces` (

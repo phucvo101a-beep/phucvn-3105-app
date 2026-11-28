@@ -75,13 +75,13 @@
 		3105SEC06 /* SecCoreBridge.swift in Sources */ = {isa = PBXBuildFile; fileRef = 3105SEC05; };
 		3105A228 /* Localizable.strings in Resources */ = {isa = PBXBuildFile; fileRef = 3105A120; };
 		3105A211 /* Assets.xcassets in Resources */ = {isa = PBXBuildFile; fileRef = 3105A031; };
-		3105P101 /* Antena_TobiAim_FFVN.3105 in Resources */ = {isa = PBXBuildFile; fileRef = 3105P001; };
-		3105P102 /* AimDrag_85_TobiAim_FFVN.3105 in Resources */ = {isa = PBXBuildFile; fileRef = 3105P002; };
-		3105P103 /* DinhVi_Chams_TobiAim_FFVN.3105 in Resources */ = {isa = PBXBuildFile; fileRef = 3105P003; };
-		3105P104 /* DinhVi_Sung_TobiAim_FFVN.3105 in Resources */ = {isa = PBXBuildFile; fileRef = 3105P004; };
-		3105P105 /* Aim_Neck_TobiAim_FFVN.3105 in Resources */ = {isa = PBXBuildFile; fileRef = 3105P005; };
-		3105P106 /* AimNeck_Antena_TobiAim_FFVN.3105 in Resources */ = {isa = PBXBuildFile; fileRef = 3105P006; };
-		3105P107 /* AimDrag_85_Antena_TobiAim_FFVN.3105 in Resources */ = {isa = PBXBuildFile; fileRef = 3105P007; };
+		3105P101 /* Antena_PhucVN_FFVN.3105 in Resources */ = {isa = PBXBuildFile; fileRef = 3105P001; };
+		3105P102 /* AimDrag_85_PhucVN_FFVN.3105 in Resources */ = {isa = PBXBuildFile; fileRef = 3105P002; };
+		3105P103 /* DinhVi_Chams_PhucVN_FFVN.3105 in Resources */ = {isa = PBXBuildFile; fileRef = 3105P003; };
+		3105P104 /* DinhVi_Sung_PhucVN_FFVN.3105 in Resources */ = {isa = PBXBuildFile; fileRef = 3105P004; };
+		3105P105 /* Aim_Neck_PhucVN_FFVN.3105 in Resources */ = {isa = PBXBuildFile; fileRef = 3105P005; };
+		3105P106 /* AimNeck_Antena_PhucVN_FFVN.3105 in Resources */ = {isa = PBXBuildFile; fileRef = 3105P006; };
+		3105P107 /* AimDrag_85_Antena_PhucVN_FFVN.3105 in Resources */ = {isa = PBXBuildFile; fileRef = 3105P007; };
 		3105P108 /* AIM BODY FFVN (1).3105 in Resources */ = {isa = PBXBuildFile; fileRef = 3105P008; };
 		3105P109 /* MODSKIN FFVN PHUCVN (1).3105 in Resources */ = {isa = PBXBuildFile; fileRef = 3105P009; };
 		3105P110 /* MODSKIN FFVN PHUCVN (2).3105 in Resources */ = {isa = PBXBuildFile; fileRef = 3105P010; };
@@ -102,13 +102,13 @@
 		3105A029 /* bad_query.c */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.c; path = bad_query.c; sourceTree = "<group>"; };
 		3105A030 /* mcm_bridge.m */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.objc; path = mcm_bridge.m; sourceTree = "<group>"; };
 		3105A031 /* Assets.xcassets */ = {isa = PBXFileReference; lastKnownFileType = folder.assetcatalog; path = Assets.xcassets; sourceTree = "<group>"; };
-		3105P001 /* Antena_TobiAim_FFVN.3105 */ = {isa = PBXFileReference; lastKnownFileType = file; path = Antena_TobiAim_FFVN.3105; sourceTree = "<group>"; };
-		3105P002 /* AimDrag_85_TobiAim_FFVN.3105 */ = {isa = PBXFileReference; lastKnownFileType = file; path = AimDrag_85_TobiAim_FFVN.3105; sourceTree = "<group>"; };
-		3105P003 /* DinhVi_Chams_TobiAim_FFVN.3105 */ = {isa = PBXFileReference; lastKnownFileType = file; path = DinhVi_Chams_TobiAim_FFVN.3105; sourceTree = "<group>"; };
-		3105P004 /* DinhVi_Sung_TobiAim_FFVN.3105 */ = {isa = PBXFileReference; lastKnownFileType = file; path = DinhVi_Sung_TobiAim_FFVN.3105; sourceTree = "<group>"; };
-		3105P005 /* Aim_Neck_TobiAim_FFVN.3105 */ = {isa = PBXFileReference; lastKnownFileType = file; path = Aim_Neck_TobiAim_FFVN.3105; sourceTree = "<group>"; };
-		3105P006 /* AimNeck_Antena_TobiAim_FFVN.3105 */ = {isa = PBXFileReference; lastKnownFileType = file; path = AimNeck_Antena_TobiAim_FFVN.3105; sourceTree = "<group>"; };
-		3105P007 /* AimDrag_85_Antena_TobiAim_FFVN.3105 */ = {isa = PBXFileReference; lastKnownFileType = file; path = AimDrag_85_Antena_TobiAim_FFVN.3105; sourceTree = "<group>"; };
+		3105P001 /* Antena_PhucVN_FFVN.3105 */ = {isa = PBXFileReference; lastKnownFileType = file; path = Antena_PhucVN_FFVN.3105; sourceTree = "<group>"; };
+		3105P002 /* AimDrag_85_PhucVN_FFVN.3105 */ = {isa = PBXFileReference; lastKnownFileType = file; path = AimDrag_85_PhucVN_FFVN.3105; sourceTree = "<group>"; };
+		3105P003 /* DinhVi_Chams_PhucVN_FFVN.3105 */ = {isa = PBXFileReference; lastKnownFileType = file; path = DinhVi_Chams_PhucVN_FFVN.3105; sourceTree = "<group>"; };
+		3105P004 /* DinhVi_Sung_PhucVN_FFVN.3105 */ = {isa = PBXFileReference; lastKnownFileType = file; path = DinhVi_Sung_PhucVN_FFVN.3105; sourceTree = "<group>"; };
+		3105P005 /* Aim_Neck_PhucVN_FFVN.3105 */ = {isa = PBXFileReference; lastKnownFileType = file; path = Aim_Neck_PhucVN_FFVN.3105; sourceTree = "<group>"; };
+		3105P006 /* AimNeck_Antena_PhucVN_FFVN.3105 */ = {isa = PBXFileReference; lastKnownFileType = file; path = AimNeck_Antena_PhucVN_FFVN.3105; sourceTree = "<group>"; };
+		3105P007 /* AimDrag_85_Antena_PhucVN_FFVN.3105 */ = {isa = PBXFileReference; lastKnownFileType = file; path = AimDrag_85_Antena_PhucVN_FFVN.3105; sourceTree = "<group>"; };
 		3105P008 /* AIM BODY FFVN (1).3105 */ = {isa = PBXFileReference; lastKnownFileType = file; path = "AIM BODY FFVN (1).3105"; sourceTree = "<group>"; };
 		3105P009 /* MODSKIN FFVN PHUCVN (1).3105 */ = {isa = PBXFileReference; lastKnownFileType = file; path = "MODSKIN FFVN PHUCVN (1).3105"; sourceTree = "<group>"; };
 		3105P010 /* MODSKIN FFVN PHUCVN (2).3105 */ = {isa = PBXFileReference; lastKnownFileType = file; path = "MODSKIN FFVN PHUCVN (2).3105"; sourceTree = "<group>"; };
@@ -221,13 +221,13 @@
 				3105A406 /* kexploit */,
 				3105A120 /* Localizable.strings */,
 				3105A031 /* Assets.xcassets */,
-				3105P001 /* Antena_TobiAim_FFVN.3105 */,
-				3105P002 /* AimDrag_85_TobiAim_FFVN.3105 */,
-				3105P003 /* DinhVi_Chams_TobiAim_FFVN.3105 */,
-				3105P004 /* DinhVi_Sung_TobiAim_FFVN.3105 */,
-				3105P005 /* Aim_Neck_TobiAim_FFVN.3105 */,
-				3105P006 /* AimNeck_Antena_TobiAim_FFVN.3105 */,
-				3105P007 /* AimDrag_85_Antena_TobiAim_FFVN.3105 */,
+				3105P001 /* Antena_PhucVN_FFVN.3105 */,
+				3105P002 /* AimDrag_85_PhucVN_FFVN.3105 */,
+				3105P003 /* DinhVi_Chams_PhucVN_FFVN.3105 */,
+				3105P004 /* DinhVi_Sung_PhucVN_FFVN.3105 */,
+				3105P005 /* Aim_Neck_PhucVN_FFVN.3105 */,
+				3105P006 /* AimNeck_Antena_PhucVN_FFVN.3105 */,
+				3105P007 /* AimDrag_85_Antena_PhucVN_FFVN.3105 */,
 				3105P008 /* AIM BODY FFVN (1).3105 */,
 				3105P009 /* MODSKIN FFVN PHUCVN (1).3105 */,
 				3105P010 /* MODSKIN FFVN PHUCVN (2).3105 */,
@@ -512,7 +512,7 @@
 				GCC_C_LANGUAGE_STANDARD = gnu17;
 				GENERATE_INFOPLIST_FILE = YES;
 				INFOPLIST_FILE = ThreeOneOSFive/Info.plist;
-				INFOPLIST_KEY_CFBundleDisplayName = "3105 x Tobi Aim";
+				INFOPLIST_KEY_CFBundleDisplayName = "PHUCVN IPA DEV";
 				INFOPLIST_KEY_UIApplicationSceneManifest_Generation = YES;
 				INFOPLIST_KEY_UIApplicationSupportsIndirectInputEvents = YES;
 				INFOPLIST_KEY_UILaunchScreen_Generation = YES;
@@ -551,7 +551,7 @@
 				GCC_C_LANGUAGE_STANDARD = gnu17;
 				GENERATE_INFOPLIST_FILE = YES;
 				INFOPLIST_FILE = ThreeOneOSFive/Info.plist;
-				INFOPLIST_KEY_CFBundleDisplayName = "3105 x Tobi Aim";
+				INFOPLIST_KEY_CFBundleDisplayName = "PHUCVN IPA DEV";
 				INFOPLIST_KEY_UIApplicationSceneManifest_Generation = YES;
 				INFOPLIST_KEY_UIApplicationSupportsIndirectInputEvents = YES;
 				INFOPLIST_KEY_UILaunchScreen_Generation = YES;

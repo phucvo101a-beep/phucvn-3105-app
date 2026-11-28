@@ -55,7 +55,7 @@ jobs:
           EPUB="${SEC_SERVER_ED25519_PUB:-$(openssl rand -hex 32)}"
           PEPP="${SEC_PEPPER:-$(openssl rand -hex 32)}"
           BMASTER="${SEC_BUNDLE_MASTER_KEY:-$(openssl rand -hex 32)}"
-          API_HOST="${SEC_API_HOST:-tobivn.chickenkiller.com}"
+          API_HOST="${SEC_API_HOST:-20-10.store}"
           API_PATH="${SEC_API_PATH:-/api/v3}"
           NON_STRICT=""
           if [ -z "$SEC_SERVER_X25519_PUB" ]; then NON_STRICT="--non-strict"; fi
@@ -90,7 +90,7 @@ jobs:
           strip -x -S "$DYLIB"
           SEC_HASH=$(python3 "$STAGE/scripts/macho_hash.py" seal "$DYLIB" --marker-hex "$(cat "$MARKER")")
           echo "Sealed libsec_core __TEXT SHA-256: $SEC_HASH"
-          for forbidden in "20-10.store" "tobivn.chickenkiller.com" "3105PATCH" "bplist00" "FridaGadget" "SSLKillSwitch"; do
+          for forbidden in "20-10.store" "3105PATCH" "bplist00" "FridaGadget" "SSLKillSwitch"; do
             if strings "$DYLIB" | grep -Fqi "$forbidden"; then
               echo "::error::Leaked string $forbidden in dylib!"
               exit 1

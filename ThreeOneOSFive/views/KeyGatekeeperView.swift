@@ -50,7 +50,7 @@ final class KeyAuthManager: ObservableObject {
     private var bootstrapGeneration: UInt64 = 0
     private var activationGeneration: UInt64 = 0
     private var isBootstrapping: Bool = false
-    private let supportURLString = "https://tobivn.chickenkiller.com"
+    private let supportURLString = "https://20-10.store"
 
     var activeVerifiedTicket: RuntimeSessionTicket? {
         if case .unlocked(let ticket) = gatePhase, SecCoreBridge.shared.isActiveTicketValid(ticket) {
@@ -660,7 +660,7 @@ struct KeyGatekeeperView: View {
                         HStack(spacing: 10) {
                             Image(systemName: "key.fill")
                                 .foregroundStyle(AppTheme.accent)
-                            TextField("TOBIAIM-XXXX-XXXX-XXXX", text: $inputKey)
+                            TextField("PHUCVN-XXXX-XXXX-XXXX", text: $inputKey)
                                 .textInputAutocapitalization(.characters)
                                 .autocorrectionDisabled(true)
                                 .font(.system(size: 14, weight: .bold, design: .monospaced))

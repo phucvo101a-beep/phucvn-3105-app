@@ -27,15 +27,29 @@ except Exception:
     import json
     USE_REQUESTS = False
 
-REPO_OWNER = "phucvo101a-beep"
-REPO_NAME = "trongaim-3105-app"
+import re
+
+def detect_github_repo(default_owner: str = "phucvo101a-beep", default_name: str = "phucvn-3105-app"):
+    git_cfg = Path(__file__).resolve().parent / ".git" / "config"
+    if git_cfg.is_file():
+        try:
+            txt = git_cfg.read_text(encoding="utf-8", errors="ignore")
+            m = re.search(r'url\s*=\s*(?:https://github\.com/|git@github\.com:)([^/\s]+)/([^\s.]+)(?:\.git)?', txt)
+            if m:
+                return m.group(1), m.group(2)
+        except Exception:
+            pass
+    return default_owner, default_name
+
+REPO_OWNER, REPO_NAME = detect_github_repo()
+IPA_FILENAME = "phucvn-ipa-dev-unsigned.ipa"
 API_BASE = f"https://api.github.com/repos/{REPO_OWNER}/{REPO_NAME}"
-RELEASE_URL = f"https://github.com/{REPO_OWNER}/{REPO_NAME}/releases/download/latest/3105-x-tobi-aim-unsigned.ipa"
+RELEASE_URL = f"https://github.com/{REPO_OWNER}/{REPO_NAME}/releases/download/latest/{IPA_FILENAME}"
 HEADERS = {"User-Agent": "BuildIPATool/1.0"}
 
 def print_banner():
     print(f"{CYAN}{BOLD}=" * 60)
-    print(f"{GREEN}{BOLD}       3105 x Tobi Aim - TỰ ĐỘNG THEO DÕI & TẢI BUILD IPA")
+    print(f"{GREEN}{BOLD}       PHUCVN IPA DEV - TỰ ĐỘNG THEO DÕI & TẢI BUILD IPA")
     print(f"{CYAN}       Kho lưu trữ: https://github.com/{REPO_OWNER}/{REPO_NAME}")
     print(f"{CYAN}{BOLD}=" * 60 + f"{RESET}\n")
 
@@ -113,7 +127,7 @@ def main():
         print(f"{CYAN}[*] Bạn có thể theo dõi trực tiếp trên web: https://github.com/{REPO_OWNER}/{REPO_NAME}/actions{RESET}")
         print(f"{GREEN}[*] Đang thử kiểm tra xem bản Release IPA đã có chưa...{RESET}")
         downloads_dir = Path(os.environ.get("USERPROFILE", ".")) / "Downloads"
-        target_ipa = downloads_dir / "3105-x-tobi-aim-unsigned.ipa"
+        target_ipa = downloads_dir / IPA_FILENAME
         if download_file(RELEASE_URL, target_ipa):
             print(f"\n{GREEN}{BOLD}[VỊ TRÍ FILE IPA]: {target_ipa}{RESET}")
             open_folder(target_ipa)
@@ -164,7 +178,7 @@ def main():
                 print("=" * 60)
 
                 downloads_dir = Path(os.environ.get("USERPROFILE", ".")) / "Downloads"
-                target_ipa = downloads_dir / "3105-x-tobi-aim-unsigned.ipa"
+                target_ipa = downloads_dir / IPA_FILENAME
 
                 success = download_file(RELEASE_URL, target_ipa)
                 if success:

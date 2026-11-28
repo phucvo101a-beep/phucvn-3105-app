@@ -1,6 +1,6 @@
 {
-  "app_name": "Tobi AIM",
-  "admin_user": "tobiaim_admin",
+  "app_name": "PHUCVN",
+  "admin_user": "phucvn_admin",
   "admin_pass_hash": "",
   "allow_register": false,
   "require_key": true,

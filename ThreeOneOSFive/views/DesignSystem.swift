@@ -1,14 +1,14 @@
 import SwiftUI
 
-/// Shared visual language for the 3105 × Tobi Aim interface.
+/// Shared visual language for the PHUCVN IPA DEV interface.
 /// Presentation-only components live here; file, patch and device services are untouched.
 enum AppBrand {
-    static let name = "Tobi AIM"
+    static let name = "PHUCVN IPA DEV"
     static let artworkAsset = "BrandArtwork"
 }
 
 enum AppTheme {
-    // Crimson / Sharingan Obsidian palette matching Tobi AIM artwork.
+    // Crimson / Obsidian palette for PHUCVN IPA DEV.
     static let accent = Color(red: 0.94, green: 0.16, blue: 0.21)
     static let accentSoft = Color(red: 0.98, green: 0.44, blue: 0.47)
     static let accentDeep = Color(red: 0.58, green: 0.06, blue: 0.10)

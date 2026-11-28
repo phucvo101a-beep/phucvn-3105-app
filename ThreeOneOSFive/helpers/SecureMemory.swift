@@ -73,7 +73,7 @@ final class SecureBytes {
 
 /// Stores ONLY the user's license string in iOS Keychain; never persists offline auth booleans.
 enum KeychainLicenseVault {
-    private static let service = "com.tobiaim.3105.license"
+    private static let service = "com.phucvn.3105.license"
     private static let account = "saved_key"
 
     static func saveLicenseKey(_ key: String) {

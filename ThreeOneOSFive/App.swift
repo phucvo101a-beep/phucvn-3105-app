@@ -11,7 +11,7 @@ struct ThreeOneOSFiveApp: App {
     init() {
         setupLogCapture()
         _ = LocalDevBridge.shared
-        log("app: Tobi AIM launching — iOS \(AppInfo.osVersion) (\(AppInfo.osBuild)) \(AppInfo.machineName)")
+        log("app: PHUCVN IPA DEV launching — iOS \(AppInfo.osVersion) (\(AppInfo.osBuild)) \(AppInfo.machineName)")
     }
 
     private var language: AppLanguage { .vietnamese }

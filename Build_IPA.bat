@@ -1,5 +1,5 @@
 @echo off
-title 3105 x Tobi Aim - Build IPA Tool
+title PHUCVN IPA DEV - Build IPA Tool
 cd /d "%~dp0"
 
 python build_ipa.py

@@ -1,6 +1,6 @@
 <?php
 /**
- * Tobi AIM - Zero-Trust API Gateway V3
+ * PHUCVN IPA DEV - Zero-Trust API Gateway V3
  * Dispatches requests to compiled `serverkey_core` (daemon/CLI) with CoreEngine PHP ext-sodium fallback.
  */
 
