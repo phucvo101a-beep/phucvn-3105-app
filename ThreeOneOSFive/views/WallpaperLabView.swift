@@ -46,7 +46,8 @@ struct WallpaperLabView: View {
             .background { AppPageBackground() }
             .navigationTitle("")
             .navigationBarTitleDisplayMode(.inline)
-            .toolbarBackground(AppTheme.pageBackground.opacity(0.94), for: .navigationBar)
+            .toolbarBackground(AppTheme.pageBackground.opacity(0.92), for: .navigationBar)
+            .toolbarBackground(.visible, for: .navigationBar)
             .toolbar { toolbarContent }
             .overlay { busyOverlay }
             .alert(item: $alert, content: alertContent)

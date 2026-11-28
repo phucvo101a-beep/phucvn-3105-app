@@ -11,35 +11,11 @@ struct SettingsView: View {
     var body: some View {
         NavigationStack {
             ScrollView(showsIndicators: false) {
-                VStack(alignment: .leading, spacing: 22) {
+                VStack(alignment: .leading, spacing: 14) {
                     pageHeading
                     deviceCard
 
                     SettingsGroup(title: "THÔNG TIN PHIÊN BẢN") {
-                        SettingsValueRow(
-                            symbol: "gearshape.2.fill",
-                            title: "Phiên bản iOS",
-                            value: AppInfo.osVersion
-                        )
-                        SettingsRowDivider()
-                        SettingsValueRow(
-                            symbol: "number",
-                            title: "Mã bản dựng iOS",
-                            value: AppInfo.osBuild
-                        )
-                        SettingsRowDivider()
-                        SettingsValueRow(
-                            symbol: "app.badge",
-                            title: "Phiên bản ứng dụng",
-                            value: appVersion
-                        )
-                        SettingsRowDivider()
-                        SettingsValueRow(
-                            symbol: "hammer.fill",
-                            title: "Bản dựng ứng dụng",
-                            value: appBuild
-                        )
-                        SettingsRowDivider()
                         SettingsValueRow(
                             symbol: "person.crop.circle.fill",
                             title: "Tác giả / Phát triển",
@@ -80,7 +56,7 @@ struct SettingsView: View {
                         HStack {
                             SettingsSymbol(symbol: "clock.badge.checkmark.fill", tint: keyAuth.isPermanent ? AppTheme.accent : (keyAuth.secondsRemaining < 3600 ? AppTheme.danger : AppTheme.success))
                             VStack(alignment: .leading, spacing: 2) {
-                                Text(keyAuth.isPermanent ? "Thời hạn sử dụng" : "Đếm ngược thời gian còn lại")
+                                Text("Thời hạn sử dụng")
                                     .font(.system(size: 13, weight: .bold, design: .rounded))
                                     .foregroundStyle(.white)
                                 Text(keyAuth.remainingCountdownText.isEmpty ? (keyAuth.isPermanent ? "Vĩnh Viễn (Trọn đời)" : "Đang kiểm tra...") : keyAuth.remainingCountdownText)
@@ -90,15 +66,6 @@ struct SettingsView: View {
                             Spacer()
                         }
                         .padding(.vertical, 4)
-
-                        if !keyAuth.exactExpiryDateText.isEmpty {
-                            SettingsRowDivider()
-                            SettingsValueRow(
-                                symbol: "calendar.badge.clock",
-                                title: "Thời điểm hết hạn",
-                                value: keyAuth.exactExpiryDateText
-                            )
-                        }
 
                         SettingsRowDivider()
                         SettingsValueRow(
@@ -225,13 +192,14 @@ struct SettingsView: View {
                 .frame(maxWidth: 680)
                 .frame(maxWidth: .infinity)
                 .padding(.horizontal, AppTheme.pageInset)
-                .padding(.top, 17)
+                .padding(.top, 12)
                 .padding(.bottom, 32)
             }
             .background { AppPageBackground() }
             .navigationTitle("Cài đặt")
             .navigationBarTitleDisplayMode(.inline)
             .toolbarBackground(AppTheme.pageBackground.opacity(0.92), for: .navigationBar)
+            .toolbarBackground(.visible, for: .navigationBar)
             .toolbar {
                 ToolbarItem(placement: .navigationBarTrailing) {
                     Button("Đóng") { dismiss() }
@@ -264,18 +232,10 @@ struct SettingsView: View {
     }
 
     private var deviceCard: some View {
-        VStack(alignment: .leading, spacing: 16) {
-            HStack {
-                StudioEyebrow(text: "THIẾT BỊ HIỆN TẠI")
-                Spacer()
-                Image(systemName: "checkmark.seal.fill")
-                    .font(.system(size: 15, weight: .semibold))
-                    .foregroundStyle(AppTheme.success)
-            }
-
-            HStack(alignment: .center, spacing: 15) {
+        VStack(alignment: .leading, spacing: 14) {
+            HStack(alignment: .center, spacing: 13) {
                 ZStack {
-                    RoundedRectangle(cornerRadius: 21, style: .continuous)
+                    RoundedRectangle(cornerRadius: 12, style: .continuous)
                         .fill(
                             LinearGradient(
                                 colors: [Color.white.opacity(0.17), Color.white.opacity(0.035)],
@@ -283,64 +243,49 @@ struct SettingsView: View {
                                 endPoint: .bottomTrailing
                             )
                         )
-                    RoundedRectangle(cornerRadius: 21, style: .continuous)
+                    RoundedRectangle(cornerRadius: 12, style: .continuous)
                         .strokeBorder(Color.white.opacity(0.18), lineWidth: 1)
                     Image(systemName: "iphone.gen3")
-                        .font(.system(size: 31, weight: .ultraLight))
+                        .font(.system(size: 24, weight: .ultraLight))
                         .foregroundStyle(AppTheme.accent)
                 }
-                .frame(width: 70, height: 78)
+                .frame(width: 52, height: 56)
 
-                VStack(alignment: .leading, spacing: 5) {
+                VStack(alignment: .leading, spacing: 3) {
+                    StudioEyebrow(text: "THIẾT BỊ HIỆN TẠI")
                     Text(AppInfo.hardwareDisplayName)
-                        .font(.system(size: 19, weight: .bold, design: .rounded))
-                        .tracking(-0.35)
+                        .font(.system(size: 18, weight: .bold, design: .rounded))
+                        .tracking(-0.3)
                         .foregroundStyle(.white)
-                        .lineLimit(2)
+                        .lineLimit(1)
                         .minimumScaleFactor(0.82)
-                    Text("iOS \(AppInfo.osVersion)")
-                        .font(.system(size: 12, weight: .semibold, design: .monospaced))
+                    Text("PHUCVN IPA DEV")
+                        .font(.system(size: 11, weight: .semibold, design: .rounded))
                         .foregroundStyle(AppTheme.accentSoft)
-                    Text("Mã bản dựng: \(AppInfo.osBuild)")
-                        .font(.system(size: 9, weight: .medium, design: .monospaced))
-                        .foregroundStyle(AppTheme.subduedText)
                 }
-                Spacer(minLength: 0)
+                Spacer(minLength: 4)
+                Image(systemName: "checkmark.seal.fill")
+                    .font(.system(size: 16, weight: .semibold))
+                    .foregroundStyle(AppTheme.success)
             }
 
-            Rectangle()
-                .fill(Color.white.opacity(0.10))
-                .frame(height: 1)
-
-            HStack {
-                VStack(alignment: .leading, spacing: 4) {
-                    Text("ỨNG DỤNG")
-                        .font(.system(size: 8, weight: .bold, design: .rounded))
-                        .tracking(1.2)
-                        .foregroundStyle(AppTheme.subduedText)
-                    Text("PHUCVN IPA DEV")
-                        .font(.system(size: 12, weight: .bold, design: .rounded))
-                        .foregroundStyle(.white)
-                }
-                Spacer()
-                Text("v\(appVersion)  ·  \(appBuild)")
-                    .font(.system(size: 10, weight: .semibold, design: .monospaced))
-                    .foregroundStyle(AppTheme.accentSoft)
-                    .lineLimit(1)
-                    .minimumScaleFactor(0.8)
+            HStack(spacing: 8) {
+                SettingsMiniStat(label: "iOS", value: AppInfo.osVersion)
+                SettingsMiniStat(label: "BUILD", value: AppInfo.osBuild)
+                SettingsMiniStat(label: "APP", value: "v\(appVersion) (\(appBuild))")
             }
         }
-        .padding(18)
+        .padding(16)
         .background(
             LinearGradient(
                 colors: [Color(red: 0.160, green: 0.182, blue: 0.215), AppTheme.consoleBackground],
                 startPoint: .topLeading,
                 endPoint: .bottomTrailing
             ),
-            in: RoundedRectangle(cornerRadius: 27, style: .continuous)
+            in: RoundedRectangle(cornerRadius: 20, style: .continuous)
         )
-        .overlay { StudioGlassHighlight(cornerRadius: 27, intensity: 0.9) }
-        .overlay { AppCardBorder(cornerRadius: 27) }
+        .overlay { StudioGlassHighlight(cornerRadius: 20, intensity: 0.9) }
+        .overlay { AppCardBorder(cornerRadius: 20) }
         .shadow(color: .black.opacity(0.32), radius: 22, y: 10)
     }
 
@@ -390,9 +335,9 @@ private struct SettingsGroup<Content: View>: View {
                 content
             }
             .padding(.horizontal, 14)
-            .padding(.vertical, 9)
+            .padding(.vertical, 8)
             .background {
-                RoundedRectangle(cornerRadius: 22, style: .continuous)
+                RoundedRectangle(cornerRadius: 20, style: .continuous)
                     .fill(
                         LinearGradient(
                             colors: [AppTheme.elevatedBackground.opacity(0.94), AppTheme.consoleBackground],
@@ -401,8 +346,35 @@ private struct SettingsGroup<Content: View>: View {
                         )
                     )
             }
-            .overlay { StudioGlassHighlight(cornerRadius: 22, intensity: 0.75) }
-            .overlay { AppCardBorder(cornerRadius: 22) }
+            .overlay { StudioGlassHighlight(cornerRadius: 20, intensity: 0.75) }
+            .overlay { AppCardBorder(cornerRadius: 20) }
+        }
+    }
+}
+
+private struct SettingsMiniStat: View {
+    let label: String
+    let value: String
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 3) {
+            Text(label)
+                .font(.system(size: 8.5, weight: .bold, design: .rounded))
+                .tracking(1.1)
+                .foregroundStyle(AppTheme.subduedText)
+            Text(value)
+                .font(.system(size: 11, weight: .bold, design: .monospaced))
+                .foregroundStyle(.white)
+                .lineLimit(1)
+                .minimumScaleFactor(0.75)
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .padding(.horizontal, 10)
+        .padding(.vertical, 8)
+        .background(AppTheme.elevatedBackground.opacity(0.75), in: RoundedRectangle(cornerRadius: 12, style: .continuous))
+        .overlay {
+            RoundedRectangle(cornerRadius: 12, style: .continuous)
+                .strokeBorder(Color.white.opacity(0.09), lineWidth: 1)
         }
     }
 }
@@ -462,11 +434,11 @@ private struct SettingsSymbol: View {
     let tint: Color
 
     var body: some View {
-        RoundedRectangle(cornerRadius: 11, style: .continuous)
+        RoundedRectangle(cornerRadius: 12, style: .continuous)
             .fill(tint.opacity(0.12))
             .frame(width: 35, height: 35)
             .overlay {
-                RoundedRectangle(cornerRadius: 11, style: .continuous)
+                RoundedRectangle(cornerRadius: 12, style: .continuous)
                     .strokeBorder(Color.white.opacity(0.09), lineWidth: 1)
             }
             .overlay {
@@ -481,7 +453,7 @@ private struct SettingsRowDivider: View {
     var body: some View {
         Rectangle()
             .fill(AppTheme.hairline)
-            .frame(height: 1)
-            .padding(.leading, 47)
+            .frame(height: 0.5)
+            .padding(.leading, 46)
     }
 }

@@ -23,7 +23,7 @@ enum AppTheme {
     static let warning = Color(red: 0.98, green: 0.70, blue: 0.32)
     static let danger = Color(red: 1.00, green: 0.30, blue: 0.34)
 
-    static let pageInset: CGFloat = 20
+    static let pageInset: CGFloat = 16
     static let rowIconSize: CGFloat = 17
     static let rowIconFrame: CGFloat = 38
     static let fileRowIconSize: CGFloat = 17
@@ -32,9 +32,9 @@ enum AppTheme {
     static let appIconSize: CGFloat = 38
     static let emptyIconSize: CGFloat = 30
     static let selectionIconSize: CGFloat = 19
-    static let contentCardCornerRadius: CGFloat = 25
-    static let contentCardInset: CGFloat = 20
-    static let contentCardPadding: CGFloat = 17
+    static let contentCardCornerRadius: CGFloat = 20
+    static let contentCardInset: CGFloat = 16
+    static let contentCardPadding: CGFloat = 14
 }
 
 struct AppCardBorder: View {
@@ -42,7 +42,7 @@ struct AppCardBorder: View {
 
     var body: some View {
         RoundedRectangle(cornerRadius: cornerRadius, style: .continuous)
-            .strokeBorder(AppTheme.accent.opacity(0.22), lineWidth: 1)
+            .strokeBorder(Color.white.opacity(0.12), lineWidth: 1)
             .accessibilityHidden(true)
     }
 }
@@ -68,7 +68,7 @@ struct AppRowIcon: View {
 
     var body: some View {
         ZStack {
-            RoundedRectangle(cornerRadius: 13, style: .continuous)
+            RoundedRectangle(cornerRadius: 12, style: .continuous)
                 .fill(
                     LinearGradient(
                         colors: [tint.opacity(0.22), tint.opacity(0.07)],
@@ -76,9 +76,9 @@ struct AppRowIcon: View {
                         endPoint: .bottomTrailing
                     )
                 )
-            RoundedRectangle(cornerRadius: 13, style: .continuous)
+            RoundedRectangle(cornerRadius: 12, style: .continuous)
                 .strokeBorder(Color.white.opacity(0.16), lineWidth: 1)
-            RoundedRectangle(cornerRadius: 13, style: .continuous)
+            RoundedRectangle(cornerRadius: 12, style: .continuous)
                 .fill(LinearGradient(colors: [Color.white.opacity(0.10), .clear], startPoint: .topLeading, endPoint: .bottomTrailing))
             Image(systemName: systemName)
                 .font(.system(size: symbolSize, weight: .semibold))
@@ -153,12 +153,12 @@ struct StudioSectionHeading: View {
 }
 
 struct StudioPanel<Content: View>: View {
-    var padding: CGFloat = 17
+    var padding: CGFloat = 14
     var cornerRadius: CGFloat = AppTheme.contentCardCornerRadius
     let content: Content
 
     init(
-        padding: CGFloat = 17,
+        padding: CGFloat = 14,
         cornerRadius: CGFloat = AppTheme.contentCardCornerRadius,
         @ViewBuilder content: () -> Content
     ) {
@@ -268,10 +268,10 @@ struct AppRoundActionButton: View {
                         startPoint: .topLeading,
                         endPoint: .bottomTrailing
                     ),
-                    in: RoundedRectangle(cornerRadius: 15, style: .continuous)
+                    in: RoundedRectangle(cornerRadius: 12, style: .continuous)
                 )
                 .overlay {
-                    RoundedRectangle(cornerRadius: 15, style: .continuous)
+                    RoundedRectangle(cornerRadius: 12, style: .continuous)
                         .strokeBorder(Color.white.opacity(0.16), lineWidth: 1)
                 }
         }
@@ -301,7 +301,39 @@ struct AppEntranceModifier: ViewModifier {
     }
 }
 
+/// Shields the top system status bar with a dark translucent blur & fade so scrolled content never overlaps clock or battery indicators.
+struct AppTopSafeAreaBlurModifier: ViewModifier {
+    func body(content: Content) -> some View {
+        content
+            .safeAreaInset(edge: .top, spacing: 0) {
+                Color.clear
+                    .frame(height: 1)
+                    .allowsHitTesting(false)
+                    .background {
+                        VStack(spacing: 0) {
+                            Rectangle()
+                                .fill(.ultraThinMaterial)
+                                .overlay(AppTheme.pageBackground.opacity(0.76))
+                            LinearGradient(
+                                colors: [AppTheme.pageBackground.opacity(0.76), .clear],
+                                startPoint: .top,
+                                endPoint: .bottom
+                            )
+                            .frame(height: 12)
+                        }
+                        .padding(.bottom, -12)
+                        .ignoresSafeArea(edges: .top)
+                        .allowsHitTesting(false)
+                    }
+            }
+    }
+}
+
 extension View {
+    func appTopSafeAreaBlur() -> some View {
+        modifier(AppTopSafeAreaBlurModifier())
+    }
+
     func appEntrance(isVisible: Bool, delay: Double = 0) -> some View {
         modifier(AppEntranceModifier(isVisible: isVisible, delay: delay))
     }

@@ -59,7 +59,8 @@ struct CleanerView: View {
             .background { AppPageBackground() }
             .navigationTitle(language.text("cleaner.title"))
             .navigationBarTitleDisplayMode(.inline)
-            .toolbarBackground(AppTheme.pageBackground.opacity(0.94), for: .navigationBar)
+            .toolbarBackground(AppTheme.pageBackground.opacity(0.92), for: .navigationBar)
+            .toolbarBackground(.visible, for: .navigationBar)
             .toolbar { toolbarContent }
             .alert(item: $activeAlert, content: alert(for:))
             .onAppear {

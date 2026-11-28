@@ -561,7 +561,7 @@ struct SecurityLockoutView: View {
                                 .padding(.vertical, 14)
                                 .background(
                                     LinearGradient(colors: [AppTheme.accent, AppTheme.accentDeep], startPoint: .leading, endPoint: .trailing),
-                                    in: RoundedRectangle(cornerRadius: 14, style: .continuous)
+                                    in: RoundedRectangle(cornerRadius: 12, style: .continuous)
                                 )
                             }
                             .padding(.horizontal, 28)
@@ -680,8 +680,8 @@ struct KeyGatekeeperView: View {
                             }
                         }
                         .padding(14)
-                        .background(Color.black.opacity(0.28), in: RoundedRectangle(cornerRadius: 14, style: .continuous))
-                        .overlay(RoundedRectangle(cornerRadius: 14).strokeBorder(Color.white.opacity(0.12), lineWidth: 1))
+                        .background(Color.black.opacity(0.28), in: RoundedRectangle(cornerRadius: 12, style: .continuous))
+                        .overlay(RoundedRectangle(cornerRadius: 12, style: .continuous).strokeBorder(Color.white.opacity(0.12), lineWidth: 1))
 
                         if let err = keyAuth.errorMessage {
                             HStack(spacing: 8) {
@@ -693,7 +693,7 @@ struct KeyGatekeeperView: View {
                             }
                             .padding(10)
                             .frame(maxWidth: .infinity, alignment: .leading)
-                            .background(AppTheme.danger.opacity(0.12), in: RoundedRectangle(cornerRadius: 10))
+                            .background(AppTheme.danger.opacity(0.12), in: RoundedRectangle(cornerRadius: 12))
                         }
 
                         Button {
@@ -713,7 +713,7 @@ struct KeyGatekeeperView: View {
                             .padding(.vertical, 14)
                             .background(
                                 LinearGradient(colors: [AppTheme.accent, AppTheme.accentDeep], startPoint: .leading, endPoint: .trailing),
-                                in: RoundedRectangle(cornerRadius: 14, style: .continuous)
+                                in: RoundedRectangle(cornerRadius: 12, style: .continuous)
                             )
                         }
                         .disabled(keyAuth.isVerifying)
@@ -731,9 +731,9 @@ struct KeyGatekeeperView: View {
                             .disabled(keyAuth.isVerifying)
                         }
                     }
-                    .padding(18)
-                    .background(AppTheme.consoleBackground, in: RoundedRectangle(cornerRadius: 22, style: .continuous))
-                    .overlay { AppCardBorder(cornerRadius: 22) }
+                    .padding(16)
+                    .background(AppTheme.consoleBackground, in: RoundedRectangle(cornerRadius: 20, style: .continuous))
+                    .overlay { AppCardBorder(cornerRadius: 20) }
 
                     VStack(alignment: .leading, spacing: 8) {
                         HStack {
@@ -758,13 +758,14 @@ struct KeyGatekeeperView: View {
                             .truncationMode(.middle)
                     }
                     .padding(14)
-                    .background(AppTheme.consoleBackground, in: RoundedRectangle(cornerRadius: 16))
-                    .overlay { AppCardBorder(cornerRadius: 16) }
+                    .background(AppTheme.consoleBackground, in: RoundedRectangle(cornerRadius: 20))
+                    .overlay { AppCardBorder(cornerRadius: 20) }
 
                     Spacer(minLength: 20)
                 }
-                .padding(.horizontal, 20)
+                .padding(.horizontal, AppTheme.pageInset)
             }
+            .appTopSafeAreaBlur()
         }
         .onAppear {
             if inputKey.isEmpty && !keyAuth.currentKey.isEmpty {

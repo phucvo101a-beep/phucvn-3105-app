@@ -201,7 +201,7 @@ private struct StudioTabBar: View {
     @Binding var selectedTab: Int
 
     var body: some View {
-        HStack(spacing: 7) {
+        HStack(spacing: 6) {
             ForEach(sections) { section in
                 let isSelected = selectedTab == section.rawValue
                 Button {
@@ -214,11 +214,11 @@ private struct StudioTabBar: View {
                         }
                     }
                 } label: {
-                    VStack(spacing: 5) {
+                    VStack(spacing: 3) {
                         Image(systemName: section.systemImage)
-                            .font(.system(size: 17, weight: isSelected ? .bold : .medium))
+                            .font(.system(size: 16, weight: isSelected ? .bold : .medium))
                             .symbolRenderingMode(.hierarchical)
-                            .scaleEffect(isSelected ? 1.04 : 1)
+                            .scaleEffect(isSelected ? 1.03 : 1)
                         Text(language.text(section.titleKey))
                             .font(.system(size: 9, weight: isSelected ? .bold : .medium, design: .rounded))
                             .lineLimit(1)
@@ -226,43 +226,46 @@ private struct StudioTabBar: View {
                     }
                     .foregroundStyle(isSelected ? AppTheme.pageBackground : AppTheme.subduedText)
                     .frame(maxWidth: .infinity)
-                    .frame(height: 58)
+                    .frame(height: 46)
                     .background {
                         if isSelected {
-                            RoundedRectangle(cornerRadius: 17, style: .continuous)
+                            Capsule()
                                 .fill(
                                     LinearGradient(
-                                        colors: [AppTheme.accent, AppTheme.accentDeep],
+                                        colors: [AppTheme.accent.opacity(0.84), AppTheme.accentDeep.opacity(0.88)],
                                         startPoint: .topLeading,
                                         endPoint: .bottomTrailing
                                     )
                                 )
                                 .overlay {
-                                    RoundedRectangle(cornerRadius: 17, style: .continuous)
-                                        .strokeBorder(AppTheme.silverGlow.opacity(0.55), lineWidth: 0.8)
+                                    Capsule()
+                                        .strokeBorder(AppTheme.silverGlow.opacity(0.40), lineWidth: 0.8)
                                 }
+                                .padding(.horizontal, 2)
                         }
                     }
-                    .contentShape(RoundedRectangle(cornerRadius: 17, style: .continuous))
+                    .contentShape(Capsule())
                 }
                 .buttonStyle(AppPressableStyle())
                 .accessibilityLabel(language.text(section.titleKey))
                 .accessibilityAddTraits(isSelected ? .isSelected : [])
             }
         }
-        .padding(8)
+        .padding(.horizontal, 6)
+        .padding(.vertical, 6)
+        .frame(height: 58)
         .background {
-            RoundedRectangle(cornerRadius: 25, style: .continuous)
+            Capsule()
                 .fill(AppTheme.consoleBackground.opacity(0.96))
                 .overlay {
-                    RoundedRectangle(cornerRadius: 25, style: .continuous)
+                    Capsule()
                         .strokeBorder(Color.white.opacity(0.12), lineWidth: 1)
                 }
                 .shadow(color: .black.opacity(0.35), radius: 10, y: 5)
         }
-        .padding(.horizontal, 15)
-        .padding(.top, 8)
-        .padding(.bottom, 5)
+        .padding(.horizontal, AppTheme.pageInset)
+        .padding(.top, 6)
+        .padding(.bottom, 4)
         .background {
             LinearGradient(
                 colors: [AppTheme.pageBackground.opacity(0), AppTheme.pageBackground.opacity(0.97)],

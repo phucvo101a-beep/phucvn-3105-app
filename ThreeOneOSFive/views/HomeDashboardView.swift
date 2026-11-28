@@ -20,11 +20,10 @@ struct HomeDashboardView: View {
     var body: some View {
         NavigationStack {
             ScrollView(showsIndicators: false) {
-                VStack(alignment: .leading, spacing: 20) {
+                VStack(alignment: .leading, spacing: 14) {
                     heading
+                    heroStatusCard
                     licenseStatusBar
-                    heroPanel
-                    deviceOverview
                     quickAccess
                     maintenancePanel
                     footer
@@ -32,10 +31,11 @@ struct HomeDashboardView: View {
                 .frame(maxWidth: 760)
                 .frame(maxWidth: .infinity)
                 .padding(.horizontal, AppTheme.pageInset)
-                .padding(.top, 13)
-                .padding(.bottom, 110)
+                .padding(.top, 10)
+                .padding(.bottom, 28)
             }
             .scrollDismissesKeyboard(.immediately)
+            .appTopSafeAreaBlur()
             .background { AppPageBackground() }
             .navigationTitle("")
             .navigationBarTitleDisplayMode(.inline)
@@ -57,19 +57,19 @@ struct HomeDashboardView: View {
 
     private var heading: some View {
         HStack(spacing: 12) {
-            AppLogo(size: 48)
+            AppLogo(size: 42)
 
-            VStack(alignment: .leading, spacing: 4) {
+            VStack(alignment: .leading, spacing: 3) {
                 Text(AppBrand.name)
-                    .font(.system(size: 17, weight: .heavy, design: .rounded))
-                    .tracking(-0.45)
+                    .font(.system(size: 16, weight: .heavy, design: .rounded))
+                    .tracking(-0.4)
                     .foregroundStyle(.white)
                     .lineLimit(1)
                     .minimumScaleFactor(0.78)
 
                 Text("TRUNG TÂM ĐIỀU KHIỂN")
                     .font(.system(size: 9, weight: .bold, design: .rounded))
-                    .tracking(1.65)
+                    .tracking(1.55)
                     .foregroundStyle(AppTheme.subduedText)
             }
 
@@ -84,194 +84,123 @@ struct HomeDashboardView: View {
                 }
             } label: {
                 Image(systemName: "gearshape.fill")
-                    .font(.system(size: 16, weight: .semibold))
+                    .font(.system(size: 15, weight: .semibold))
                     .foregroundStyle(AppTheme.accent)
-                    .frame(width: 44, height: 44)
-                    .background(AppTheme.consoleBackground, in: RoundedRectangle(cornerRadius: 16, style: .continuous))
+                    .frame(width: 40, height: 40)
+                    .background(AppTheme.consoleBackground, in: RoundedRectangle(cornerRadius: 12, style: .continuous))
                     .overlay {
-                        RoundedRectangle(cornerRadius: 16, style: .continuous)
-                            .strokeBorder(Color.white.opacity(0.17), lineWidth: 1)
+                        RoundedRectangle(cornerRadius: 12, style: .continuous)
+                            .strokeBorder(Color.white.opacity(0.14), lineWidth: 1)
                     }
             }
             .accessibilityLabel("Cài đặt và nhật ký")
         }
-        .padding(.top, 4)
+        .padding(.top, 2)
     }
 
     private var licenseStatusBar: some View {
         Button {
             showKeyDetails = true
         } label: {
-            HStack(spacing: 12) {
+            HStack(spacing: 10) {
                 ZStack {
-                    Circle()
-                        .fill(AppTheme.accent.opacity(0.18))
-                        .frame(width: 36, height: 36)
+                    RoundedRectangle(cornerRadius: 12, style: .continuous)
+                        .fill(AppTheme.accent.opacity(0.14))
+                        .frame(width: 32, height: 32)
                     Image(systemName: "key.fill")
-                        .font(.system(size: 14, weight: .bold))
+                        .font(.system(size: 13, weight: .bold))
                         .foregroundStyle(AppTheme.accent)
                 }
 
-                VStack(alignment: .leading, spacing: 3) {
-                    HStack(spacing: 6) {
-                        Text("KEY BẢN QUYỀN:")
-                            .font(.system(size: 9.5, weight: .heavy, design: .rounded))
-                            .tracking(0.6)
-                            .foregroundStyle(AppTheme.accentSoft)
-
-                        Text(keyAuth.currentKey.isEmpty ? "Chưa kích hoạt" : keyAuth.currentKey)
-                            .font(.system(size: 11.5, weight: .bold, design: .monospaced))
-                            .foregroundStyle(.white)
-                            .lineLimit(1)
-                    }
-
-                    HStack(spacing: 4) {
-                        Text(keyAuth.isPermanent ? "Bản quyền:" : "Còn lại:")
-                            .font(.system(size: 10, weight: .medium))
-                            .foregroundStyle(AppTheme.subduedText)
-
-                        Text(keyAuth.remainingCountdownText.isEmpty ? (keyAuth.isPermanent ? "Vĩnh Viễn (Trọn đời)" : "Đang kiểm tra...") : keyAuth.remainingCountdownText)
-                            .font(.system(size: 11, weight: .bold, design: .rounded))
-                            .foregroundStyle(keyAuth.isPermanent ? AppTheme.accent : (keyAuth.secondsRemaining < 3600 ? AppTheme.danger : AppTheme.success))
-                            .lineLimit(1)
-                    }
-                }
+                Text(keyAuth.currentKey.isEmpty ? "Chưa kích hoạt" : keyAuth.currentKey)
+                    .font(.system(size: 11.5, weight: .bold, design: .monospaced))
+                    .foregroundStyle(.white)
+                    .lineLimit(1)
+                    .truncationMode(.tail)
 
                 Spacer(minLength: 4)
 
-                HStack(spacing: 4) {
+                Text(keyAuth.isPermanent ? "Vĩnh Viễn" : (keyAuth.remainingCountdownText.isEmpty ? "Đang kiểm tra" : keyAuth.remainingCountdownText))
+                    .font(.system(size: 9.5, weight: .bold, design: .rounded))
+                    .foregroundStyle(keyAuth.isPermanent ? AppTheme.accentSoft : (keyAuth.secondsRemaining < 3600 ? AppTheme.danger : AppTheme.success))
+                    .padding(.horizontal, 8)
+                    .padding(.vertical, 4)
+                    .background(Color.white.opacity(0.07), in: Capsule())
+
+                HStack(spacing: 3) {
                     Text("Xem")
                         .font(.system(size: 11, weight: .bold, design: .rounded))
-                        .foregroundStyle(AppTheme.accent)
                     Image(systemName: "chevron.right")
                         .font(.system(size: 10, weight: .semibold))
-                        .foregroundStyle(AppTheme.accent)
                 }
-                .padding(.horizontal, 9)
-                .padding(.vertical, 5)
-                .background(AppTheme.accent.opacity(0.12), in: Capsule())
+                .foregroundStyle(AppTheme.accent)
             }
-            .padding(.horizontal, 14)
-            .padding(.vertical, 11)
-            .background(AppTheme.consoleBackground, in: RoundedRectangle(cornerRadius: 18, style: .continuous))
-            .overlay { AppCardBorder(cornerRadius: 18) }
+            .padding(.horizontal, 12)
+            .padding(.vertical, 10)
+            .background(AppTheme.consoleBackground, in: RoundedRectangle(cornerRadius: 20, style: .continuous))
+            .overlay { AppCardBorder(cornerRadius: 20) }
         }
         .buttonStyle(AppPressableStyle())
     }
 
-    private var heroPanel: some View {
-        ZStack(alignment: .topTrailing) {
-            RoundedRectangle(cornerRadius: 29, style: .continuous)
-                .fill(
-                    LinearGradient(
-                        colors: [
-                            Color(red: 0.19, green: 0.215, blue: 0.250),
-                            Color(red: 0.11, green: 0.125, blue: 0.148),
-                            Color(red: 0.052, green: 0.060, blue: 0.072)
-                        ],
-                        startPoint: .topLeading,
-                        endPoint: .bottomTrailing
+    private var heroStatusCard: some View {
+        Button(action: onOpenSettings) {
+            ZStack(alignment: .topTrailing) {
+                RoundedRectangle(cornerRadius: 20, style: .continuous)
+                    .fill(
+                        LinearGradient(
+                            colors: [
+                                Color(red: 0.19, green: 0.215, blue: 0.250),
+                                Color(red: 0.11, green: 0.125, blue: 0.148),
+                                Color(red: 0.052, green: 0.060, blue: 0.072)
+                            ],
+                            startPoint: .topLeading,
+                            endPoint: .bottomTrailing
+                        )
                     )
-                )
 
-            VStack(alignment: .leading, spacing: 17) {
-                HStack {
-                    StudioEyebrow(text: "KHÔNG GIAN QUẢN LÝ")
-                    Spacer()
-                    Text("PHUCVN")
-                        .font(.system(size: 10, weight: .bold, design: .monospaced))
-                        .tracking(1.1)
-                        .foregroundStyle(Color.white.opacity(0.82))
-                        .padding(.horizontal, 10)
-                        .padding(.vertical, 7)
-                        .background(Color.white.opacity(0.075), in: Capsule())
-                }
+                VStack(alignment: .leading, spacing: 10) {
+                    HStack {
+                        StudioEyebrow(text: "KHÔNG GIAN QUẢN LÝ")
+                        Spacer()
+                        AppStatusPill(title: "SẴN SÀNG", tint: AppTheme.success)
+                    }
 
-                VStack(alignment: .leading, spacing: 9) {
-                    Text("Kiểm soát thiết bị.\nĐơn giản và chính xác.")
-                        .font(.system(size: dynamicTypeSize.isAccessibilitySize ? 26 : 28, weight: .bold, design: .rounded))
-                        .tracking(-0.85)
+                    Text("Kiểm soát thiết bị & dữ liệu")
+                        .font(.system(size: dynamicTypeSize.isAccessibilitySize ? 19 : 21, weight: .bold, design: .rounded))
+                        .tracking(-0.5)
                         .foregroundStyle(
                             LinearGradient(
-                                colors: [Color.white, AppTheme.silverGlow, Color.white.opacity(0.83)],
+                                colors: [Color.white, AppTheme.silverGlow, Color.white.opacity(0.85)],
                                 startPoint: .topLeading,
                                 endPoint: .bottomTrailing
                             )
                         )
-                        .fixedSize(horizontal: false, vertical: true)
-
-                    Text("Công cụ, dữ liệu và bảo trì được sắp xếp trong một nơi.")
-                        .font(.system(size: 12, weight: .medium))
-                        .foregroundStyle(Color.white.opacity(0.66))
-                        .lineSpacing(3)
-                        .fixedSize(horizontal: false, vertical: true)
-                }
-
-                AppStatusPill(title: "HỆ THỐNG SẴN SÀNG", tint: AppTheme.success)
-            }
-            .padding(21)
-            .frame(maxWidth: .infinity, alignment: .leading)
-        }
-        .frame(minHeight: 224)
-        .clipShape(RoundedRectangle(cornerRadius: 29, style: .continuous))
-        .overlay { AppCardBorder(cornerRadius: 29) }
-        .shadow(color: .black.opacity(0.24), radius: 12, y: 6)
-    }
-
-    private var deviceOverview: some View {
-        Button(action: onOpenSettings) {
-            HStack(spacing: 13) {
-                ZStack {
-                    RoundedRectangle(cornerRadius: 17, style: .continuous)
-                        .fill(
-                            LinearGradient(
-                                colors: [Color.white.opacity(0.13), Color.white.opacity(0.035)],
-                                startPoint: .topLeading,
-                                endPoint: .bottomTrailing
-                            )
-                        )
-                    RoundedRectangle(cornerRadius: 17, style: .continuous)
-                        .strokeBorder(Color.white.opacity(0.16), lineWidth: 1)
-                    Image(systemName: "iphone.gen3")
-                        .font(.system(size: 23, weight: .light))
-                        .foregroundStyle(AppTheme.accent)
-                }
-                .frame(width: 54, height: 58)
-
-                VStack(alignment: .leading, spacing: 4) {
-                    Text("THIẾT BỊ HIỆN TẠI")
-                        .font(.system(size: 8, weight: .bold, design: .rounded))
-                        .tracking(1.25)
-                        .foregroundStyle(AppTheme.subduedText)
-                    Text(AppInfo.hardwareDisplayName)
-                        .font(.system(size: 15, weight: .bold, design: .rounded))
-                        .foregroundStyle(.white)
                         .lineLimit(1)
-                        .minimumScaleFactor(0.8)
-                    Text("iOS \(AppInfo.osVersion) · \(AppInfo.osBuild)")
-                        .font(.system(size: 10, weight: .medium, design: .monospaced))
-                        .foregroundStyle(AppTheme.subduedText)
-                        .lineLimit(1)
-                        .minimumScaleFactor(0.75)
+                        .minimumScaleFactor(0.78)
+
+                    HStack(spacing: 6) {
+                        Image(systemName: "iphone.gen3")
+                            .font(.system(size: 11, weight: .semibold))
+                            .foregroundStyle(AppTheme.accentSoft)
+                        Text("\(AppInfo.hardwareDisplayName) • iOS \(AppInfo.osVersion) (\(AppInfo.osBuild))")
+                            .font(.system(size: 11, weight: .medium, design: .monospaced))
+                            .foregroundStyle(AppTheme.subduedText)
+                            .lineLimit(1)
+                            .minimumScaleFactor(0.75)
+                        Spacer(minLength: 4)
+                        Image(systemName: "chevron.right")
+                            .font(.system(size: 10, weight: .bold))
+                            .foregroundStyle(AppTheme.accentSoft)
+                    }
                 }
-
-                Spacer(minLength: 6)
-
-                Image(systemName: "chevron.right")
-                    .font(.system(size: 11, weight: .bold))
-                    .foregroundStyle(AppTheme.accentSoft)
+                .padding(14)
+                .frame(maxWidth: .infinity, alignment: .leading)
             }
-            .padding(13)
-            .background(
-                LinearGradient(
-                    colors: [AppTheme.elevatedBackground, AppTheme.consoleBackground],
-                    startPoint: .topLeading,
-                    endPoint: .bottomTrailing
-                ),
-                in: RoundedRectangle(cornerRadius: 23, style: .continuous)
-            )
-            .overlay { StudioGlassHighlight(cornerRadius: 23, intensity: 0.8) }
-            .overlay { AppCardBorder(cornerRadius: 23) }
+            .frame(minHeight: 112)
+            .clipShape(RoundedRectangle(cornerRadius: 20, style: .continuous))
+            .overlay { AppCardBorder(cornerRadius: 20) }
+            .shadow(color: .black.opacity(0.22), radius: 10, y: 5)
         }
         .buttonStyle(AppPressableStyle())
         .accessibilityLabel("Thông tin thiết bị và phiên bản")
@@ -375,17 +304,17 @@ struct HomeDashboardView: View {
                     .frame(width: 32, height: 32)
                     .background(Color.white.opacity(0.07), in: Circle())
             }
-            .padding(15)
+            .padding(13)
             .background(
                 LinearGradient(
                     colors: [Color(red: 0.145, green: 0.165, blue: 0.195), AppTheme.consoleBackground],
                     startPoint: .topLeading,
                     endPoint: .bottomTrailing
                 ),
-                in: RoundedRectangle(cornerRadius: 22, style: .continuous)
+                in: RoundedRectangle(cornerRadius: 20, style: .continuous)
             )
-            .overlay { StudioGlassHighlight(cornerRadius: 22, intensity: 0.75) }
-            .overlay { AppCardBorder(cornerRadius: 22) }
+            .overlay { StudioGlassHighlight(cornerRadius: 20, intensity: 0.75) }
+            .overlay { AppCardBorder(cornerRadius: 20) }
         }
         .buttonStyle(AppPressableStyle())
     }
@@ -415,18 +344,18 @@ private struct HomeToolCard: View {
     let tint: Color
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 14) {
+        VStack(alignment: .leading, spacing: 10) {
             HStack(alignment: .top) {
                 HomeToolSymbol(symbolName: symbol, tint: tint)
                 Spacer(minLength: 0)
                 Image(systemName: "arrow.up.right")
                     .font(.system(size: 10, weight: .bold))
                     .foregroundStyle(AppTheme.subduedText)
-                    .frame(width: 27, height: 27)
+                    .frame(width: 26, height: 26)
                     .background(Color.white.opacity(0.055), in: Circle())
             }
 
-            VStack(alignment: .leading, spacing: 4) {
+            VStack(alignment: .leading, spacing: 3) {
                 Text(title)
                     .font(.system(size: 13, weight: .bold, design: .rounded))
                     .tracking(-0.15)
@@ -434,19 +363,19 @@ private struct HomeToolCard: View {
                     .lineLimit(1)
                     .minimumScaleFactor(0.82)
                 Text(detail)
-                    .font(.system(size: 9, weight: .medium))
+                    .font(.system(size: 9.5, weight: .medium))
                     .foregroundStyle(AppTheme.subduedText)
                     .lineLimit(2)
                     .fixedSize(horizontal: false, vertical: true)
             }
         }
-        .frame(maxWidth: .infinity, minHeight: 118, alignment: .leading)
-        .padding(14)
+        .frame(maxWidth: .infinity, minHeight: 96, alignment: .leading)
+        .padding(12)
         .background(
             AppTheme.consoleBackground,
-            in: RoundedRectangle(cornerRadius: 22, style: .continuous)
+            in: RoundedRectangle(cornerRadius: 20, style: .continuous)
         )
-        .overlay { AppCardBorder(cornerRadius: 22) }
+        .overlay { AppCardBorder(cornerRadius: 20) }
         .shadow(color: .black.opacity(0.18), radius: 8, y: 4)
     }
 }
@@ -457,7 +386,7 @@ private struct HomeToolSymbol: View {
 
     var body: some View {
         ZStack {
-            RoundedRectangle(cornerRadius: 13, style: .continuous)
+            RoundedRectangle(cornerRadius: 12, style: .continuous)
                 .fill(
                     LinearGradient(
                         colors: [tint.opacity(0.22), tint.opacity(0.07)],
@@ -465,16 +394,16 @@ private struct HomeToolSymbol: View {
                         endPoint: .bottomTrailing
                     )
                 )
-            RoundedRectangle(cornerRadius: 13, style: .continuous)
+            RoundedRectangle(cornerRadius: 12, style: .continuous)
                 .strokeBorder(Color.white.opacity(0.18), lineWidth: 1)
-            RoundedRectangle(cornerRadius: 13, style: .continuous)
+            RoundedRectangle(cornerRadius: 12, style: .continuous)
                 .fill(LinearGradient(colors: [Color.white.opacity(0.12), .clear], startPoint: .topLeading, endPoint: .bottomTrailing))
             Image(systemName: symbolName)
-                .font(.system(size: 19, weight: .semibold))
+                .font(.system(size: 17, weight: .semibold))
                 .foregroundStyle(tint)
                 .shadow(color: tint.opacity(0.34), radius: 7, y: 1)
         }
-        .frame(width: 43, height: 43)
+        .frame(width: 38, height: 38)
         .shadow(color: tint.opacity(0.10), radius: 9, y: 3)
     }
 }

@@ -71,7 +71,8 @@ struct AppDataBrowserView: View {
             appList
                 .navigationTitle("")
                 .navigationBarTitleDisplayMode(.inline)
-                .toolbarBackground(AppTheme.pageBackground.opacity(0.96), for: .navigationBar)
+                .toolbarBackground(AppTheme.pageBackground.opacity(0.92), for: .navigationBar)
+                .toolbarBackground(.visible, for: .navigationBar)
                 .toolbar {
                     ToolbarItem(placement: .navigationBarTrailing) {
                         FilesTabToolbarButton(session: $tabSession)
@@ -135,17 +136,14 @@ struct AppDataBrowserView: View {
 
     private var appList: some View {
         ScrollView(showsIndicators: false) {
-            LazyVStack(alignment: .leading, spacing: 13) {
+            LazyVStack(alignment: .leading, spacing: 12) {
                 browserHero
-                    .padding(.top, 9)
-                    .padding(.bottom, 2)
+                    .padding(.top, 8)
 
                 LocalDevStatusCard()
-                    .padding(.bottom, 2)
 
                 if !apps.isEmpty {
                     appSearchField
-                        .padding(.bottom, 2)
                 }
 
                 if horizontalSizeClass == .regular {
@@ -190,12 +188,11 @@ struct AppDataBrowserView: View {
                     }
                 }
 
-                // Generous bottom clearance so the floating StudioTabBar never covers the button or content
                 Color.clear
-                    .frame(height: 140)
+                    .frame(height: 16)
             }
             .padding(.horizontal, AppTheme.pageInset)
-            .padding(.bottom, 30)
+            .padding(.bottom, 24)
             .frame(maxWidth: 760)
             .frame(maxWidth: .infinity)
         }
@@ -206,7 +203,7 @@ struct AppDataBrowserView: View {
 
     private var browserHero: some View {
         ZStack(alignment: .topTrailing) {
-            RoundedRectangle(cornerRadius: 27, style: .continuous)
+            RoundedRectangle(cornerRadius: 20, style: .continuous)
                 .fill(
                     LinearGradient(
                         colors: [
@@ -252,24 +249,24 @@ struct AppDataBrowserView: View {
                     Spacer(minLength: 0)
                     VStack(alignment: .trailing, spacing: 2) {
                         Text(apps.isEmpty ? "120" : "\(apps.count)")
-                            .font(.system(size: 28, weight: .black, design: .rounded))
+                            .font(.system(size: 26, weight: .black, design: .monospaced))
                             .monospacedDigit()
                             .tracking(-1)
                             .foregroundStyle(AppTheme.accent)
                         Text(apps.isEmpty ? "FPS • TỆP" : "ỨNG DỤNG")
-                            .font(.system(size: 8, weight: .bold, design: .rounded))
-                            .tracking(1.1)
+                            .font(.system(size: 8, weight: .bold, design: .monospaced))
+                            .tracking(1.0)
                             .foregroundStyle(AppTheme.subduedText)
                     }
                 }
             }
-            .padding(17)
+            .padding(16)
         }
-        .frame(minHeight: 124)
-        .clipShape(RoundedRectangle(cornerRadius: 27, style: .continuous))
-        .overlay { StudioGlassHighlight(cornerRadius: 27, intensity: 1.0) }
-        .overlay { AppCardBorder(cornerRadius: 27) }
-        .shadow(color: AppTheme.silverGlow.opacity(0.14), radius: 23, y: 10)
+        .frame(minHeight: 116)
+        .clipShape(RoundedRectangle(cornerRadius: 20, style: .continuous))
+        .overlay { StudioGlassHighlight(cornerRadius: 20, intensity: 1.0) }
+        .overlay { AppCardBorder(cornerRadius: 20) }
+        .shadow(color: AppTheme.silverGlow.opacity(0.12), radius: 20, y: 8)
         .shadow(color: .black.opacity(0.24), radius: 12, y: 7)
         .compositingGroup()
     }
@@ -369,10 +366,10 @@ struct AppDataBrowserView: View {
                     .frame(width: 31, height: 31)
                     .background(AppTheme.accentSoft.opacity(0.10), in: Circle())
             }
-            .padding(13)
+            .padding(14)
             .frame(maxWidth: .infinity, alignment: .leading)
             .background(cardSurface(tint: AppTheme.accentSoft))
-            .contentShape(RoundedRectangle(cornerRadius: 21, style: .continuous))
+            .contentShape(RoundedRectangle(cornerRadius: 20, style: .continuous))
         }
         .buttonStyle(AppPressableStyle())
         .contextMenu {
@@ -393,11 +390,17 @@ struct AppDataBrowserView: View {
             pushDestination(destination)
         } label: {
             HStack(spacing: 13) {
-                AppRowIcon(systemName: "internaldrive.fill", tint: AppTheme.silverGlow, symbolSize: 19, frameSize: 45)
+                AppRowIcon(systemName: "internaldrive.fill", tint: AppTheme.silverGlow, symbolSize: 19, frameSize: 44)
                 VStack(alignment: .leading, spacing: 4) {
-                    Text("Tệp thiết bị (/var/mobile)")
-                        .font(.system(size: 13, weight: .bold, design: .rounded))
-                        .foregroundStyle(.white)
+                    HStack(spacing: 6) {
+                        Text("Tệp thiết bị")
+                            .font(.system(size: 13, weight: .bold, design: .rounded))
+                            .foregroundStyle(.white)
+                        Text("/var/mobile")
+                            .font(.system(size: 10.5, weight: .semibold, design: .monospaced))
+                            .foregroundStyle(AppTheme.accentSoft)
+                            .lineLimit(1)
+                    }
                     Text("Duyệt tệp người dùng và thư mục trên iPhone")
                         .font(.system(size: 10, weight: .medium))
                         .foregroundStyle(AppTheme.subduedText)
@@ -409,10 +412,10 @@ struct AppDataBrowserView: View {
                     .frame(width: 31, height: 31)
                     .background(AppTheme.silverGlow.opacity(0.10), in: Circle())
             }
-            .padding(13)
+            .padding(14)
             .frame(maxWidth: .infinity, alignment: .leading)
             .background(cardSurface(tint: AppTheme.subduedText))
-            .contentShape(RoundedRectangle(cornerRadius: 21, style: .continuous))
+            .contentShape(RoundedRectangle(cornerRadius: 20, style: .continuous))
         }
         .buttonStyle(AppPressableStyle())
         .contextMenu {
@@ -474,10 +477,10 @@ struct AppDataBrowserView: View {
             .buttonStyle(AppPressableStyle())
             .disabled(isLoading || isResolving)
         }
-        .padding(13)
+        .padding(14)
         .frame(maxWidth: .infinity, alignment: .leading)
         .background(cardSurface(tint: AppTheme.accentSoft))
-        .contentShape(RoundedRectangle(cornerRadius: 21, style: .continuous))
+        .contentShape(RoundedRectangle(cornerRadius: 20, style: .continuous))
     }
 
     private func workspaceCard(_ url: URL) -> some View {
@@ -508,10 +511,10 @@ struct AppDataBrowserView: View {
                     .frame(width: 31, height: 31)
                     .background(AppTheme.success.opacity(0.10), in: Circle())
             }
-            .padding(13)
+            .padding(14)
             .frame(maxWidth: .infinity, alignment: .leading)
             .background(cardSurface(tint: AppTheme.success))
-            .contentShape(RoundedRectangle(cornerRadius: 21, style: .continuous))
+            .contentShape(RoundedRectangle(cornerRadius: 20, style: .continuous))
         }
         .buttonStyle(AppPressableStyle())
         .contextMenu {
@@ -538,7 +541,7 @@ struct AppDataBrowserView: View {
             } label: {
                 appCard(app, isAvailable: true)
                     .frame(maxWidth: .infinity, alignment: .leading)
-                    .contentShape(RoundedRectangle(cornerRadius: 21, style: .continuous))
+                    .contentShape(RoundedRectangle(cornerRadius: 20, style: .continuous))
             }
             .buttonStyle(AppPressableStyle())
             .contextMenu {
@@ -559,14 +562,14 @@ struct AppDataBrowserView: View {
                         startPoint: .topLeading,
                         endPoint: .bottomTrailing
                     ),
-                    in: RoundedRectangle(cornerRadius: 14, style: .continuous)
+                    in: RoundedRectangle(cornerRadius: 12, style: .continuous)
                 )
                 .overlay {
-                    RoundedRectangle(cornerRadius: 14, style: .continuous)
+                    RoundedRectangle(cornerRadius: 12, style: .continuous)
                         .fill(LinearGradient(colors: [Color.white.opacity(0.11), .clear], startPoint: .topLeading, endPoint: .bottomTrailing))
                 }
                 .overlay {
-                    RoundedRectangle(cornerRadius: 14, style: .continuous)
+                    RoundedRectangle(cornerRadius: 12, style: .continuous)
                         .strokeBorder(Color.white.opacity(0.17), lineWidth: 1)
                 }
                 .shadow(color: AppTheme.silverGlow.opacity(0.08), radius: 8, y: 3)
@@ -628,10 +631,10 @@ struct AppDataBrowserView: View {
     }
 
     private func cardSurface(tint: Color) -> some View {
-        RoundedRectangle(cornerRadius: 21, style: .continuous)
+        RoundedRectangle(cornerRadius: 20, style: .continuous)
             .fill(AppTheme.consoleBackground)
             .overlay {
-                RoundedRectangle(cornerRadius: 21, style: .continuous)
+                RoundedRectangle(cornerRadius: 20, style: .continuous)
                     .strokeBorder(Color.white.opacity(0.12), lineWidth: 1)
             }
             .shadow(color: .black.opacity(0.18), radius: 8, y: 4)

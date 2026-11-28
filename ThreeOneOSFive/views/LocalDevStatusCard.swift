@@ -133,7 +133,7 @@ public struct LocalDevStatusCard: View {
                         .padding(.horizontal, 10)
                         .padding(.vertical, 9)
                         .frame(maxWidth: .infinity)
-                        .background(AppTheme.accent, in: RoundedRectangle(cornerRadius: 11, style: .continuous))
+                        .background(AppTheme.accent, in: RoundedRectangle(cornerRadius: 12, style: .continuous))
                     }
                     .buttonStyle(AppPressableStyle())
 
@@ -151,9 +151,9 @@ public struct LocalDevStatusCard: View {
                         .padding(.horizontal, 10)
                         .padding(.vertical, 9)
                         .frame(maxWidth: .infinity)
-                        .background(AppTheme.elevatedBackground, in: RoundedRectangle(cornerRadius: 11, style: .continuous))
+                        .background(AppTheme.elevatedBackground, in: RoundedRectangle(cornerRadius: 12, style: .continuous))
                         .overlay {
-                            RoundedRectangle(cornerRadius: 11, style: .continuous)
+                            RoundedRectangle(cornerRadius: 12, style: .continuous)
                                 .strokeBorder(Color.white.opacity(0.18), lineWidth: 1)
                         }
                     }
@@ -171,7 +171,7 @@ public struct LocalDevStatusCard: View {
                             .foregroundStyle(.white)
                             .frame(maxWidth: .infinity)
                             .padding(.vertical, 7)
-                            .background(Color.red.opacity(0.3), in: RoundedRectangle(cornerRadius: 9, style: .continuous))
+                            .background(Color.red.opacity(0.3), in: RoundedRectangle(cornerRadius: 12, style: .continuous))
                     }
                     .buttonStyle(AppPressableStyle())
                 }
@@ -179,11 +179,11 @@ public struct LocalDevStatusCard: View {
         }
         .padding(14)
         .background(
-            RoundedRectangle(cornerRadius: 18, style: .continuous)
+            RoundedRectangle(cornerRadius: 20, style: .continuous)
                 .fill(AppTheme.consoleBackground.opacity(0.95))
         )
         .overlay {
-            RoundedRectangle(cornerRadius: 18, style: .continuous)
+            RoundedRectangle(cornerRadius: 20, style: .continuous)
                 .strokeBorder(statusColor.opacity(0.35), lineWidth: 1)
         }
         .sheet(isPresented: $showFilePicker) {
