@@ -667,6 +667,7 @@ struct KeyGatekeeperView: View {
                                 .foregroundStyle(.white)
 
                             Button {
+                                DevHaptics.light()
                                 if let pasted = UIPasteboard.general.string {
                                     inputKey = pasted.trimmingCharacters(in: .whitespacesAndNewlines)
                                 }
@@ -675,13 +676,14 @@ struct KeyGatekeeperView: View {
                                     .font(.system(size: 11.5, weight: .bold, design: .rounded))
                                     .padding(.horizontal, 10)
                                     .padding(.vertical, 6)
-                                    .background(AppTheme.accent.opacity(0.18), in: Capsule())
+                                    .background(AppTheme.accent.opacity(0.16), in: Capsule())
                                     .foregroundStyle(AppTheme.accentSoft)
                             }
+                            .buttonStyle(TactileButtonStyle(cornerRadius: 14, showRimHighlight: false))
                         }
                         .padding(14)
-                        .background(Color.black.opacity(0.28), in: RoundedRectangle(cornerRadius: 12, style: .continuous))
-                        .overlay(RoundedRectangle(cornerRadius: 12, style: .continuous).strokeBorder(Color.white.opacity(0.12), lineWidth: 1))
+                        .background(DevUIStyle.recessedSlot, in: RoundedRectangle(cornerRadius: 12, style: .continuous))
+                        .overlay(SpecularRimBorder(cornerRadius: 12))
 
                         if let err = keyAuth.errorMessage {
                             HStack(spacing: 8) {
@@ -697,6 +699,7 @@ struct KeyGatekeeperView: View {
                         }
 
                         Button {
+                            DevHaptics.light()
                             keyAuth.activateKey(inputKey, isSilent: false)
                         } label: {
                             HStack(spacing: 8) {
@@ -716,6 +719,7 @@ struct KeyGatekeeperView: View {
                                 in: RoundedRectangle(cornerRadius: 12, style: .continuous)
                             )
                         }
+                        .buttonStyle(TactileButtonStyle(cornerRadius: 12))
                         .disabled(keyAuth.isVerifying)
 
                         if keyAuth.errorMessage != nil {
@@ -732,8 +736,8 @@ struct KeyGatekeeperView: View {
                         }
                     }
                     .padding(16)
-                    .background(AppTheme.consoleBackground, in: RoundedRectangle(cornerRadius: 20, style: .continuous))
-                    .overlay { AppCardBorder(cornerRadius: 20) }
+                    .background(DevUIStyle.cardBase, in: RoundedRectangle(cornerRadius: 20, style: .continuous))
+                    .overlay { SpecularRimBorder(cornerRadius: 20) }
 
                     VStack(alignment: .leading, spacing: 8) {
                         HStack {
@@ -742,6 +746,7 @@ struct KeyGatekeeperView: View {
                                 .foregroundStyle(AppTheme.subduedText)
                             Spacer()
                             Button {
+                                DevHaptics.light()
                                 UIPasteboard.general.string = keyAuth.deviceHWID
                                 showCopiedHWID = true
                                 DispatchQueue.main.asyncAfter(deadline: .now() + 1.5) { showCopiedHWID = false }
@@ -750,6 +755,7 @@ struct KeyGatekeeperView: View {
                                     .font(.system(size: 11, weight: .bold))
                                     .foregroundStyle(AppTheme.accent)
                             }
+                            .buttonStyle(TactileButtonStyle(cornerRadius: 8, showRimHighlight: false))
                         }
                         Text(keyAuth.deviceHWID)
                             .font(.system(size: 11, design: .monospaced))
@@ -758,10 +764,10 @@ struct KeyGatekeeperView: View {
                             .truncationMode(.middle)
                     }
                     .padding(14)
-                    .background(AppTheme.consoleBackground, in: RoundedRectangle(cornerRadius: 20))
-                    .overlay { AppCardBorder(cornerRadius: 20) }
+                    .background(DevUIStyle.cardBase, in: RoundedRectangle(cornerRadius: 20))
+                    .overlay { SpecularRimBorder(cornerRadius: 20) }
 
-                    Spacer(minLength: 20)
+                    Spacer(minLength: 32)
                 }
                 .padding(.horizontal, AppTheme.pageInset)
             }

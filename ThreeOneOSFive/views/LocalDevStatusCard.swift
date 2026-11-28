@@ -33,25 +33,19 @@ public struct LocalDevStatusCard: View {
     public var body: some View {
         VStack(alignment: .leading, spacing: 12) {
             // Header: Title & Live Badge
-            HStack(spacing: 10) {
-                ZStack {
-                    Circle()
-                        .fill(statusColor.opacity(0.16))
-                        .frame(width: 36, height: 36)
-                    Image(systemName: statusIcon)
-                        .font(.system(size: 16, weight: .bold))
-                        .foregroundStyle(statusColor)
-                }
+            HStack(spacing: 11) {
+                Image(systemName: statusIcon)
+                    .font(.system(size: 20, weight: .semibold))
+                    .foregroundStyle(statusColor)
+                    .shadow(color: statusColor.opacity(0.28), radius: 7, y: 1)
 
                 VStack(alignment: .leading, spacing: 2) {
                     HStack(spacing: 6) {
                         Text("LOCALDEV KẾT NỐI")
-                            .font(.system(size: 10, weight: .heavy, design: .rounded))
-                            .tracking(1.1)
+                            .font(.system(size: 9.5, weight: .bold, design: .monospaced))
+                            .tracking(1.2)
                             .foregroundStyle(AppTheme.subduedText)
-                        Circle()
-                            .fill(statusColor)
-                            .frame(width: 6, height: 6)
+                        PulseLED(color: statusColor, size: 5.5, isAnimated: bridge.currentStatus.code == 1)
                     }
 
                     Text(bridge.currentStatus.status)
@@ -62,6 +56,7 @@ public struct LocalDevStatusCard: View {
                 Spacer()
 
                 Button {
+                    DevHaptics.light()
                     isChecking = true
                     bridge.refreshStatus()
                     DispatchQueue.main.asyncAfter(deadline: .now() + 0.6) {
@@ -72,20 +67,19 @@ public struct LocalDevStatusCard: View {
                         ProgressView().controlSize(.mini).tint(AppTheme.accent)
                     } else {
                         Image(systemName: "arrow.clockwise")
-                            .font(.system(size: 13, weight: .bold))
-                            .foregroundStyle(AppTheme.accent)
+                            .font(.system(size: 13, weight: .semibold))
+                            .foregroundStyle(AppTheme.accentSoft)
                             .frame(width: 28, height: 28)
-                            .background(AppTheme.accent.opacity(0.12), in: Circle())
                     }
                 }
-                .buttonStyle(AppPressableStyle())
+                .buttonStyle(TactileButtonStyle(cornerRadius: 14, showRimHighlight: false))
                 .accessibilityLabel("Kiểm tra lại kết nối")
             }
 
             // Description message
             Text(bridge.currentStatus.message)
                 .font(.system(size: 11, weight: .medium))
-                .foregroundStyle(Color.white.opacity(0.85))
+                .foregroundStyle(Color.white.opacity(0.82))
                 .fixedSize(horizontal: false, vertical: true)
 
             if let err = bridge.lastError, !err.isEmpty {
@@ -100,7 +94,7 @@ public struct LocalDevStatusCard: View {
                 }
                 .padding(.horizontal, 9)
                 .padding(.vertical, 6)
-                .background(Color.orange.opacity(0.18), in: RoundedRectangle(cornerRadius: 8, style: .continuous))
+                .background(Color.orange.opacity(0.14), in: RoundedRectangle(cornerRadius: 8, style: .continuous))
             }
 
             if let udid = bridge.currentStatus.udid, !udid.isEmpty, bridge.currentStatus.isLive {
@@ -121,47 +115,51 @@ public struct LocalDevStatusCard: View {
                 HStack(spacing: 8) {
                     // Button: Jump directly into LocalDev App / VPN
                     Button {
+                        DevHaptics.light()
                         bridge.openLocalDevVPNApp()
                     } label: {
                         HStack(spacing: 6) {
                             Image(systemName: "bolt.horizontal.fill")
                                 .font(.system(size: 11, weight: .bold))
                             Text("Mở app LocalDev")
-                                .font(.system(size: 11, weight: .bold))
+                                .font(.system(size: 11.5, weight: .bold))
                         }
                         .foregroundStyle(.black)
                         .padding(.horizontal, 10)
                         .padding(.vertical, 9)
                         .frame(maxWidth: .infinity)
-                        .background(AppTheme.accent, in: RoundedRectangle(cornerRadius: 12, style: .continuous))
+                        .background(Color.white, in: RoundedRectangle(cornerRadius: 11, style: .continuous))
                     }
-                    .buttonStyle(AppPressableStyle())
+                    .buttonStyle(TactileButtonStyle(cornerRadius: 11, showRimHighlight: false))
 
                     // Button: Import Pairing File
                     Button {
+                        DevHaptics.light()
                         showFilePicker = true
                     } label: {
                         HStack(spacing: 6) {
                             Image(systemName: bridge.currentStatus.code == 1 ? "checkmark.circle.fill" : "doc.badge.plus")
                                 .font(.system(size: 11, weight: .bold))
                             Text(bridge.currentStatus.code == 1 ? "Đổi Pairing" : "Chọn Pairing")
-                                .font(.system(size: 11, weight: .bold))
+                                .font(.system(size: 11.5, weight: .bold))
                         }
                         .foregroundStyle(.white)
                         .padding(.horizontal, 10)
                         .padding(.vertical, 9)
                         .frame(maxWidth: .infinity)
-                        .background(AppTheme.elevatedBackground, in: RoundedRectangle(cornerRadius: 12, style: .continuous))
+                        .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 11, style: .continuous))
                         .overlay {
-                            RoundedRectangle(cornerRadius: 12, style: .continuous)
-                                .strokeBorder(Color.white.opacity(0.18), lineWidth: 1)
+                            RoundedRectangle(cornerRadius: 11, style: .continuous)
+                                .fill(DevUIStyle.cardElevated.opacity(0.75))
                         }
+                        .overlay { SpecularRimBorder(cornerRadius: 11) }
                     }
-                    .buttonStyle(AppPressableStyle())
+                    .buttonStyle(TactileButtonStyle(cornerRadius: 11))
                 }
 
                 if bridge.currentStatus.code == 4 {
                     Button {
+                        DevHaptics.light()
                         if let url = URL(string: UIApplication.openSettingsURLString) {
                             UIApplication.shared.open(url, options: [:], completionHandler: nil)
                         }
@@ -171,21 +169,37 @@ public struct LocalDevStatusCard: View {
                             .foregroundStyle(.white)
                             .frame(maxWidth: .infinity)
                             .padding(.vertical, 7)
-                            .background(Color.red.opacity(0.3), in: RoundedRectangle(cornerRadius: 12, style: .continuous))
+                            .background(Color.red.opacity(0.28), in: RoundedRectangle(cornerRadius: 11, style: .continuous))
+                            .overlay { SpecularRimBorder(cornerRadius: 11, color: Color.red, topOpacity: 0.35, midOpacity: 0.10, bottomOpacity: 0.02) }
                     }
-                    .buttonStyle(AppPressableStyle())
+                    .buttonStyle(TactileButtonStyle(cornerRadius: 11))
                 }
             }
         }
         .padding(14)
-        .background(
-            RoundedRectangle(cornerRadius: 20, style: .continuous)
-                .fill(AppTheme.consoleBackground.opacity(0.95))
-        )
-        .overlay {
-            RoundedRectangle(cornerRadius: 20, style: .continuous)
-                .strokeBorder(statusColor.opacity(0.35), lineWidth: 1)
+        .background {
+            ZStack(alignment: .topLeading) {
+                DevUIStyle.cardBase
+                RadialGradient(
+                    colors: [statusColor.opacity(0.12), .clear],
+                    center: .topLeading,
+                    startRadius: 4,
+                    endRadius: 190
+                )
+            }
         }
+        .clipShape(RoundedRectangle(cornerRadius: 20, style: .continuous))
+        .overlay {
+            SpecularRimBorder(
+                cornerRadius: 20,
+                color: statusColor,
+                topOpacity: 0.36,
+                midOpacity: 0.08,
+                bottomOpacity: 0.02,
+                lineWidth: 0.75
+            )
+        }
+        .shadow(color: .black.opacity(0.26), radius: 12, y: 5)
         .sheet(isPresented: $showFilePicker) {
             FileDocumentPicker(
                 allowedContentTypes: [

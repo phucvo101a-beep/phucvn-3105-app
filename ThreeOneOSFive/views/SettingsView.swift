@@ -24,32 +24,8 @@ struct SettingsView: View {
                     }
 
                     SettingsGroup(title: "BẢN QUYỀN & MÁY CHỦ KEY") {
-                        HStack {
-                            SettingsSymbol(symbol: "key.fill", tint: AppTheme.accent)
-                            VStack(alignment: .leading, spacing: 2) {
-                                Text("Mã Key bản quyền")
-                                    .font(.system(size: 13, weight: .bold, design: .rounded))
-                                    .foregroundStyle(.white)
-                                Text(keyAuth.currentKey.isEmpty ? "Chưa kích hoạt" : keyAuth.currentKey)
-                                    .font(.system(size: 11, weight: .semibold, design: .monospaced))
-                                    .foregroundStyle(AppTheme.accentSoft)
-                            }
-                            Spacer()
-                            if !keyAuth.currentKey.isEmpty {
-                                Button {
-                                    UIPasteboard.general.string = keyAuth.currentKey
-                                    copiedKey = true
-                                    DispatchQueue.main.asyncAfter(deadline: .now() + 2) { copiedKey = false }
-                                } label: {
-                                    Image(systemName: copiedKey ? "checkmark.circle.fill" : "doc.on.doc")
-                                        .font(.system(size: 12, weight: .bold))
-                                        .foregroundStyle(copiedKey ? AppTheme.success : AppTheme.accent)
-                                        .frame(width: 30, height: 30)
-                                        .background(Color.white.opacity(0.06), in: Circle())
-                                }
-                            }
-                        }
-                        .padding(.vertical, 4)
+                        blackVIPPassHeader
+                            .padding(.vertical, 6)
 
                         SettingsRowDivider()
 
@@ -83,9 +59,10 @@ struct SettingsView: View {
 
                         SettingsRowDivider()
                         Button {
+                            DevHaptics.light()
                             showKeyDetails = true
                         } label: {
-                            HStack {
+                            HStack(spacing: 11) {
                                 SettingsSymbol(symbol: "info.circle.fill", tint: AppTheme.accent)
                                 Text("Xem chi tiết & Sao chép bản quyền")
                                     .font(.system(size: 13, weight: .bold, design: .rounded))
@@ -97,12 +74,14 @@ struct SettingsView: View {
                             }
                             .padding(.vertical, 7)
                         }
+                        .buttonStyle(TactileButtonStyle(cornerRadius: 12, showRimHighlight: false))
 
                         SettingsRowDivider()
                         Button {
+                            DevHaptics.light()
                             keyAuth.unlinkKey()
                         } label: {
-                            HStack {
+                            HStack(spacing: 11) {
                                 SettingsSymbol(symbol: "rectangle.portrait.and.arrow.right", tint: AppTheme.danger)
                                 Text("Hủy kích hoạt / Đổi Key mới")
                                     .font(.system(size: 13, weight: .bold, design: .rounded))
@@ -111,6 +90,7 @@ struct SettingsView: View {
                             }
                             .padding(.vertical, 7)
                         }
+                        .buttonStyle(TactileButtonStyle(cornerRadius: 12, showRimHighlight: false))
                     }
 
                     SettingsGroup(title: "TRẠNG THÁI HỆ THỐNG") {
@@ -214,13 +194,94 @@ struct SettingsView: View {
         .tint(AppTheme.accent)
     }
 
+    private var blackVIPPassHeader: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            HStack {
+                HStack(spacing: 6) {
+                    Image(systemName: "key.fill")
+                        .font(.system(size: 13, weight: .semibold))
+                        .foregroundStyle(AppTheme.silverGlow)
+                        .shadow(color: AppTheme.silverGlow.opacity(0.35), radius: 6)
+                    Text("BLACK VIP PASS")
+                        .font(.system(size: 9.5, weight: .bold, design: .monospaced))
+                        .tracking(1.6)
+                        .foregroundStyle(AppTheme.accentSoft)
+                }
+                Spacer()
+                Text(keyAuth.role.uppercased())
+                    .font(.system(size: 9, weight: .bold, design: .monospaced))
+                    .tracking(0.8)
+                    .foregroundStyle(.white.opacity(0.9))
+                    .padding(.horizontal, 8)
+                    .padding(.vertical, 3)
+                    .background(DevUIStyle.recessedSlot, in: Capsule())
+                    .overlay { Capsule().strokeBorder(Color.white.opacity(0.14), lineWidth: 0.75) }
+            }
+
+            HStack(spacing: 10) {
+                VStack(alignment: .leading, spacing: 3) {
+                    Text("Mã Key bản quyền")
+                        .font(.system(size: 10, weight: .medium))
+                        .foregroundStyle(AppTheme.subduedText)
+                    Text(keyAuth.currentKey.isEmpty ? "Chưa kích hoạt" : keyAuth.currentKey)
+                        .font(.system(size: 13, weight: .bold, design: .monospaced))
+                        .foregroundStyle(.white)
+                        .lineLimit(1)
+                        .minimumScaleFactor(0.8)
+                }
+
+                Spacer(minLength: 4)
+
+                if !keyAuth.currentKey.isEmpty {
+                    Button {
+                        DevHaptics.light()
+                        UIPasteboard.general.string = keyAuth.currentKey
+                        withAnimation(.spring(response: 0.28, dampingFraction: 0.72)) {
+                            copiedKey = true
+                        }
+                        DispatchQueue.main.asyncAfter(deadline: .now() + 2) {
+                            withAnimation(.easeOut(duration: 0.2)) {
+                                copiedKey = false
+                            }
+                        }
+                    } label: {
+                        Image(systemName: copiedKey ? "checkmark.circle.fill" : "doc.on.doc")
+                            .font(.system(size: 14, weight: .semibold))
+                            .foregroundStyle(copiedKey ? AppTheme.success : .white.opacity(0.85))
+                            .scaleEffect(copiedKey ? 1.12 : 1.0)
+                            .frame(width: 32, height: 32)
+                            .background(DevUIStyle.recessedSlot, in: RoundedRectangle(cornerRadius: 10, style: .continuous))
+                            .overlay { SpecularRimBorder(cornerRadius: 10, color: copiedKey ? AppTheme.success : .white, topOpacity: copiedKey ? 0.35 : 0.18) }
+                    }
+                    .buttonStyle(TactileButtonStyle(cornerRadius: 10, showRimHighlight: false))
+                }
+            }
+        }
+        .padding(13)
+        .background {
+            ZStack {
+                LinearGradient(
+                    colors: [
+                        Color(red: 22.0 / 255.0, green: 24.0 / 255.0, blue: 32.0 / 255.0),
+                        Color(red: 10.0 / 255.0, green: 11.0 / 255.0, blue: 15.0 / 255.0)
+                    ],
+                    startPoint: .topLeading,
+                    endPoint: .bottomTrailing
+                )
+                DotMatrixBackground(opacity: 0.03)
+            }
+        }
+        .clipShape(RoundedRectangle(cornerRadius: 15, style: .continuous))
+        .overlay { SpecularRimBorder(cornerRadius: 15, topOpacity: 0.24, midOpacity: 0.06, bottomOpacity: 0.02) }
+    }
+
     private var pageHeading: some View {
         HStack(spacing: 13) {
-            AppLogo(size: 52)
-            VStack(alignment: .leading, spacing: 4) {
+            AppLogo(size: 48, cornerRadius: 12)
+            VStack(alignment: .leading, spacing: 3) {
                 StudioEyebrow(text: "TÙY CHỈNH HỆ THỐNG")
                 Text("Cài đặt")
-                    .font(.system(size: 27, weight: .bold, design: .rounded))
+                    .font(.system(size: 26, weight: .bold, design: .rounded))
                     .tracking(-0.55)
                     .foregroundStyle(.white)
                 Text("Thông tin thiết bị và trạng thái vận hành")
@@ -234,22 +295,11 @@ struct SettingsView: View {
     private var deviceCard: some View {
         VStack(alignment: .leading, spacing: 14) {
             HStack(alignment: .center, spacing: 13) {
-                ZStack {
-                    RoundedRectangle(cornerRadius: 12, style: .continuous)
-                        .fill(
-                            LinearGradient(
-                                colors: [Color.white.opacity(0.17), Color.white.opacity(0.035)],
-                                startPoint: .topLeading,
-                                endPoint: .bottomTrailing
-                            )
-                        )
-                    RoundedRectangle(cornerRadius: 12, style: .continuous)
-                        .strokeBorder(Color.white.opacity(0.18), lineWidth: 1)
-                    Image(systemName: "iphone.gen3")
-                        .font(.system(size: 24, weight: .ultraLight))
-                        .foregroundStyle(AppTheme.accent)
-                }
-                .frame(width: 52, height: 56)
+                Image(systemName: "iphone.gen3")
+                    .font(.system(size: 26, weight: .light))
+                    .foregroundStyle(AppTheme.accent)
+                    .shadow(color: AppTheme.accent.opacity(0.28), radius: 8, y: 2)
+                    .frame(width: 32, height: 34)
 
                 VStack(alignment: .leading, spacing: 3) {
                     StudioEyebrow(text: "THIẾT BỊ HIỆN TẠI")
@@ -267,6 +317,7 @@ struct SettingsView: View {
                 Image(systemName: "checkmark.seal.fill")
                     .font(.system(size: 16, weight: .semibold))
                     .foregroundStyle(AppTheme.success)
+                    .shadow(color: AppTheme.success.opacity(0.35), radius: 6)
             }
 
             HStack(spacing: 8) {
@@ -276,17 +327,15 @@ struct SettingsView: View {
             }
         }
         .padding(16)
-        .background(
-            LinearGradient(
-                colors: [Color(red: 0.160, green: 0.182, blue: 0.215), AppTheme.consoleBackground],
-                startPoint: .topLeading,
-                endPoint: .bottomTrailing
-            ),
-            in: RoundedRectangle(cornerRadius: 20, style: .continuous)
-        )
-        .overlay { StudioGlassHighlight(cornerRadius: 20, intensity: 0.9) }
-        .overlay { AppCardBorder(cornerRadius: 20) }
-        .shadow(color: .black.opacity(0.32), radius: 22, y: 10)
+        .background {
+            ZStack {
+                DevUIStyle.cardBase
+                DotMatrixBackground(opacity: 0.03)
+            }
+        }
+        .clipShape(RoundedRectangle(cornerRadius: 20, style: .continuous))
+        .overlay { SpecularRimBorder(cornerRadius: 20) }
+        .shadow(color: .black.opacity(0.32), radius: 18, y: 8)
     }
 
     private var footer: some View {
@@ -338,16 +387,9 @@ private struct SettingsGroup<Content: View>: View {
             .padding(.vertical, 8)
             .background {
                 RoundedRectangle(cornerRadius: 20, style: .continuous)
-                    .fill(
-                        LinearGradient(
-                            colors: [AppTheme.elevatedBackground.opacity(0.94), AppTheme.consoleBackground],
-                            startPoint: .topLeading,
-                            endPoint: .bottomTrailing
-                        )
-                    )
+                    .fill(DevUIStyle.cardBase)
             }
-            .overlay { StudioGlassHighlight(cornerRadius: 20, intensity: 0.75) }
-            .overlay { AppCardBorder(cornerRadius: 20) }
+            .overlay { SpecularRimBorder(cornerRadius: 20) }
         }
     }
 }
@@ -371,10 +413,10 @@ private struct SettingsMiniStat: View {
         .frame(maxWidth: .infinity, alignment: .leading)
         .padding(.horizontal, 10)
         .padding(.vertical, 8)
-        .background(AppTheme.elevatedBackground.opacity(0.75), in: RoundedRectangle(cornerRadius: 12, style: .continuous))
+        .background(DevUIStyle.recessedSlot, in: RoundedRectangle(cornerRadius: 10, style: .continuous))
         .overlay {
-            RoundedRectangle(cornerRadius: 12, style: .continuous)
-                .strokeBorder(Color.white.opacity(0.09), lineWidth: 1)
+            RoundedRectangle(cornerRadius: 10, style: .continuous)
+                .strokeBorder(Color.white.opacity(0.07), lineWidth: 0.75)
         }
     }
 }
@@ -434,26 +476,19 @@ private struct SettingsSymbol: View {
     let tint: Color
 
     var body: some View {
-        RoundedRectangle(cornerRadius: 12, style: .continuous)
-            .fill(tint.opacity(0.12))
-            .frame(width: 35, height: 35)
-            .overlay {
-                RoundedRectangle(cornerRadius: 12, style: .continuous)
-                    .strokeBorder(Color.white.opacity(0.09), lineWidth: 1)
-            }
-            .overlay {
-                Image(systemName: symbol)
-                    .font(.system(size: 14, weight: .semibold))
-                    .foregroundStyle(tint)
-            }
+        Image(systemName: symbol)
+            .font(.system(size: 15, weight: .semibold))
+            .foregroundStyle(tint)
+            .shadow(color: tint.opacity(0.25), radius: 5, y: 1)
+            .frame(width: 24, height: 24)
     }
 }
 
 private struct SettingsRowDivider: View {
     var body: some View {
         Rectangle()
-            .fill(AppTheme.hairline)
+            .fill(Color.white.opacity(0.08))
             .frame(height: 0.5)
-            .padding(.leading, 46)
+            .padding(.leading, 35)
     }
 }

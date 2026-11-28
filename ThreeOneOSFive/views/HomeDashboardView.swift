@@ -31,8 +31,8 @@ struct HomeDashboardView: View {
                 .frame(maxWidth: 760)
                 .frame(maxWidth: .infinity)
                 .padding(.horizontal, AppTheme.pageInset)
-                .padding(.top, 10)
-                .padding(.bottom, 28)
+                .padding(.top, 8)
+                .padding(.bottom, 92)
             }
             .scrollDismissesKeyboard(.immediately)
             .appTopSafeAreaBlur()
@@ -57,19 +57,19 @@ struct HomeDashboardView: View {
 
     private var heading: some View {
         HStack(spacing: 12) {
-            AppLogo(size: 42)
+            AppLogo(size: 42, cornerRadius: 12)
 
-            VStack(alignment: .leading, spacing: 3) {
+            VStack(alignment: .leading, spacing: 2) {
                 Text(AppBrand.name)
-                    .font(.system(size: 16, weight: .heavy, design: .rounded))
-                    .tracking(-0.4)
+                    .font(.system(size: 16, weight: .bold, design: .rounded))
+                    .tracking(-0.35)
                     .foregroundStyle(.white)
                     .lineLimit(1)
                     .minimumScaleFactor(0.78)
 
-                Text("TRUNG TÂM ĐIỀU KHIỂN")
-                    .font(.system(size: 9, weight: .bold, design: .rounded))
-                    .tracking(1.55)
+                Text("CONTROL CENTER")
+                    .font(.system(size: 10, weight: .semibold, design: .monospaced))
+                    .tracking(1.8)
                     .foregroundStyle(AppTheme.subduedText)
             }
 
@@ -84,15 +84,27 @@ struct HomeDashboardView: View {
                 }
             } label: {
                 Image(systemName: "gearshape.fill")
-                    .font(.system(size: 15, weight: .semibold))
-                    .foregroundStyle(AppTheme.accent)
-                    .frame(width: 40, height: 40)
-                    .background(AppTheme.consoleBackground, in: RoundedRectangle(cornerRadius: 12, style: .continuous))
+                    .font(.system(size: 15, weight: .medium))
+                    .foregroundStyle(.white.opacity(0.88))
+                    .frame(width: 38, height: 38)
+                    .background(.ultraThinMaterial, in: Circle())
+                    .overlay { Circle().fill(DevUIStyle.cardElevated.opacity(0.62)) }
                     .overlay {
-                        RoundedRectangle(cornerRadius: 12, style: .continuous)
-                            .strokeBorder(Color.white.opacity(0.14), lineWidth: 1)
+                        Circle()
+                            .strokeBorder(
+                                LinearGradient(
+                                    stops: [
+                                        .init(color: Color.white.opacity(0.18), location: 0),
+                                        .init(color: Color.white.opacity(0.03), location: 1)
+                                    ],
+                                    startPoint: .top,
+                                    endPoint: .bottom
+                                ),
+                                lineWidth: 0.75
+                            )
                     }
             }
+            .buttonStyle(TactileButtonStyle(cornerRadius: 19, showRimHighlight: false))
             .accessibilityLabel("Cài đặt và nhật ký")
         }
         .padding(.top, 2)
@@ -100,17 +112,14 @@ struct HomeDashboardView: View {
 
     private var licenseStatusBar: some View {
         Button {
+            DevHaptics.light()
             showKeyDetails = true
         } label: {
             HStack(spacing: 10) {
-                ZStack {
-                    RoundedRectangle(cornerRadius: 12, style: .continuous)
-                        .fill(AppTheme.accent.opacity(0.14))
-                        .frame(width: 32, height: 32)
-                    Image(systemName: "key.fill")
-                        .font(.system(size: 13, weight: .bold))
-                        .foregroundStyle(AppTheme.accent)
-                }
+                Image(systemName: "key.fill")
+                    .font(.system(size: 14, weight: .semibold))
+                    .foregroundStyle(AppTheme.accent)
+                    .shadow(color: AppTheme.accent.opacity(0.28), radius: 6, y: 1)
 
                 Text(keyAuth.currentKey.isEmpty ? "Chưa kích hoạt" : keyAuth.currentKey)
                     .font(.system(size: 11.5, weight: .bold, design: .monospaced))
@@ -120,89 +129,112 @@ struct HomeDashboardView: View {
 
                 Spacer(minLength: 4)
 
-                Text(keyAuth.isPermanent ? "Vĩnh Viễn" : (keyAuth.remainingCountdownText.isEmpty ? "Đang kiểm tra" : keyAuth.remainingCountdownText))
-                    .font(.system(size: 9.5, weight: .bold, design: .rounded))
+                Text(keyAuth.isPermanent ? "VĨNH VIỄN" : (keyAuth.remainingCountdownText.isEmpty ? "ĐANG KIỂM TRA" : keyAuth.remainingCountdownText))
+                    .font(.system(size: 9, weight: .bold, design: .monospaced))
+                    .tracking(0.6)
                     .foregroundStyle(keyAuth.isPermanent ? AppTheme.accentSoft : (keyAuth.secondsRemaining < 3600 ? AppTheme.danger : AppTheme.success))
                     .padding(.horizontal, 8)
                     .padding(.vertical, 4)
-                    .background(Color.white.opacity(0.07), in: Capsule())
+                    .background(DevUIStyle.recessedSlot.opacity(0.85), in: Capsule())
+                    .overlay { Capsule().strokeBorder(Color.white.opacity(0.08), lineWidth: 0.75) }
 
                 HStack(spacing: 3) {
                     Text("Xem")
-                        .font(.system(size: 11, weight: .bold, design: .rounded))
+                        .font(.system(size: 11, weight: .semibold, design: .rounded))
                     Image(systemName: "chevron.right")
-                        .font(.system(size: 10, weight: .semibold))
+                        .font(.system(size: 9.5, weight: .bold))
                 }
-                .foregroundStyle(AppTheme.accent)
+                .foregroundStyle(AppTheme.accentSoft)
             }
-            .padding(.horizontal, 12)
-            .padding(.vertical, 10)
-            .background(AppTheme.consoleBackground, in: RoundedRectangle(cornerRadius: 20, style: .continuous))
-            .overlay { AppCardBorder(cornerRadius: 20) }
+            .padding(.horizontal, 14)
+            .padding(.vertical, 11)
+            .background(
+                LinearGradient(
+                    colors: [
+                        Color(red: 20.0 / 255.0, green: 22.0 / 255.0, blue: 29.0 / 255.0),
+                        Color(red: 12.0 / 255.0, green: 13.0 / 255.0, blue: 17.0 / 255.0)
+                    ],
+                    startPoint: .topLeading,
+                    endPoint: .bottomTrailing
+                ),
+                in: RoundedRectangle(cornerRadius: 16, style: .continuous)
+            )
+            .overlay { SpecularRimBorder(cornerRadius: 16) }
+            .shadow(color: .black.opacity(0.28), radius: 10, y: 4)
         }
-        .buttonStyle(AppPressableStyle())
+        .buttonStyle(TactileButtonStyle(cornerRadius: 16))
     }
 
     private var heroStatusCard: some View {
-        Button(action: onOpenSettings) {
-            ZStack(alignment: .topTrailing) {
-                RoundedRectangle(cornerRadius: 20, style: .continuous)
-                    .fill(
-                        LinearGradient(
-                            colors: [
-                                Color(red: 0.19, green: 0.215, blue: 0.250),
-                                Color(red: 0.11, green: 0.125, blue: 0.148),
-                                Color(red: 0.052, green: 0.060, blue: 0.072)
-                            ],
-                            startPoint: .topLeading,
-                            endPoint: .bottomTrailing
-                        )
-                    )
+        Button {
+            DevHaptics.light()
+            onOpenSettings()
+        } label: {
+            ZStack {
+                DevUIStyle.cardBase
+                DotMatrixBackground()
+                CornerReticles()
 
-                VStack(alignment: .leading, spacing: 10) {
+                VStack(alignment: .leading, spacing: 12) {
                     HStack {
-                        StudioEyebrow(text: "KHÔNG GIAN QUẢN LÝ")
+                        Text("SYSTEM TELEMETRY")
+                            .font(.system(size: 9.5, weight: .bold, design: .monospaced))
+                            .tracking(1.6)
+                            .foregroundStyle(AppTheme.accentSoft)
                         Spacer()
-                        AppStatusPill(title: "SẴN SÀNG", tint: AppTheme.success)
+                        AppStatusPill(title: "SẴN SÀNG", tint: AppTheme.success, usePulseLED: true)
                     }
 
                     Text("Kiểm soát thiết bị & dữ liệu")
                         .font(.system(size: dynamicTypeSize.isAccessibilitySize ? 19 : 21, weight: .bold, design: .rounded))
-                        .tracking(-0.5)
-                        .foregroundStyle(
-                            LinearGradient(
-                                colors: [Color.white, AppTheme.silverGlow, Color.white.opacity(0.85)],
-                                startPoint: .topLeading,
-                                endPoint: .bottomTrailing
-                            )
-                        )
+                        .tracking(-0.45)
+                        .foregroundStyle(.white)
                         .lineLimit(1)
                         .minimumScaleFactor(0.78)
 
-                    HStack(spacing: 6) {
-                        Image(systemName: "iphone.gen3")
-                            .font(.system(size: 11, weight: .semibold))
-                            .foregroundStyle(AppTheme.accentSoft)
-                        Text("\(AppInfo.hardwareDisplayName) • iOS \(AppInfo.osVersion) (\(AppInfo.osBuild))")
-                            .font(.system(size: 11, weight: .medium, design: .monospaced))
-                            .foregroundStyle(AppTheme.subduedText)
-                            .lineLimit(1)
-                            .minimumScaleFactor(0.75)
+                    HStack(spacing: 8) {
+                        HStack(spacing: 6) {
+                            Image(systemName: "iphone.gen3")
+                                .font(.system(size: 11, weight: .semibold))
+                                .foregroundStyle(AppTheme.accentSoft)
+                            Text(AppInfo.hardwareDisplayName)
+                                .foregroundStyle(.white.opacity(0.92))
+                            Text("|")
+                                .foregroundStyle(Color.white.opacity(0.20))
+                            Text("iOS \(AppInfo.osVersion)")
+                                .foregroundStyle(AppTheme.accentSoft)
+                            Text("|")
+                                .foregroundStyle(Color.white.opacity(0.20))
+                            Text(AppInfo.osBuild)
+                                .foregroundStyle(AppTheme.subduedText)
+                        }
+                        .font(.system(size: 11, weight: .semibold, design: .monospaced))
+                        .lineLimit(1)
+                        .minimumScaleFactor(0.75)
+
                         Spacer(minLength: 4)
+
                         Image(systemName: "chevron.right")
                             .font(.system(size: 10, weight: .bold))
-                            .foregroundStyle(AppTheme.accentSoft)
+                            .foregroundStyle(AppTheme.subduedText)
+                    }
+                    .padding(.horizontal, 11)
+                    .padding(.vertical, 8)
+                    .background(DevUIStyle.recessedSlot, in: RoundedRectangle(cornerRadius: 10, style: .continuous))
+                    .overlay {
+                        RoundedRectangle(cornerRadius: 10, style: .continuous)
+                            .strokeBorder(Color.white.opacity(0.06), lineWidth: 0.75)
                     }
                 }
                 .padding(14)
                 .frame(maxWidth: .infinity, alignment: .leading)
             }
-            .frame(minHeight: 112)
+            .frame(minHeight: 118)
             .clipShape(RoundedRectangle(cornerRadius: 20, style: .continuous))
-            .overlay { AppCardBorder(cornerRadius: 20) }
-            .shadow(color: .black.opacity(0.22), radius: 10, y: 5)
+            .overlay { SpecularRimBorder(cornerRadius: 20) }
+            .shadow(color: .black.opacity(0.32), radius: 14, y: 6)
         }
-        .buttonStyle(AppPressableStyle())
+        .buttonStyle(TactileButtonStyle(cornerRadius: 20))
         .accessibilityLabel("Thông tin thiết bị và phiên bản")
     }
 
@@ -276,64 +308,63 @@ struct HomeDashboardView: View {
 
     private var maintenancePanel: some View {
         Button {
+            DevHaptics.light()
             showCleaner = true
         } label: {
-            HStack(spacing: 14) {
-                AppRowIcon(
-                    systemName: "shield.lefthalf.filled",
-                    tint: AppTheme.success,
-                    symbolSize: 20,
-                    frameSize: 48
-                )
+            HStack(spacing: 12) {
+                Capsule()
+                    .fill(AppTheme.success)
+                    .frame(width: 2.5, height: 28)
+                    .shadow(color: AppTheme.success.opacity(0.45), radius: 4)
 
-                VStack(alignment: .leading, spacing: 4) {
+                Image(systemName: "shield.lefthalf.filled")
+                    .font(.system(size: 20, weight: .semibold))
+                    .foregroundStyle(AppTheme.success)
+                    .shadow(color: AppTheme.success.opacity(0.25), radius: 6, y: 1)
+
+                VStack(alignment: .leading, spacing: 3) {
                     Text("Dọn dẹp & bảo trì")
                         .font(.system(size: 14, weight: .bold, design: .rounded))
                         .foregroundStyle(.white)
                     Text("Quét bộ nhớ tạm trong phạm vi an toàn")
-                        .font(.system(size: 10, weight: .medium))
+                        .font(.system(size: 10.5, weight: .medium))
                         .foregroundStyle(AppTheme.subduedText)
-                        .lineLimit(2)
+                        .lineLimit(1)
                 }
 
                 Spacer(minLength: 4)
 
                 Image(systemName: "arrow.up.right")
-                    .font(.system(size: 12, weight: .bold))
-                    .foregroundStyle(AppTheme.accent)
-                    .frame(width: 32, height: 32)
-                    .background(Color.white.opacity(0.07), in: Circle())
+                    .font(.system(size: 11.5, weight: .semibold))
+                    .foregroundStyle(AppTheme.subduedText.opacity(0.8))
             }
-            .padding(13)
+            .padding(.horizontal, 14)
+            .padding(.vertical, 13)
             .background(
-                LinearGradient(
-                    colors: [Color(red: 0.145, green: 0.165, blue: 0.195), AppTheme.consoleBackground],
-                    startPoint: .topLeading,
-                    endPoint: .bottomTrailing
-                ),
+                DevUIStyle.cardBase,
                 in: RoundedRectangle(cornerRadius: 20, style: .continuous)
             )
-            .overlay { StudioGlassHighlight(cornerRadius: 20, intensity: 0.75) }
-            .overlay { AppCardBorder(cornerRadius: 20) }
+            .overlay { SpecularRimBorder(cornerRadius: 20) }
+            .shadow(color: .black.opacity(0.22), radius: 10, y: 4)
         }
-        .buttonStyle(AppPressableStyle())
+        .buttonStyle(TactileButtonStyle(cornerRadius: 20))
     }
 
     private var footer: some View {
         HStack(spacing: 8) {
             Capsule()
-                .fill(AppTheme.accentSoft.opacity(0.45))
-                .frame(width: 20, height: 2)
+                .fill(AppTheme.accentSoft.opacity(0.35))
+                .frame(width: 20, height: 1.5)
             Text("PHUCVN IPA DEV")
-                .font(.system(size: 9, weight: .bold, design: .rounded))
+                .font(.system(size: 9, weight: .bold, design: .monospaced))
                 .tracking(1.6)
-                .foregroundStyle(AppTheme.subduedText.opacity(0.7))
+                .foregroundStyle(AppTheme.subduedText.opacity(0.6))
             Capsule()
-                .fill(AppTheme.accentSoft.opacity(0.45))
-                .frame(width: 20, height: 2)
+                .fill(AppTheme.accentSoft.opacity(0.35))
+                .frame(width: 20, height: 1.5)
         }
         .frame(maxWidth: .infinity)
-        .padding(.top, 2)
+        .padding(.top, 4)
     }
 }
 
@@ -344,66 +375,47 @@ private struct HomeToolCard: View {
     let tint: Color
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 10) {
+        VStack(alignment: .leading, spacing: 14) {
             HStack(alignment: .top) {
-                HomeToolSymbol(symbolName: symbol, tint: tint)
+                Image(systemName: symbol)
+                    .font(.system(size: 22, weight: .medium))
+                    .foregroundStyle(tint)
+                    .shadow(color: tint.opacity(0.25), radius: 7, y: 2)
                 Spacer(minLength: 0)
                 Image(systemName: "arrow.up.right")
-                    .font(.system(size: 10, weight: .bold))
-                    .foregroundStyle(AppTheme.subduedText)
-                    .frame(width: 26, height: 26)
-                    .background(Color.white.opacity(0.055), in: Circle())
+                    .font(.system(size: 11, weight: .semibold))
+                    .foregroundStyle(AppTheme.subduedText.opacity(0.72))
             }
+
+            Spacer(minLength: 0)
 
             VStack(alignment: .leading, spacing: 3) {
                 Text(title)
-                    .font(.system(size: 13, weight: .bold, design: .rounded))
+                    .font(.system(size: 13.5, weight: .bold, design: .rounded))
                     .tracking(-0.15)
                     .foregroundStyle(.white)
                     .lineLimit(1)
                     .minimumScaleFactor(0.82)
                 Text(detail)
-                    .font(.system(size: 9.5, weight: .medium))
+                    .font(.system(size: 10, weight: .medium))
                     .foregroundStyle(AppTheme.subduedText)
                     .lineLimit(2)
                     .fixedSize(horizontal: false, vertical: true)
             }
         }
-        .frame(maxWidth: .infinity, minHeight: 96, alignment: .leading)
-        .padding(12)
-        .background(
-            AppTheme.consoleBackground,
-            in: RoundedRectangle(cornerRadius: 20, style: .continuous)
-        )
-        .overlay { AppCardBorder(cornerRadius: 20) }
-        .shadow(color: .black.opacity(0.18), radius: 8, y: 4)
-    }
-}
-
-private struct HomeToolSymbol: View {
-    let symbolName: String
-    let tint: Color
-
-    var body: some View {
-        ZStack {
-            RoundedRectangle(cornerRadius: 12, style: .continuous)
-                .fill(
-                    LinearGradient(
-                        colors: [tint.opacity(0.22), tint.opacity(0.07)],
-                        startPoint: .topLeading,
-                        endPoint: .bottomTrailing
-                    )
-                )
-            RoundedRectangle(cornerRadius: 12, style: .continuous)
-                .strokeBorder(Color.white.opacity(0.18), lineWidth: 1)
-            RoundedRectangle(cornerRadius: 12, style: .continuous)
-                .fill(LinearGradient(colors: [Color.white.opacity(0.12), .clear], startPoint: .topLeading, endPoint: .bottomTrailing))
-            Image(systemName: symbolName)
-                .font(.system(size: 17, weight: .semibold))
-                .foregroundStyle(tint)
-                .shadow(color: tint.opacity(0.34), radius: 7, y: 1)
+        .frame(maxWidth: .infinity, minHeight: 112, alignment: .leading)
+        .padding(14)
+        .background(alignment: .bottomTrailing) {
+            Image(systemName: symbol)
+                .font(.system(size: 56, weight: .bold))
+                .foregroundStyle(Color.white.opacity(0.035))
+                .rotationEffect(.degrees(-12))
+                .offset(x: 10, y: 12)
+                .allowsHitTesting(false)
         }
-        .frame(width: 38, height: 38)
-        .shadow(color: tint.opacity(0.10), radius: 9, y: 3)
+        .background(DevUIStyle.cardBase)
+        .clipShape(RoundedRectangle(cornerRadius: 20, style: .continuous))
+        .overlay { SpecularRimBorder(cornerRadius: 20) }
+        .shadow(color: .black.opacity(0.24), radius: 10, y: 4)
     }
 }

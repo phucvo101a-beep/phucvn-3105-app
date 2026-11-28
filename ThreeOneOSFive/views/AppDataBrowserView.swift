@@ -189,7 +189,7 @@ struct AppDataBrowserView: View {
                 }
 
                 Color.clear
-                    .frame(height: 16)
+                    .frame(height: 68)
             }
             .padding(.horizontal, AppTheme.pageInset)
             .padding(.bottom, 24)
@@ -202,72 +202,50 @@ struct AppDataBrowserView: View {
     }
 
     private var browserHero: some View {
-        ZStack(alignment: .topTrailing) {
-            RoundedRectangle(cornerRadius: 20, style: .continuous)
-                .fill(
-                    LinearGradient(
-                        colors: [
-                            Color(red: 0.185, green: 0.210, blue: 0.245),
-                            Color(red: 0.105, green: 0.120, blue: 0.145),
-                            AppTheme.consoleBackground
-                        ],
-                        startPoint: .topLeading,
-                        endPoint: .bottomTrailing
-                    )
-                )
+        ZStack {
+            DevUIStyle.cardBase
+            DotMatrixBackground()
+            CornerReticles()
 
             VStack(alignment: .leading, spacing: 14) {
                 HStack {
                     StudioEyebrow(text: "PHUCVN  /  DATA STUDIO")
                     Spacer(minLength: 8)
-                    HStack(spacing: 6) {
-                        Circle()
-                            .fill(AppTheme.success)
-                            .frame(width: 6, height: 6)
-                        Text(apps.isEmpty ? "READY" : "LIVE")
-                            .font(.system(size: 9, weight: .heavy, design: .monospaced))
-                            .tracking(1.1)
-                            .foregroundStyle(AppTheme.success)
-                    }
-                    .padding(.horizontal, 9)
-                    .padding(.vertical, 6)
-                    .background(AppTheme.success.opacity(0.10), in: Capsule())
-                    .overlay { Capsule().strokeBorder(AppTheme.success.opacity(0.25), lineWidth: 1) }
+                    AppStatusPill(title: apps.isEmpty ? "READY" : "LIVE", tint: AppTheme.success, usePulseLED: true)
                 }
 
                 HStack(alignment: .bottom, spacing: 12) {
-                    VStack(alignment: .leading, spacing: 6) {
+                    VStack(alignment: .leading, spacing: 5) {
                         Text("Quản lý tệp")
-                            .font(.system(size: 27, weight: .bold, design: .rounded))
-                            .tracking(-0.75)
+                            .font(.system(size: 26, weight: .bold, design: .rounded))
+                            .tracking(-0.7)
                             .foregroundStyle(.white)
                         Text("Truy cập tệp lưu trữ, bản vá và dữ liệu thiết bị.")
                             .font(.system(size: 11, weight: .medium))
-                            .foregroundStyle(Color.white.opacity(0.70))
+                            .foregroundStyle(Color.white.opacity(0.68))
                             .lineLimit(2)
                     }
                     Spacer(minLength: 0)
                     VStack(alignment: .trailing, spacing: 2) {
                         Text(apps.isEmpty ? "120" : "\(apps.count)")
-                            .font(.system(size: 26, weight: .black, design: .monospaced))
+                            .font(.system(size: 28, weight: .bold, design: .monospaced))
                             .monospacedDigit()
                             .tracking(-1)
-                            .foregroundStyle(AppTheme.accent)
+                            .foregroundStyle(.white)
+                            .shadow(color: AppTheme.silverGlow.opacity(0.32), radius: 10)
                         Text(apps.isEmpty ? "FPS • TỆP" : "ỨNG DỤNG")
-                            .font(.system(size: 8, weight: .bold, design: .monospaced))
+                            .font(.system(size: 8.5, weight: .bold, design: .monospaced))
                             .tracking(1.0)
-                            .foregroundStyle(AppTheme.subduedText)
+                            .foregroundStyle(AppTheme.accentSoft)
                     }
                 }
             }
             .padding(16)
         }
-        .frame(minHeight: 116)
+        .frame(minHeight: 118)
         .clipShape(RoundedRectangle(cornerRadius: 20, style: .continuous))
-        .overlay { StudioGlassHighlight(cornerRadius: 20, intensity: 1.0) }
-        .overlay { AppCardBorder(cornerRadius: 20) }
-        .shadow(color: AppTheme.silverGlow.opacity(0.12), radius: 20, y: 8)
-        .shadow(color: .black.opacity(0.24), radius: 12, y: 7)
+        .overlay { SpecularRimBorder(cornerRadius: 20) }
+        .shadow(color: .black.opacity(0.30), radius: 14, y: 6)
         .compositingGroup()
     }
 
@@ -304,33 +282,24 @@ struct AppDataBrowserView: View {
         }
         .padding(.leading, 15)
         .padding(.trailing, 7)
-        .frame(height: 51)
+        .frame(height: 48)
         .background {
-            RoundedRectangle(cornerRadius: 17, style: .continuous)
-                .fill(AppTheme.elevatedBackground.opacity(0.92))
-                .overlay {
-                    RoundedRectangle(cornerRadius: 17, style: .continuous)
-                        .fill(
-                            LinearGradient(
-                                colors: [Color.white.opacity(0.065), .clear, Color.black.opacity(0.08)],
-                                startPoint: .topLeading,
-                                endPoint: .bottomTrailing
-                            )
-                        )
-                }
+            RoundedRectangle(cornerRadius: 14, style: .continuous)
+                .fill(DevUIStyle.recessedSlot)
         }
-        .overlay { StudioGlassHighlight(cornerRadius: 17, intensity: 0.65) }
         .overlay {
-            RoundedRectangle(cornerRadius: 17, style: .continuous)
-                .strokeBorder(
-                    isAppSearchFocused ? AppTheme.accentSoft.opacity(0.78) : Color.white.opacity(0.13),
-                    lineWidth: isAppSearchFocused ? 1.3 : 1
-                )
+            SpecularRimBorder(
+                cornerRadius: 14,
+                color: isAppSearchFocused ? AppTheme.accentSoft : .white,
+                topOpacity: isAppSearchFocused ? 0.50 : 0.14,
+                midOpacity: isAppSearchFocused ? 0.18 : 0.04,
+                bottomOpacity: 0.02
+            )
         }
         .shadow(
-            color: isAppSearchFocused ? AppTheme.silverGlow.opacity(0.17) : .black.opacity(0.22),
-            radius: isAppSearchFocused ? 17 : 12,
-            y: 5
+            color: isAppSearchFocused ? AppTheme.silverGlow.opacity(0.14) : .black.opacity(0.22),
+            radius: isAppSearchFocused ? 14 : 10,
+            y: 4
         )
         .animation(interfaceAnimation, value: appSearchText.isEmpty)
         .animation(interfaceAnimation, value: isAppSearchFocused)
@@ -346,32 +315,40 @@ struct AppDataBrowserView: View {
 
         return Button {
             if let patchesURL {
+                DevHaptics.light()
                 pushDestination(destination)
             }
         } label: {
             HStack(spacing: 13) {
-                AppRowIcon(systemName: "archivebox.fill", tint: AppTheme.accentSoft, symbolSize: 19, frameSize: 45)
+                AppRowIcon(systemName: "archivebox.fill", tint: AppTheme.accentSoft, symbolSize: 20, frameSize: 24)
                 VStack(alignment: .leading, spacing: 4) {
-                    Text("Kho bản vá (.3105)")
-                        .font(.system(size: 13, weight: .bold, design: .rounded))
-                        .foregroundStyle(.white)
+                    HStack(spacing: 6) {
+                        Text("Kho bản vá")
+                            .font(.system(size: 13.5, weight: .bold, design: .rounded))
+                            .foregroundStyle(.white)
+                        Text(".3105")
+                            .font(.system(size: 10, weight: .bold, design: .monospaced))
+                            .foregroundStyle(AppTheme.accentSoft)
+                            .padding(.horizontal, 6)
+                            .padding(.vertical, 2)
+                            .background(DevUIStyle.recessedSlot, in: Capsule())
+                            .overlay { Capsule().strokeBorder(Color.white.opacity(0.08), lineWidth: 0.75) }
+                    }
                     Text("Quản lý các gói bản vá đã trích xuất hoặc lưu trữ")
-                        .font(.system(size: 10, weight: .medium))
+                        .font(.system(size: 10.5, weight: .medium))
                         .foregroundStyle(AppTheme.subduedText)
                 }
                 Spacer()
                 Image(systemName: "arrow.up.right")
-                    .font(.system(size: 11, weight: .bold))
-                    .foregroundStyle(AppTheme.accentSoft)
-                    .frame(width: 31, height: 31)
-                    .background(AppTheme.accentSoft.opacity(0.10), in: Circle())
+                    .font(.system(size: 11.5, weight: .semibold))
+                    .foregroundStyle(AppTheme.subduedText.opacity(0.75))
             }
             .padding(14)
             .frame(maxWidth: .infinity, alignment: .leading)
             .background(cardSurface(tint: AppTheme.accentSoft))
             .contentShape(RoundedRectangle(cornerRadius: 20, style: .continuous))
         }
-        .buttonStyle(AppPressableStyle())
+        .buttonStyle(TactileButtonStyle(cornerRadius: 20))
         .contextMenu {
             openInNewTabButton(destination)
         }
@@ -387,74 +364,78 @@ struct AppDataBrowserView: View {
         )
 
         return Button {
+            DevHaptics.light()
             pushDestination(destination)
         } label: {
             HStack(spacing: 13) {
-                AppRowIcon(systemName: "internaldrive.fill", tint: AppTheme.silverGlow, symbolSize: 19, frameSize: 44)
+                AppRowIcon(systemName: "internaldrive.fill", tint: AppTheme.silverGlow, symbolSize: 20, frameSize: 24)
                 VStack(alignment: .leading, spacing: 4) {
                     HStack(spacing: 6) {
                         Text("Tệp thiết bị")
-                            .font(.system(size: 13, weight: .bold, design: .rounded))
+                            .font(.system(size: 13.5, weight: .bold, design: .rounded))
                             .foregroundStyle(.white)
                         Text("/var/mobile")
-                            .font(.system(size: 10.5, weight: .semibold, design: .monospaced))
-                            .foregroundStyle(AppTheme.accentSoft)
+                            .font(.system(size: 10, weight: .bold, design: .monospaced))
+                            .foregroundStyle(AppTheme.silverGlow)
+                            .padding(.horizontal, 6)
+                            .padding(.vertical, 2)
+                            .background(DevUIStyle.recessedSlot, in: Capsule())
+                            .overlay { Capsule().strokeBorder(Color.white.opacity(0.08), lineWidth: 0.75) }
                             .lineLimit(1)
                     }
                     Text("Duyệt tệp người dùng và thư mục trên iPhone")
-                        .font(.system(size: 10, weight: .medium))
+                        .font(.system(size: 10.5, weight: .medium))
                         .foregroundStyle(AppTheme.subduedText)
                 }
                 Spacer()
                 Image(systemName: "arrow.up.right")
-                    .font(.system(size: 11, weight: .bold))
-                    .foregroundStyle(AppTheme.silverGlow)
-                    .frame(width: 31, height: 31)
-                    .background(AppTheme.silverGlow.opacity(0.10), in: Circle())
+                    .font(.system(size: 11.5, weight: .semibold))
+                    .foregroundStyle(AppTheme.subduedText.opacity(0.75))
             }
             .padding(14)
             .frame(maxWidth: .infinity, alignment: .leading)
             .background(cardSurface(tint: AppTheme.subduedText))
             .contentShape(RoundedRectangle(cornerRadius: 20, style: .continuous))
         }
-        .buttonStyle(AppPressableStyle())
+        .buttonStyle(TactileButtonStyle(cornerRadius: 20))
         .contextMenu {
             openInNewTabButton(destination)
         }
     }
 
     private var appDataScannerSection: some View {
-        VStack(alignment: .leading, spacing: 10) {
+        VStack(alignment: .leading, spacing: 11) {
             HStack(spacing: 12) {
-                AppRowIcon(systemName: "square.stack.3d.up.fill", tint: AppTheme.accentSoft, symbolSize: 17, frameSize: 42)
+                AppRowIcon(systemName: "square.stack.3d.up.fill", tint: AppTheme.accentSoft, symbolSize: 19, frameSize: 24)
                 VStack(alignment: .leading, spacing: 3) {
                     Text("Kho dữ liệu ứng dụng")
-                        .font(.system(size: 13, weight: .bold, design: .rounded))
+                        .font(.system(size: 13.5, weight: .bold, design: .rounded))
                         .foregroundStyle(.white)
                     Text(apps.isEmpty ? "Chỉ quét khi bạn cần mở thư mục Data riêng của app khác" : "Đã phát hiện \(apps.count) vùng dữ liệu ứng dụng")
-                        .font(.system(size: 10, weight: .medium))
+                        .font(.system(size: 10.5, weight: .medium))
                         .foregroundStyle(AppTheme.subduedText)
                 }
                 Spacer()
                 Button {
+                    DevHaptics.light()
                     reload()
                 } label: {
                     if isLoading || isResolving {
                         ProgressView().controlSize(.mini).tint(AppTheme.accent)
                     } else {
                         Image(systemName: "arrow.clockwise")
-                            .font(.system(size: 13, weight: .bold))
-                            .foregroundStyle(AppTheme.accent)
-                            .frame(width: 32, height: 32)
-                            .background(AppTheme.accent.opacity(0.14), in: Circle())
+                            .font(.system(size: 13, weight: .semibold))
+                            .foregroundStyle(AppTheme.accentSoft)
+                            .frame(width: 28, height: 28)
                     }
                 }
-                .buttonStyle(AppPressableStyle())
+                .buttonStyle(TactileButtonStyle(cornerRadius: 14, showRimHighlight: false))
                 .disabled(isLoading || isResolving)
                 .accessibilityLabel("Quét lại dữ liệu")
             }
 
             Button {
+                DevHaptics.light()
                 reload()
             } label: {
                 HStack(spacing: 7) {
@@ -472,9 +453,9 @@ struct AppDataBrowserView: View {
                 .foregroundStyle(.black)
                 .frame(maxWidth: .infinity)
                 .frame(height: 38)
-                .background(AppTheme.accent, in: RoundedRectangle(cornerRadius: 12, style: .continuous))
+                .background(Color.white, in: RoundedRectangle(cornerRadius: 11, style: .continuous))
             }
-            .buttonStyle(AppPressableStyle())
+            .buttonStyle(TactileButtonStyle(cornerRadius: 11, showRimHighlight: false))
             .disabled(isLoading || isResolving)
         }
         .padding(14)
@@ -492,31 +473,30 @@ struct AppDataBrowserView: View {
         )
 
         return Button {
+            DevHaptics.light()
             pushDestination(destination)
         } label: {
             HStack(spacing: 13) {
-                AppRowIcon(systemName: "shippingbox.fill", tint: AppTheme.success, symbolSize: 19, frameSize: 45)
+                AppRowIcon(systemName: "shippingbox.fill", tint: AppTheme.success, symbolSize: 20, frameSize: 24)
                 VStack(alignment: .leading, spacing: 4) {
                     Text(AppBrand.name)
-                        .font(.system(size: 13, weight: .bold, design: .rounded))
+                        .font(.system(size: 13.5, weight: .bold, design: .rounded))
                         .foregroundStyle(.white)
                     Text(language.text("browser.workspace_subtitle"))
-                        .font(.system(size: 10, weight: .medium))
+                        .font(.system(size: 10.5, weight: .medium))
                         .foregroundStyle(AppTheme.subduedText)
                 }
                 Spacer()
                 Image(systemName: "arrow.up.right")
-                    .font(.system(size: 11, weight: .bold))
-                    .foregroundStyle(AppTheme.success)
-                    .frame(width: 31, height: 31)
-                    .background(AppTheme.success.opacity(0.10), in: Circle())
+                    .font(.system(size: 11.5, weight: .semibold))
+                    .foregroundStyle(AppTheme.success.opacity(0.85))
             }
             .padding(14)
             .frame(maxWidth: .infinity, alignment: .leading)
             .background(cardSurface(tint: AppTheme.success))
             .contentShape(RoundedRectangle(cornerRadius: 20, style: .continuous))
         }
-        .buttonStyle(AppPressableStyle())
+        .buttonStyle(TactileButtonStyle(cornerRadius: 20))
         .contextMenu {
             openInNewTabButton(destination)
         }
@@ -617,27 +597,21 @@ struct AppDataBrowserView: View {
             Spacer(minLength: 4)
 
             Image(systemName: isAvailable ? "chevron.right" : "lock.fill")
-                .font(.system(size: 11, weight: .bold))
-                .foregroundStyle(isAvailable ? AppTheme.accent : AppTheme.subduedText)
-                .frame(width: 31, height: 31)
-                .background(Color.white.opacity(0.065), in: Circle())
-                .overlay { Circle().strokeBorder(Color.white.opacity(0.10), lineWidth: 1) }
+                .font(.system(size: 11, weight: .semibold))
+                .foregroundStyle(isAvailable ? AppTheme.subduedText : AppTheme.subduedText.opacity(0.6))
         }
-        .padding(.horizontal, 13)
+        .padding(.horizontal, 14)
         .padding(.vertical, 12)
-        .frame(minHeight: 76)
+        .frame(minHeight: 74)
         .background(cardSurface(tint: isAvailable ? AppTheme.accentSoft : AppTheme.subduedText))
         .opacity(isAvailable ? 1 : 0.58)
     }
 
     private func cardSurface(tint: Color) -> some View {
         RoundedRectangle(cornerRadius: 20, style: .continuous)
-            .fill(AppTheme.consoleBackground)
-            .overlay {
-                RoundedRectangle(cornerRadius: 20, style: .continuous)
-                    .strokeBorder(Color.white.opacity(0.12), lineWidth: 1)
-            }
-            .shadow(color: .black.opacity(0.18), radius: 8, y: 4)
+            .fill(DevUIStyle.cardBase)
+            .overlay { SpecularRimBorder(cornerRadius: 20) }
+            .shadow(color: .black.opacity(0.22), radius: 10, y: 4)
     }
 
     private var appSearchEmptyState: some View {

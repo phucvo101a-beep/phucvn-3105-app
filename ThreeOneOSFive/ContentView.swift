@@ -64,7 +64,7 @@ struct ContentView: View {
     }
 
     private var compactLayout: some View {
-        ZStack {
+        ZStack(alignment: .bottom) {
             AppPageBackground()
             ForEach(featureVisibility.visibleSections) { section in
                 sectionContent(section)
@@ -74,12 +74,12 @@ struct ContentView: View {
                     .accessibilityHidden(selectedVisibleSection != section)
                     .zIndex(selectedVisibleSection == section ? 1 : 0)
             }
-        }
-        .safeAreaInset(edge: .bottom, spacing: 0) {
+
             StudioTabBar(
                 sections: featureVisibility.visibleSections,
                 selectedTab: tabSelection
             )
+            .zIndex(10)
         }
         .patchStorePresentation(patchStore)
     }
@@ -201,78 +201,108 @@ private struct StudioTabBar: View {
     @Binding var selectedTab: Int
 
     var body: some View {
-        HStack(spacing: 6) {
+        HStack(spacing: 4) {
             ForEach(sections) { section in
                 let isSelected = selectedTab == section.rawValue
                 Button {
                     guard !isSelected else { return }
+                    DevHaptics.light()
                     if reduceMotion {
                         selectedTab = section.rawValue
                     } else {
-                        withAnimation(.spring(response: 0.34, dampingFraction: 0.82)) {
+                        withAnimation(.spring(response: 0.28, dampingFraction: 0.76)) {
                             selectedTab = section.rawValue
                         }
                     }
                 } label: {
                     VStack(spacing: 3) {
                         Image(systemName: section.systemImage)
-                            .font(.system(size: 16, weight: isSelected ? .bold : .medium))
-                            .symbolRenderingMode(.hierarchical)
-                            .scaleEffect(isSelected ? 1.03 : 1)
+                            .font(.system(size: 16, weight: isSelected ? .semibold : .medium))
+                            .scaleEffect(isSelected ? 1.04 : 1.0)
                         Text(language.text(section.titleKey))
-                            .font(.system(size: 9, weight: isSelected ? .bold : .medium, design: .rounded))
+                            .font(.system(size: 9.5, weight: isSelected ? .bold : .medium, design: .rounded))
                             .lineLimit(1)
                             .minimumScaleFactor(0.8)
                     }
-                    .foregroundStyle(isSelected ? AppTheme.pageBackground : AppTheme.subduedText)
+                    .foregroundStyle(isSelected ? Color.white : Color.white.opacity(0.42))
                     .frame(maxWidth: .infinity)
-                    .frame(height: 46)
+                    .frame(height: 50)
+                    .overlay(alignment: .top) {
+                        if isSelected {
+                            Capsule()
+                                .fill(Color.white.opacity(0.92))
+                                .frame(width: 18, height: 2)
+                                .shadow(color: Color.white.opacity(0.55), radius: 4, y: 1)
+                                .padding(.top, 2)
+                                .matchedGeometryEffect(id: "DOCK_TOP_BAR", in: selectionNamespace)
+                        }
+                    }
                     .background {
                         if isSelected {
                             Capsule()
-                                .fill(
-                                    LinearGradient(
-                                        colors: [AppTheme.accent.opacity(0.84), AppTheme.accentDeep.opacity(0.88)],
-                                        startPoint: .topLeading,
-                                        endPoint: .bottomTrailing
-                                    )
-                                )
+                                .fill(Color.white.opacity(0.10))
                                 .overlay {
                                     Capsule()
-                                        .strokeBorder(AppTheme.silverGlow.opacity(0.40), lineWidth: 0.8)
+                                        .strokeBorder(
+                                            LinearGradient(
+                                                stops: [
+                                                    .init(color: Color.white.opacity(0.22), location: 0),
+                                                    .init(color: Color.white.opacity(0.03), location: 1)
+                                                ],
+                                                startPoint: .top,
+                                                endPoint: .bottom
+                                            ),
+                                            lineWidth: 0.75
+                                        )
                                 }
-                                .padding(.horizontal, 2)
+                                .matchedGeometryEffect(id: "DOCK_GLASS_PILL", in: selectionNamespace)
                         }
                     }
                     .contentShape(Capsule())
                 }
-                .buttonStyle(AppPressableStyle())
+                .buttonStyle(TactileButtonStyle(cornerRadius: 25, pressedScale: 0.96, showRimHighlight: false))
                 .accessibilityLabel(language.text(section.titleKey))
                 .accessibilityAddTraits(isSelected ? .isSelected : [])
             }
         }
-        .padding(.horizontal, 6)
-        .padding(.vertical, 6)
+        .padding(.horizontal, 4)
+        .padding(.vertical, 4)
         .frame(height: 58)
         .background {
             Capsule()
-                .fill(AppTheme.consoleBackground.opacity(0.96))
+                .fill(.ultraThinMaterial)
                 .overlay {
                     Capsule()
-                        .strokeBorder(Color.white.opacity(0.12), lineWidth: 1)
+                        .fill(DevUIStyle.dockTint.opacity(0.75))
                 }
-                .shadow(color: .black.opacity(0.35), radius: 10, y: 5)
+                .overlay {
+                    Capsule()
+                        .strokeBorder(
+                            LinearGradient(
+                                stops: [
+                                    .init(color: Color.white.opacity(0.20), location: 0.0),
+                                    .init(color: Color.white.opacity(0.06), location: 0.45),
+                                    .init(color: Color.white.opacity(0.02), location: 1.0)
+                                ],
+                                startPoint: .top,
+                                endPoint: .bottom
+                            ),
+                            lineWidth: 0.75
+                        )
+                }
+                .shadow(color: .black.opacity(0.55), radius: 18, y: 10)
         }
-        .padding(.horizontal, AppTheme.pageInset)
-        .padding(.top, 6)
-        .padding(.bottom, 4)
+        .padding(.horizontal, 24)
+        .padding(.top, 8)
+        .padding(.bottom, 6)
         .background {
             LinearGradient(
-                colors: [AppTheme.pageBackground.opacity(0), AppTheme.pageBackground.opacity(0.97)],
+                colors: [DevUIStyle.canvas.opacity(0), DevUIStyle.canvas.opacity(0.88)],
                 startPoint: .top,
                 endPoint: .bottom
             )
             .ignoresSafeArea(edges: .bottom)
+            .allowsHitTesting(false)
         }
     }
 }

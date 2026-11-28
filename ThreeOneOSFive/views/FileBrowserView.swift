@@ -109,6 +109,15 @@ struct FileBrowserView: View {
                         .foregroundStyle(AppTheme.subduedText)
                         .textCase(nil)
                 }
+
+                if filesTabSession != nil {
+                    Section {
+                        Color.clear
+                            .frame(height: 84)
+                            .listRowBackground(Color.clear)
+                            .listRowSeparator(.hidden)
+                    }
+                }
             }
             .listStyle(.insetGrouped)
             .scrollContentBackground(.hidden)
@@ -136,7 +145,8 @@ struct FileBrowserView: View {
         .background { AppPageBackground() }
         .navigationTitle(currentPath == containerPath ? title : (currentPath as NSString).lastPathComponent)
         .navigationBarTitleDisplayMode(.inline)
-        .toolbarBackground(AppTheme.pageBackground.opacity(0.94), for: .navigationBar)
+        .toolbarBackground(AppTheme.pageBackground.opacity(0.92), for: .navigationBar)
+        .toolbarBackground(.visible, for: .navigationBar)
         .navigationDestination(for: FileBrowserDestination.self) { destination in
             FileBrowserView(
                 containerPath: destination.containerPath,

@@ -24,6 +24,7 @@ struct PatchProjectsView: View {
     @StateObject private var proxyManager = ProxyManager.shared
     @ObservedObject private var keyAuth = KeyAuthManager.shared
     @State private var selectedModCategory: ProxyModCategory = .aim
+    @Namespace private var modCategoryNamespace
     @State private var showProxyManager = false
     @State private var proxyModRefreshID = UUID()
     @State private var wallpaperPackages: [WallpaperStagedPackage] = []
@@ -101,56 +102,45 @@ struct PatchProjectsView: View {
                         HStack(spacing: 8) {
                             StudioEyebrow(text: "PROXY • \(selectedModCategory.title)")
                             Spacer(minLength: 4)
-                            HStack(spacing: 5) {
-                                Circle()
-                                    .fill(hasMaintenance ? Color.orange : AppTheme.success)
-                                    .frame(width: 6, height: 6)
+                            HStack(spacing: 6) {
+                                PulseLED(color: hasMaintenance ? Color.orange : AppTheme.success, size: 6, isAnimated: !hasMaintenance)
                                 Text(hasMaintenance ? "Có gói bảo trì" : "Tất cả ổn định")
                                     .font(.system(size: 10, weight: .bold, design: .rounded))
                                     .foregroundStyle(hasMaintenance ? Color.orange : AppTheme.success)
                             }
                             .padding(.horizontal, 9)
-                            .padding(.vertical, 4)
-                            .background(
-                                (hasMaintenance ? Color.orange : AppTheme.success).opacity(0.12),
-                                in: Capsule()
-                            )
+                            .padding(.vertical, 5)
+                            .background(.ultraThinMaterial, in: Capsule())
+                            .overlay { Capsule().fill((hasMaintenance ? Color.orange : AppTheme.success).opacity(0.08)) }
+                            .overlay { Capsule().strokeBorder((hasMaintenance ? Color.orange : AppTheme.success).opacity(0.28), lineWidth: 0.75) }
                         }
                         .padding(.horizontal, 2)
 
                         modCategoryBar
 
-                        Group {
-                            if categoryPresets.isEmpty {
-                                emptyModCategoryCard(for: selectedModCategory)
-                                    .padding(14)
-                            } else {
-                                VStack(spacing: 0) {
-                                    ForEach(Array(categoryPresets.enumerated()), id: \.element.id) { index, mod in
-                                        NavigationLink {
-                                            ProxyModPresetDetailView(mod: mod, onModified: {
-                                                proxyModRefreshID = UUID()
-                                            })
-                                        } label: {
-                                            proxyModRow(mod)
-                                                .padding(.horizontal, 14)
-                                                .padding(.vertical, 12)
-                                        }
-                                        .buttonStyle(AppPressableStyle())
-
-                                        if index < categoryPresets.count - 1 {
-                                            Rectangle()
-                                                .fill(Color.white.opacity(0.08))
-                                                .frame(height: 0.5)
-                                                .padding(.leading, 62)
-                                        }
+                        if categoryPresets.isEmpty {
+                            emptyModCategoryCard(for: selectedModCategory)
+                                .padding(14)
+                                .background(DevUIStyle.cardBase, in: RoundedRectangle(cornerRadius: 20, style: .continuous))
+                                .overlay { SpecularRimBorder(cornerRadius: 20) }
+                        } else {
+                            let gridColumns = [
+                                GridItem(.flexible(), spacing: 10),
+                                GridItem(.flexible(), spacing: 10)
+                            ]
+                            LazyVGrid(columns: gridColumns, spacing: 10) {
+                                ForEach(Array(categoryPresets.enumerated()), id: \.element.id) { index, mod in
+                                    NavigationLink {
+                                        ProxyModPresetDetailView(mod: mod, onModified: {
+                                            proxyModRefreshID = UUID()
+                                        })
+                                    } label: {
+                                        tacticalModuleCard(mod, index: index)
                                     }
+                                    .buttonStyle(TactileButtonStyle(cornerRadius: 20))
                                 }
                             }
                         }
-                        .background(AppTheme.consoleBackground, in: RoundedRectangle(cornerRadius: 20, style: .continuous))
-                        .overlay { AppCardBorder(cornerRadius: 20) }
-                        .clipShape(RoundedRectangle(cornerRadius: 20, style: .continuous))
                     }
                     .id(proxyModRefreshID)
                 }
@@ -158,7 +148,7 @@ struct PatchProjectsView: View {
                 .frame(maxWidth: .infinity)
                 .padding(.horizontal, AppTheme.pageInset)
                 .padding(.top, 10)
-                .padding(.bottom, 28)
+                .padding(.bottom, 92)
             }
             .scrollIndicators(.hidden)
             .scrollDismissesKeyboard(.interactively)
@@ -320,7 +310,7 @@ struct PatchProjectsView: View {
 
     private var projectsHeader: some View {
         HStack(spacing: 12) {
-            AppRowIcon(systemName: "square.stack.3d.up.fill", tint: AppTheme.accent, symbolSize: 19, frameSize: 44)
+            AppRowIcon(systemName: "square.stack.3d.up.fill", tint: AppTheme.accent, symbolSize: 22, frameSize: 28)
             VStack(alignment: .leading, spacing: 3) {
                 StudioEyebrow(text: "THƯ VIỆN CỦA TÔI")
                 Text("Dự án của tôi")
@@ -336,9 +326,9 @@ struct PatchProjectsView: View {
                 .font(.system(size: 12, weight: .bold, design: .monospaced))
                 .foregroundStyle(AppTheme.accent)
                 .padding(.horizontal, 10)
-                .padding(.vertical, 7)
-                .background(Color.white.opacity(0.07), in: Capsule())
-                .overlay { Capsule().strokeBorder(Color.white.opacity(0.12), lineWidth: 1) }
+                .padding(.vertical, 6)
+                .background(DevUIStyle.recessedSlot, in: Capsule())
+                .overlay { Capsule().strokeBorder(Color.white.opacity(0.10), lineWidth: 0.75) }
         }
     }
 
@@ -349,15 +339,15 @@ struct PatchProjectsView: View {
                     itemRow(item)
                         .padding(.vertical, 10)
                     Button(role: .destructive) {
+                        DevHaptics.light()
                         store.delete(item)
                     } label: {
                         Image(systemName: "trash")
-                            .font(.system(size: 12, weight: .semibold))
-                            .foregroundStyle(AppTheme.subduedText.opacity(0.8))
-                            .frame(width: 30, height: 30)
-                            .background(Color.white.opacity(0.05), in: RoundedRectangle(cornerRadius: 10, style: .continuous))
+                            .font(.system(size: 13, weight: .medium))
+                            .foregroundStyle(AppTheme.subduedText.opacity(0.75))
+                            .frame(width: 28, height: 28)
                     }
-                    .buttonStyle(AppPressableStyle())
+                    .buttonStyle(TactileButtonStyle(cornerRadius: 10, showRimHighlight: false))
                     .accessibilityLabel(language.text("common.delete"))
                 }
                 .padding(.horizontal, 14)
@@ -373,12 +363,12 @@ struct PatchProjectsView: View {
                     Rectangle()
                         .fill(Color.white.opacity(0.08))
                         .frame(height: 0.5)
-                        .padding(.leading, 62)
+                        .padding(.leading, 50)
                 }
             }
         }
-        .background(AppTheme.consoleBackground, in: RoundedRectangle(cornerRadius: 20, style: .continuous))
-        .overlay { AppCardBorder(cornerRadius: 20) }
+        .background(DevUIStyle.cardBase, in: RoundedRectangle(cornerRadius: 20, style: .continuous))
+        .overlay { SpecularRimBorder(cornerRadius: 20) }
         .clipShape(RoundedRectangle(cornerRadius: 20, style: .continuous))
     }
 
@@ -401,18 +391,18 @@ struct PatchProjectsView: View {
                         }
                         .contentShape(Rectangle())
                     }
-                    .buttonStyle(AppPressableStyle())
+                    .buttonStyle(TactileButtonStyle(cornerRadius: 12, showRimHighlight: false))
 
                     Button(role: .destructive) {
+                        DevHaptics.light()
                         wallpaperPendingDeletion = package
                     } label: {
                         Image(systemName: "trash")
-                            .font(.system(size: 12, weight: .semibold))
-                            .foregroundStyle(AppTheme.subduedText.opacity(0.8))
-                            .frame(width: 30, height: 30)
-                            .background(Color.white.opacity(0.05), in: RoundedRectangle(cornerRadius: 10, style: .continuous))
+                            .font(.system(size: 13, weight: .medium))
+                            .foregroundStyle(AppTheme.subduedText.opacity(0.75))
+                            .frame(width: 28, height: 28)
                     }
-                    .buttonStyle(AppPressableStyle())
+                    .buttonStyle(TactileButtonStyle(cornerRadius: 10, showRimHighlight: false))
                     .accessibilityLabel(language.text("common.delete"))
                 }
                 .padding(.horizontal, 14)
@@ -429,18 +419,18 @@ struct PatchProjectsView: View {
                     Rectangle()
                         .fill(Color.white.opacity(0.08))
                         .frame(height: 0.5)
-                        .padding(.leading, 62)
+                        .padding(.leading, 50)
                 }
             }
         }
-        .background(AppTheme.consoleBackground, in: RoundedRectangle(cornerRadius: 20, style: .continuous))
-        .overlay { AppCardBorder(cornerRadius: 20) }
+        .background(DevUIStyle.cardBase, in: RoundedRectangle(cornerRadius: 20, style: .continuous))
+        .overlay { SpecularRimBorder(cornerRadius: 20) }
         .clipShape(RoundedRectangle(cornerRadius: 20, style: .continuous))
     }
 
     private func wallpaperRow(_ package: WallpaperStagedPackage) -> some View {
         HStack(spacing: 12) {
-            AppRowIcon(systemName: wallpaperSymbol, frameSize: 36)
+            AppRowIcon(systemName: wallpaperSymbol, frameSize: 24)
             VStack(alignment: .leading, spacing: 3) {
                 Text(package.displayName)
                     .font(.system(size: 14, weight: .semibold, design: .rounded))
@@ -462,95 +452,91 @@ struct PatchProjectsView: View {
     }
 
     private var utilitiesBentoRow: some View {
-        HStack(spacing: 12) {
+        HStack(spacing: 10) {
             Button {
+                DevHaptics.light()
                 showCleaner = true
             } label: {
-                VStack(alignment: .leading, spacing: 10) {
-                    HStack(alignment: .top) {
-                        AppRowIcon(systemName: "sparkles", symbolSize: 17, frameSize: 38)
-                        Spacer(minLength: 4)
-                        Image(systemName: "arrow.up.right")
-                            .font(.system(size: 10, weight: .bold))
-                            .foregroundStyle(AppTheme.subduedText)
-                            .frame(width: 26, height: 26)
-                            .background(Color.white.opacity(0.055), in: Circle())
-                    }
-
-                    VStack(alignment: .leading, spacing: 3) {
+                HStack(spacing: 11) {
+                    AppRowIcon(systemName: "sparkles", tint: AppTheme.accent, symbolSize: 19, frameSize: 24)
+                    VStack(alignment: .leading, spacing: 2) {
                         Text(language.text("tab.cleaner"))
                             .font(.system(size: 13.5, weight: .bold, design: .rounded))
                             .foregroundStyle(.white)
                             .lineLimit(1)
-                        Text("Quét bộ nhớ đệm & tệp tạm")
-                            .font(.system(size: 10, weight: .medium))
+                        Text("Quét tệp tạm")
+                            .font(.system(size: 10.5, weight: .medium))
                             .foregroundStyle(AppTheme.subduedText)
-                            .lineLimit(2)
-                            .fixedSize(horizontal: false, vertical: true)
+                            .lineLimit(1)
                     }
+                    Spacer(minLength: 2)
+                    Image(systemName: "chevron.right")
+                        .font(.system(size: 10, weight: .semibold))
+                        .foregroundStyle(AppTheme.subduedText.opacity(0.65))
                 }
-                .frame(maxWidth: .infinity, minHeight: 106, alignment: .topLeading)
-                .padding(13)
-                .background(AppTheme.consoleBackground, in: RoundedRectangle(cornerRadius: 20, style: .continuous))
-                .overlay { AppCardBorder(cornerRadius: 20) }
+                .padding(.horizontal, 12)
+                .padding(.vertical, 12)
+                .frame(maxWidth: .infinity, minHeight: 68, maxHeight: 72, alignment: .leading)
+                .background(DevUIStyle.cardBase, in: RoundedRectangle(cornerRadius: 18, style: .continuous))
+                .overlay { SpecularRimBorder(cornerRadius: 18) }
             }
-            .buttonStyle(AppPressableStyle())
+            .buttonStyle(TactileButtonStyle(cornerRadius: 18))
 
             Button {
+                DevHaptics.light()
                 showProxyManager = true
             } label: {
-                VStack(alignment: .leading, spacing: 10) {
-                    HStack(alignment: .top) {
-                        AppRowIcon(
-                            systemName: "network",
-                            tint: proxyManager.isEnabled ? AppTheme.success : AppTheme.accent,
-                            symbolSize: 17,
-                            frameSize: 38
-                        )
-                        Spacer(minLength: 4)
-                        if proxyManager.isEnabled {
-                            Text("BẬT")
-                                .font(.system(size: 9, weight: .bold, design: .monospaced))
-                                .foregroundStyle(AppTheme.success)
-                                .padding(.horizontal, 7)
-                                .padding(.vertical, 3)
-                                .background(AppTheme.success.opacity(0.15), in: Capsule())
-                        } else {
-                            Image(systemName: "arrow.up.right")
-                                .font(.system(size: 10, weight: .bold))
-                                .foregroundStyle(AppTheme.subduedText)
-                                .frame(width: 26, height: 26)
-                                .background(Color.white.opacity(0.055), in: Circle())
+                HStack(spacing: 11) {
+                    AppRowIcon(
+                        systemName: "network",
+                        tint: proxyManager.isEnabled ? AppTheme.success : AppTheme.accent,
+                        symbolSize: 19,
+                        frameSize: 24
+                    )
+                    VStack(alignment: .leading, spacing: 2) {
+                        HStack(spacing: 5) {
+                            Text("Cấu hình Proxy")
+                                .font(.system(size: 13.5, weight: .bold, design: .rounded))
+                                .foregroundStyle(.white)
+                                .lineLimit(1)
+                            if proxyManager.isEnabled {
+                                PulseLED(color: AppTheme.success, size: 5)
+                            }
                         }
-                    }
-
-                    VStack(alignment: .leading, spacing: 3) {
-                        Text("Cấu hình Proxy")
-                            .font(.system(size: 13.5, weight: .bold, design: .rounded))
-                            .foregroundStyle(.white)
-                            .lineLimit(1)
-                        Text(proxyManager.isEnabled ? "\(proxyManager.host):\(proxyManager.port)" : "Máy chủ Proxy & giảm ping")
-                            .font(.system(size: 10, weight: .medium, design: proxyManager.isEnabled ? .monospaced : .default))
+                        Text(proxyManager.isEnabled ? "\(proxyManager.host):\(proxyManager.port)" : "Giảm ping & vượt")
+                            .font(.system(size: 10.5, weight: .medium, design: proxyManager.isEnabled ? .monospaced : .default))
                             .foregroundStyle(proxyManager.isEnabled ? AppTheme.success : AppTheme.subduedText)
-                            .lineLimit(2)
-                            .fixedSize(horizontal: false, vertical: true)
+                            .lineLimit(1)
                     }
+                    Spacer(minLength: 2)
+                    Image(systemName: "chevron.right")
+                        .font(.system(size: 10, weight: .semibold))
+                        .foregroundStyle(AppTheme.subduedText.opacity(0.65))
                 }
-                .frame(maxWidth: .infinity, minHeight: 106, alignment: .topLeading)
-                .padding(13)
-                .background(AppTheme.consoleBackground, in: RoundedRectangle(cornerRadius: 20, style: .continuous))
-                .overlay { AppCardBorder(cornerRadius: 20) }
+                .padding(.horizontal, 12)
+                .padding(.vertical, 12)
+                .frame(maxWidth: .infinity, minHeight: 68, maxHeight: 72, alignment: .leading)
+                .background(DevUIStyle.cardBase, in: RoundedRectangle(cornerRadius: 18, style: .continuous))
+                .overlay {
+                    SpecularRimBorder(
+                        cornerRadius: 18,
+                        color: proxyManager.isEnabled ? AppTheme.success : .white,
+                        topOpacity: proxyManager.isEnabled ? 0.30 : 0.18
+                    )
+                }
             }
-            .buttonStyle(AppPressableStyle())
+            .buttonStyle(TactileButtonStyle(cornerRadius: 18))
         }
     }
 
     private var modCategoryBar: some View {
-        HStack(spacing: 6) {
+        HStack(spacing: 3) {
             ForEach(ProxyModCategory.allCases) { category in
                 let isSelected = (selectedModCategory == category)
                 Button {
-                    withAnimation(.easeInOut(duration: 0.18)) {
+                    guard !isSelected else { return }
+                    DevHaptics.light()
+                    withAnimation(.spring(response: 0.28, dampingFraction: 0.78)) {
                         selectedModCategory = category
                     }
                 } label: {
@@ -558,42 +544,41 @@ struct PatchProjectsView: View {
                         Image(systemName: category.iconName)
                             .font(.system(size: 11, weight: .semibold))
                         Text(category.title)
-                            .font(.system(size: 12, weight: .bold))
+                            .font(.system(size: 12, weight: isSelected ? .bold : .semibold, design: .rounded))
                             .lineLimit(1)
                             .minimumScaleFactor(0.8)
                     }
-                    .foregroundStyle(isSelected ? AppTheme.pageBackground : AppTheme.subduedText)
+                    .foregroundStyle(isSelected ? Color.white : Color.white.opacity(0.45))
                     .frame(maxWidth: .infinity)
-                    .padding(.vertical, 10)
-                    .background(
-                        RoundedRectangle(cornerRadius: 12, style: .continuous)
-                            .fill(isSelected ? AppTheme.accent : Color.white.opacity(0.05))
-                    )
-                    .overlay {
-                        RoundedRectangle(cornerRadius: 12, style: .continuous)
-                            .strokeBorder(
-                                isSelected ? Color.white.opacity(0.45) : Color.white.opacity(0.08),
-                                lineWidth: 1
-                            )
+                    .padding(.vertical, 9)
+                    .background {
+                        if isSelected {
+                            RoundedRectangle(cornerRadius: 9.5, style: .continuous)
+                                .fill(DevUIStyle.cardElevated)
+                                .overlay {
+                                    SpecularRimBorder(cornerRadius: 9.5, topOpacity: 0.22, midOpacity: 0.06, bottomOpacity: 0.02)
+                                }
+                                .matchedGeometryEffect(id: "MOD_CATEGORY_PILL", in: modCategoryNamespace)
+                        }
                     }
+                    .contentShape(RoundedRectangle(cornerRadius: 9.5, style: .continuous))
                 }
                 .buttonStyle(.plain)
             }
         }
-        .padding(4)
+        .padding(3)
         .background(
-            RoundedRectangle(cornerRadius: 16, style: .continuous)
-                .fill(AppTheme.elevatedBackground)
+            RoundedRectangle(cornerRadius: 12, style: .continuous)
+                .fill(DevUIStyle.recessedSlot)
         )
         .overlay {
-            RoundedRectangle(cornerRadius: 16, style: .continuous)
-                .strokeBorder(AppTheme.hairline, lineWidth: 1)
+            SpecularRimBorder(cornerRadius: 12, topOpacity: 0.10, midOpacity: 0.04, bottomOpacity: 0.02)
         }
     }
 
     private func emptyModCategoryCard(for category: ProxyModCategory) -> some View {
         HStack(spacing: 12) {
-            AppRowIcon(systemName: category.iconName, tint: AppTheme.subduedText)
+            AppRowIcon(systemName: category.iconName, tint: AppTheme.subduedText, frameSize: 24)
             VStack(alignment: .leading, spacing: 3) {
                 Text("Chưa có file \(category.title)")
                     .font(.body.weight(.semibold))
@@ -605,74 +590,99 @@ struct PatchProjectsView: View {
             }
             Spacer()
             Button {
+                DevHaptics.light()
                 showImporter = true
             } label: {
                 Text("Nhập")
-                    .font(.caption.weight(.bold))
-                    .foregroundStyle(AppTheme.pageBackground)
-                    .padding(.horizontal, 10)
-                    .padding(.vertical, 6)
-                    .background(AppTheme.accent, in: Capsule())
+                    .font(.system(size: 12, weight: .bold))
+                    .foregroundStyle(.black)
+                    .padding(.horizontal, 12)
+                    .padding(.vertical, 7)
+                    .background(Color.white, in: RoundedRectangle(cornerRadius: 10, style: .continuous))
             }
-            .buttonStyle(.plain)
+            .buttonStyle(TactileButtonStyle(cornerRadius: 10, showRimHighlight: false))
         }
         .padding(.vertical, 4)
     }
 
-    private func proxyModRow(_ mod: ProxyModPreset) -> some View {
+    private func tacticalModuleCard(_ mod: ProxyModPreset, index: Int) -> some View {
         let isApplied = DevicePatchService.latestReceipt(projectID: mod.id) != nil
         let runtimeStatus = keyAuth.presetStatus(for: mod.fileName)
         let isMaintenance = runtimeStatus?.isMaintenance ?? false
-        let rowTint: Color = isMaintenance ? Color.orange : (isApplied ? AppTheme.success : AppTheme.accent)
-        return HStack(spacing: 12) {
-            AppRowIcon(
-                systemName: mod.iconName,
-                tint: rowTint,
-                symbolSize: 16,
-                frameSize: 36
-            )
+        let tintColor: Color = isMaintenance ? Color.orange : (isApplied ? AppTheme.success : AppTheme.accent)
+        let codeLabel = String(format: "%02d", index + 1)
+
+        return VStack(alignment: .leading, spacing: 10) {
+            HStack(alignment: .center, spacing: 6) {
+                AppRowIcon(
+                    systemName: mod.iconName,
+                    tint: tintColor,
+                    symbolSize: 18,
+                    frameSize: 22
+                )
+                Text(codeLabel)
+                    .font(.system(size: 9, weight: .bold, design: .monospaced))
+                    .foregroundStyle(Color.white.opacity(0.28))
+
+                Spacer(minLength: 4)
+
+                if isMaintenance {
+                    Text("BẢO TRÌ")
+                        .font(.system(size: 8.5, weight: .bold, design: .rounded))
+                        .foregroundStyle(Color.orange)
+                        .padding(.horizontal, 6)
+                        .padding(.vertical, 2.5)
+                        .background(Color.orange.opacity(0.14), in: Capsule())
+                } else {
+                    PulseLED(color: AppTheme.success, size: 6)
+                }
+            }
+
+            Spacer(minLength: 2)
+
             VStack(alignment: .leading, spacing: 3) {
-                HStack(spacing: 6) {
+                HStack(spacing: 4) {
                     Text(mod.name)
                         .font(.system(size: 14, weight: .bold, design: .rounded))
-                        .foregroundStyle(isMaintenance ? Color.secondary : Color.white)
+                        .foregroundStyle(isMaintenance ? Color.white.opacity(0.65) : Color.white)
                         .lineLimit(1)
-                    Circle()
-                        .fill(isMaintenance ? Color.orange : AppTheme.success)
-                        .frame(width: 6, height: 6)
-                    if isMaintenance {
-                        Text("BẢO TRÌ")
-                            .font(.system(size: 8.5, weight: .bold))
-                            .foregroundStyle(Color.orange)
-                            .padding(.horizontal, 6)
-                            .padding(.vertical, 2)
-                            .background(Color.orange.opacity(0.14), in: Capsule())
-                    }
-                    if isApplied {
-                        Text("ĐÃ ÁP DỤNG")
-                            .font(.system(size: 8.5, weight: .bold))
+                        .minimumScaleFactor(0.80)
+                    if isApplied && !isMaintenance {
+                        Image(systemName: "checkmark.circle.fill")
+                            .font(.system(size: 11, weight: .bold))
                             .foregroundStyle(AppTheme.success)
-                            .padding(.horizontal, 6)
-                            .padding(.vertical, 2)
-                            .background(AppTheme.success.opacity(0.12), in: Capsule())
                     }
                 }
+
                 Text(
                     isMaintenance && !(runtimeStatus?.message.isEmpty ?? true)
                         ? (runtimeStatus?.message ?? mod.subtitle)
                         : mod.subtitle
                 )
                 .font(.system(size: 11, weight: .medium))
-                .foregroundStyle(isMaintenance ? Color.orange.opacity(0.9) : AppTheme.subduedText)
-                .lineLimit(1)
+                .foregroundStyle(isMaintenance ? Color.orange.opacity(0.82) : AppTheme.subduedText)
+                .lineLimit(2)
+                .fixedSize(horizontal: false, vertical: true)
             }
-            Spacer(minLength: 4)
-            Image(systemName: "chevron.right")
-                .font(.system(size: 11, weight: .semibold))
-                .foregroundStyle(AppTheme.subduedText.opacity(0.75))
-                .accessibilityHidden(true)
         }
-        .contentShape(Rectangle())
+        .padding(12)
+        .frame(maxWidth: .infinity, minHeight: 108, alignment: .topLeading)
+        .background(DevUIStyle.cardBase, in: RoundedRectangle(cornerRadius: 20, style: .continuous))
+        .overlay {
+            if isMaintenance {
+                SpecularRimBorder(
+                    cornerRadius: 20,
+                    color: Color.orange,
+                    topOpacity: 0.35,
+                    midOpacity: 0.10,
+                    bottomOpacity: 0.02
+                )
+            } else {
+                SpecularRimBorder(cornerRadius: 20)
+            }
+        }
+        .opacity(isMaintenance ? 0.78 : 1.0)
+        .contentShape(RoundedRectangle(cornerRadius: 20, style: .continuous))
     }
 
     private var wallpaperSymbol: String {
@@ -772,13 +782,13 @@ struct PatchProjectsView: View {
 
     private var emptyState: some View {
         HStack(spacing: 12) {
-            AppRowIcon(systemName: "shippingbox", tint: AppTheme.accentSoft, symbolSize: 18, frameSize: 42)
+            AppRowIcon(systemName: "shippingbox", tint: AppTheme.accentSoft, symbolSize: 20, frameSize: 26)
             VStack(alignment: .leading, spacing: 3) {
                 Text("Chưa có dự án")
-                    .font(.system(size: 14, weight: .bold, design: .rounded))
+                    .font(.system(size: 13.5, weight: .bold, design: .rounded))
                     .foregroundStyle(.white)
                     .lineLimit(1)
-                Text(".3105 / .tendies")
+                Text(".3105 • .tendies")
                     .font(.system(size: 11, weight: .medium, design: .monospaced))
                     .foregroundStyle(AppTheme.subduedText)
                     .lineLimit(1)
@@ -804,20 +814,23 @@ struct PatchProjectsView: View {
                 HStack(spacing: 4) {
                     Image(systemName: "plus")
                         .font(.system(size: 11, weight: .bold))
-                    Text("Tạo / Nhập")
-                        .font(.system(size: 11.5, weight: .bold, design: .rounded))
+                    Text("Nhập")
+                        .font(.system(size: 12, weight: .bold, design: .rounded))
                 }
-                .foregroundStyle(AppTheme.pageBackground)
+                .foregroundStyle(.black)
                 .padding(.horizontal, 12)
                 .padding(.vertical, 8)
-                .background(AppTheme.accent, in: Capsule())
+                .background(Color.white, in: RoundedRectangle(cornerRadius: 10, style: .continuous))
             }
-            .buttonStyle(AppPressableStyle())
+            .buttonStyle(TactileButtonStyle(cornerRadius: 10, showRimHighlight: false))
         }
-        .padding(14)
-        .frame(maxWidth: .infinity, minHeight: 88, alignment: .leading)
-        .background(AppTheme.consoleBackground, in: RoundedRectangle(cornerRadius: 20, style: .continuous))
-        .overlay { AppCardBorder(cornerRadius: 20) }
+        .padding(.horizontal, 14)
+        .frame(maxWidth: .infinity, minHeight: 76, maxHeight: 76, alignment: .leading)
+        .background(DevUIStyle.recessedSlot, in: RoundedRectangle(cornerRadius: 18, style: .continuous))
+        .overlay {
+            RoundedRectangle(cornerRadius: 18, style: .continuous)
+                .strokeBorder(Color.white.opacity(0.16), style: StrokeStyle(lineWidth: 1, dash: [4, 4]))
+        }
     }
 
     private var loadingState: some View {
@@ -829,10 +842,13 @@ struct PatchProjectsView: View {
                 .foregroundStyle(AppTheme.subduedText)
             Spacer()
         }
-        .padding(14)
-        .frame(maxWidth: .infinity, minHeight: 88, alignment: .leading)
-        .background(AppTheme.consoleBackground, in: RoundedRectangle(cornerRadius: 20, style: .continuous))
-        .overlay { AppCardBorder(cornerRadius: 20) }
+        .padding(.horizontal, 14)
+        .frame(maxWidth: .infinity, minHeight: 76, alignment: .leading)
+        .background(DevUIStyle.recessedSlot, in: RoundedRectangle(cornerRadius: 18, style: .continuous))
+        .overlay {
+            RoundedRectangle(cornerRadius: 18, style: .continuous)
+                .strokeBorder(Color.white.opacity(0.14), style: StrokeStyle(lineWidth: 1, dash: [4, 4]))
+        }
     }
 
 
@@ -850,7 +866,7 @@ private struct PatchProjectRow: View {
 
     var body: some View {
         HStack(spacing: 12) {
-            AppRowIcon(systemName: item.isLocked ? "lock.doc.fill" : "shippingbox.fill", symbolSize: 16, frameSize: 36)
+            AppRowIcon(systemName: item.isLocked ? "lock.doc.fill" : "shippingbox.fill", symbolSize: 17, frameSize: 24)
             VStack(alignment: .leading, spacing: 3) {
                 Text(item.project?.name ?? language.text("patch.locked_project"))
                     .font(.body.weight(.semibold))
